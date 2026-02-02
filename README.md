@@ -1,78 +1,375 @@
 # Runs Service
 
-API service for tracking computational runs and their associated costs. Part of the [Shamanic Technologies](https://github.com/shamanic-technologies) platform.
+REST API for tracking service execution runs and their associated costs. Supports hierarchical runs (parent-child), cost aggregation, and multi-tenant isolation via organizations.
 
-## Stack
+## Base URL
 
-- **Runtime**: Node.js 20 / TypeScript
-- **Framework**: Express
-- **Database**: PostgreSQL with [Drizzle ORM](https://orm.drizzle.team/)
-- **Hosting**: Railway (Docker)
-- **Tests**: Vitest + Supertest
-
-## Setup
-
-```bash
-npm install
-cp .env.example .env   # then fill in real values
-npm run db:push         # push schema to database
-npm run dev             # start with hot reload
 ```
-
-### Environment variables
-
-| Variable | Description |
-|---|---|
-| `RUNS_SERVICE_DATABASE_URL` | PostgreSQL connection string |
-| `RUNS_SERVICE_API_KEY` | API key for authenticating requests |
-| `COSTS_SERVICE_URL` | URL of the costs service (default: `https://costs.mcpfactory.org`) |
-| `COSTS_SERVICE_API_KEY` | API key for the costs service |
-| `PORT` | Server port |
+https://your-deployment-url
+```
 
 ## Authentication
 
-All endpoints (except `/health`) require an `X-API-Key` header matching `RUNS_SERVICE_API_KEY`.
+All endpoints (except `/health`) require an API key via the `X-API-Key` header.
 
-## API endpoints
+```bash
+curl -H "X-API-Key: your-secret-api-key" https://your-deployment-url/v1/runs
+```
 
-### Health
+## API Reference
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check (no auth) |
+### Health Check
+
+```
+GET /health
+```
+
+No authentication required.
+
+**Response** `200`
+```json
+{ "status": "ok", "service": "runs-service" }
+```
+
+---
 
 ### Organizations
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/v1/organizations` | Upsert organization by `externalId` |
+#### Create or retrieve an organization
+
+```
+POST /v1/organizations
+```
+
+Upserts by `externalId` — returns the existing organization if it already exists.
+
+**Request body**
+```json
+{ "externalId": "org_clerk_123" }
+```
+
+**Response** `201` (created) or `200` (already exists)
+```json
+{
+  "id": "uuid",
+  "externalId": "org_clerk_123",
+  "createdAt": "2025-01-01T00:00:00.000Z",
+  "updatedAt": "2025-01-01T00:00:00.000Z"
+}
+```
+
+---
 
 ### Users
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/v1/users` | Upsert user by `externalId` + `organizationId` |
+#### Create or retrieve a user
+
+```
+POST /v1/users
+```
+
+Upserts by `externalId`. The organization must exist.
+
+**Request body**
+```json
+{
+  "externalId": "user_clerk_456",
+  "organizationId": "uuid"
+}
+```
+
+**Response** `201` (created) or `200` (already exists)
+```json
+{
+  "id": "uuid",
+  "externalId": "user_clerk_456",
+  "organizationId": "uuid",
+  "createdAt": "2025-01-01T00:00:00.000Z",
+  "updatedAt": "2025-01-01T00:00:00.000Z"
+}
+```
+
+**Errors**
+| Status | Meaning |
+|--------|---------|
+| `404` | Organization not found |
+
+---
 
 ### Runs
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/v1/runs` | Create a run (`organizationId`, `serviceName`, `taskName` required) |
-| `GET` | `/v1/runs` | List runs (filter by `organizationId` (required), `serviceName`, `taskName`, `userId`, `status`, `startedAfter`, `startedBefore`, `limit`, `offset`) |
-| `GET` | `/v1/runs/:id` | Get run with costs (includes recursive children cost aggregation) |
-| `PATCH` | `/v1/runs/:id` | Update run status (`completed` or `failed`) |
-| `POST` | `/v1/runs/:id/costs` | Add cost line items (resolves unit costs from costs-service) |
-| `GET` | `/v1/runs/summary` | Aggregate costs (group by `serviceName`, `userId`, or `costName`) |
+#### Create a run
 
-## Database schema
+```
+POST /v1/runs
+```
 
-Four tables: `organizations`, `users`, `runs`, `runs_costs`.
+**Request body**
+```json
+{
+  "organizationId": "uuid",
+  "serviceName": "my-agent",
+  "taskName": "generate-report",
+  "userId": "uuid",
+  "parentRunId": "uuid"
+}
+```
 
-- Runs support parent-child hierarchies (`parentRunId`)
-- Cost aggregation is recursive via CTEs
-- Costs cascade-delete when a run is deleted
+| Field | Required | Description |
+|-------|----------|-------------|
+| `organizationId` | yes | Organization owning this run |
+| `serviceName` | yes | Name of the calling service |
+| `taskName` | yes | Name of the task being executed |
+| `userId` | no | User who triggered the run |
+| `parentRunId` | no | Parent run ID for hierarchical tracking |
 
-## Scripts
+**Response** `201`
+```json
+{
+  "id": "uuid",
+  "organizationId": "uuid",
+  "serviceName": "my-agent",
+  "taskName": "generate-report",
+  "status": "running",
+  "startedAt": "2025-01-01T00:00:00.000Z",
+  "completedAt": null,
+  "createdAt": "2025-01-01T00:00:00.000Z",
+  "updatedAt": "2025-01-01T00:00:00.000Z"
+}
+```
+
+---
+
+#### List runs
+
+```
+GET /v1/runs?organizationId=uuid
+```
+
+**Query parameters**
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `organizationId` | yes | — | Filter by organization |
+| `serviceName` | no | — | Filter by service name |
+| `userId` | no | — | Filter by user |
+| `status` | no | — | `running`, `completed`, or `failed` |
+| `startedAfter` | no | — | ISO 8601 timestamp |
+| `startedBefore` | no | — | ISO 8601 timestamp |
+| `limit` | no | `50` | Max `200` |
+| `offset` | no | `0` | Pagination offset |
+
+**Response** `200`
+```json
+{
+  "runs": [ ... ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+---
+
+#### Get a run (with costs)
+
+```
+GET /v1/runs/:id
+```
+
+Returns the run with its cost breakdown, including recursively aggregated children costs.
+
+**Response** `200`
+```json
+{
+  "id": "uuid",
+  "organizationId": "uuid",
+  "serviceName": "my-agent",
+  "taskName": "generate-report",
+  "status": "completed",
+  "startedAt": "2025-01-01T00:00:00.000Z",
+  "completedAt": "2025-01-01T00:01:00.000Z",
+  "costs": [
+    {
+      "id": "uuid",
+      "costName": "gpt-4o-input-tokens",
+      "quantity": "1500.000000",
+      "unitCostInUsdCents": "0.0002500000",
+      "totalCostInUsdCents": "0.3750000000"
+    }
+  ],
+  "ownCostInUsdCents": "0.3750000000",
+  "childrenCostInUsdCents": "0.1200000000",
+  "totalCostInUsdCents": "0.4950000000"
+}
+```
+
+**Errors**
+| Status | Meaning |
+|--------|---------|
+| `404` | Run not found |
+
+---
+
+#### Add costs to a run
+
+```
+POST /v1/runs/:id/costs
+```
+
+Adds cost line items. Unit costs are resolved automatically from the [costs-service](https://github.com/shamanic-technologies/costs-service).
+
+**Request body**
+```json
+{
+  "items": [
+    { "costName": "gpt-4o-input-tokens", "quantity": 1500 },
+    { "costName": "gpt-4o-output-tokens", "quantity": 300 }
+  ]
+}
+```
+
+**Response** `201`
+```json
+{
+  "costs": [
+    {
+      "id": "uuid",
+      "runId": "uuid",
+      "costName": "gpt-4o-input-tokens",
+      "quantity": "1500.000000",
+      "unitCostInUsdCents": "0.0002500000",
+      "totalCostInUsdCents": "0.3750000000",
+      "createdAt": "2025-01-01T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+**Errors**
+| Status | Meaning |
+|--------|---------|
+| `404` | Run not found |
+| `422` | Unknown cost name (not found in costs-service) |
+
+---
+
+#### Update run status
+
+```
+PATCH /v1/runs/:id
+```
+
+**Request body**
+```json
+{ "status": "completed" }
+```
+
+Allowed values: `completed`, `failed`. Sets `completedAt` automatically.
+
+**Response** `200` — updated run object.
+
+**Errors**
+| Status | Meaning |
+|--------|---------|
+| `400` | Invalid status value |
+| `404` | Run not found |
+
+---
+
+#### Get cost summary
+
+```
+GET /v1/runs/summary?organizationId=uuid
+```
+
+Aggregates costs across runs with optional grouping.
+
+**Query parameters**
+| Param | Required | Description |
+|-------|----------|-------------|
+| `organizationId` | yes | Filter by organization |
+| `serviceName` | no | Filter by service name |
+| `startedAfter` | no | ISO 8601 timestamp |
+| `startedBefore` | no | ISO 8601 timestamp |
+| `groupBy` | no | `serviceName`, `userId`, or `costName` |
+
+**Response** `200`
+```json
+{
+  "breakdown": [
+    {
+      "key": "my-agent",
+      "totalCostInUsdCents": "12.5000000000",
+      "runCount": 5
+    }
+  ]
+}
+```
+
+---
+
+## Quick Start (calling the API)
+
+```bash
+# 1. Register your organization
+ORG=$(curl -s -X POST https://your-url/v1/organizations \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"externalId": "my-org"}')
+
+ORG_ID=$(echo $ORG | jq -r '.id')
+
+# 2. Start a run
+RUN=$(curl -s -X POST https://your-url/v1/runs \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"organizationId\": \"$ORG_ID\", \"serviceName\": \"my-agent\", \"taskName\": \"chat\"}")
+
+RUN_ID=$(echo $RUN | jq -r '.id')
+
+# 3. Record costs
+curl -s -X POST https://your-url/v1/runs/$RUN_ID/costs \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"items": [{"costName": "gpt-4o-input-tokens", "quantity": 2000}]}'
+
+# 4. Complete the run
+curl -s -X PATCH https://your-url/v1/runs/$RUN_ID \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "completed"}'
+```
+
+---
+
+## Self-Hosting
+
+### Prerequisites
+
+- Node.js 20+
+- PostgreSQL database
+
+### Setup
+
+```bash
+git clone https://github.com/shamanic-technologies/runs-service.git
+cd runs-service
+npm install
+cp .env.example .env  # edit with your values
+npm run db:push        # push schema to database
+npm run dev            # start with hot reload
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `RUNS_SERVICE_DATABASE_URL` | yes | PostgreSQL connection string |
+| `RUNS_SERVICE_API_KEY` | yes | API key for authenticating requests |
+| `COSTS_SERVICE_URL` | no | Costs service URL (default: `https://costs.mcpfactory.org`) |
+| `COSTS_SERVICE_API_KEY` | no | API key for the costs service |
+| `PORT` | no | Server port |
+
+### Scripts
 
 ```bash
 npm run dev              # development with hot reload
@@ -87,6 +384,19 @@ npm run db:push          # push schema directly
 npm run db:studio        # open Drizzle Studio
 ```
 
-## Deployment
+### Docker
 
-Deployed on Railway via Docker. See `Dockerfile` and `railway.json` for config.
+```bash
+docker build -t runs-service .
+docker run -e RUNS_SERVICE_DATABASE_URL=... -e RUNS_SERVICE_API_KEY=... -p 3000:3000 runs-service
+```
+
+---
+
+## Tech Stack
+
+- **Runtime:** Node.js 20 + TypeScript (strict)
+- **Framework:** Express
+- **Database:** PostgreSQL + Drizzle ORM
+- **Hosting:** Railway (Docker)
+- **Tests:** Vitest + Supertest
