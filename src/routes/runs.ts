@@ -50,7 +50,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
 // GET /v1/runs/summary — aggregate costs
 router.get("/v1/runs/summary", requireApiKey, async (req, res) => {
   try {
-    const { organizationId, serviceName, startedAfter, startedBefore, groupBy } =
+    const { organizationId, serviceName, taskName, startedAfter, startedBefore, groupBy } =
       req.query;
 
     if (!organizationId) {
@@ -60,6 +60,7 @@ router.get("/v1/runs/summary", requireApiKey, async (req, res) => {
 
     const conditions = [eq(runs.organizationId, organizationId as string)];
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
+    if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (startedAfter)
       conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
     if (startedBefore)
@@ -261,6 +262,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     const {
       organizationId,
       serviceName,
+      taskName,
       userId,
       status,
       startedAfter,
@@ -276,6 +278,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
 
     const conditions = [eq(runs.organizationId, organizationId as string)];
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
+    if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (userId) conditions.push(eq(runs.userId, userId as string));
     if (status) conditions.push(eq(runs.status, status as string));
     if (startedAfter)

@@ -355,6 +355,8 @@ git clone https://github.com/shamanic-technologies/runs-service.git
 cd runs-service
 npm install
 cp .env.example .env  # edit with your values
+npm run db:push        # push schema to database
+npm run dev            # start with hot reload
 ```
 
 ### Environment Variables
@@ -367,20 +369,19 @@ cp .env.example .env  # edit with your values
 | `COSTS_SERVICE_API_KEY` | no | API key for the costs service |
 | `PORT` | no | Server port |
 
-### Run
+### Scripts
 
 ```bash
-npm run build && npm start
-```
-
-Migrations run automatically on startup.
-
-### Development
-
-```bash
-npm run dev          # watch mode
-npm test             # run tests
-npm run db:studio    # Drizzle Studio (DB browser)
+npm run dev              # development with hot reload
+npm run build            # compile TypeScript
+npm run start            # production server
+npm test                 # run all tests
+npm run test:unit        # unit tests only
+npm run test:integration # integration tests (needs DB)
+npm run db:generate      # generate Drizzle migrations
+npm run db:migrate       # apply migrations
+npm run db:push          # push schema directly
+npm run db:studio        # open Drizzle Studio
 ```
 
 ### Docker
@@ -397,8 +398,5 @@ docker run -e RUNS_SERVICE_DATABASE_URL=... -e RUNS_SERVICE_API_KEY=... -p 3000:
 - **Runtime:** Node.js 20 + TypeScript (strict)
 - **Framework:** Express
 - **Database:** PostgreSQL + Drizzle ORM
+- **Hosting:** Railway (Docker)
 - **Tests:** Vitest + Supertest
-
-## License
-
-MIT
