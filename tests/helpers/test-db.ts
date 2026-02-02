@@ -2,10 +2,7 @@ import { db, sql } from "../../src/db/index.js";
 import { organizations, users, runs, runsCosts } from "../../src/db/schema.js";
 
 export async function cleanTestData() {
-  await db.delete(runsCosts);
-  await db.delete(runs);
-  await db.delete(users);
-  await db.delete(organizations);
+  await sql`TRUNCATE runs_costs, runs, users, organizations CASCADE`;
 }
 
 export async function insertTestOrg(externalId: string) {
