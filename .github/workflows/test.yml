@@ -1,0 +1,39 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run test:unit
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Push schema to dev DB
+        run: npx drizzle-kit push --force
+        env:
+          RUNS_SERVICE_DATABASE_URL: ${{ secrets.RUNS_SERVICE_DATABASE_URL_DEV }}
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          RUNS_SERVICE_DATABASE_URL: ${{ secrets.RUNS_SERVICE_DATABASE_URL_DEV }}
+          RUNS_SERVICE_API_KEY: test-api-key
+          COSTS_SERVICE_URL: https://costs.mcpfactory.org
+          COSTS_SERVICE_API_KEY: ${{ secrets.COSTS_SERVICE_API_KEY }}
