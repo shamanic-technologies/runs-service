@@ -26,14 +26,33 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - name: Push schema to dev DB
+
+      - name: Create Neon branch for PR
+        if: github.event_name == 'pull_request'
+        id: neon
+        uses: neondatabase/create-branch-action@v6
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch_name: pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+      - name: Set database URL
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "DB_URL=${{ steps.neon.outputs.db_url_pooled }}" >> "$GITHUB_ENV"
+          else
+            echo "DB_URL=${{ secrets.RUNS_SERVICE_DATABASE_URL_DEV }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Push schema
         run: npx drizzle-kit push --force
         env:
-          RUNS_SERVICE_DATABASE_URL: ${{ secrets.RUNS_SERVICE_DATABASE_URL_DEV }}
+          RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
+
       - name: Run integration tests
         run: npm run test:integration
         env:
-          RUNS_SERVICE_DATABASE_URL: ${{ secrets.RUNS_SERVICE_DATABASE_URL_DEV }}
+          RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
           RUNS_SERVICE_API_KEY: test-api-key
           COSTS_SERVICE_URL: https://costs.mcpfactory.org
           COSTS_SERVICE_API_KEY: ${{ secrets.COSTS_SERVICE_API_KEY }}
