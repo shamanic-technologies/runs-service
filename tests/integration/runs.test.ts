@@ -140,6 +140,24 @@ describe("Runs CRUD", () => {
       expect(res.body.parentRunId).toBe(parent.id);
     });
 
+    it("returns 400 when parentRunId does not exist", async () => {
+      const org = await insertTestOrg("org-orphan");
+      const fakeParentId = "00000000-0000-0000-0000-000000000000";
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          organizationId: org.id,
+          serviceName: "orphan-svc",
+          taskName: "orphan-task",
+          parentRunId: fakeParentId,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain(fakeParentId);
+    });
+
     it("rejects without required fields", async () => {
       const res = await request(app)
         .post("/v1/runs")

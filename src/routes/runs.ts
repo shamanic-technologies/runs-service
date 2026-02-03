@@ -29,16 +29,29 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const [created] = await db
-      .insert(runs)
-      .values({
-        organizationId,
-        userId: userId || null,
-        serviceName,
-        taskName,
-        parentRunId: parentRunId || null,
-      })
-      .returning();
+    const values = {
+      organizationId,
+      userId: userId || null,
+      serviceName,
+      taskName,
+      parentRunId: parentRunId || null,
+    };
+
+    let created;
+    try {
+      [created] = await db.insert(runs).values(values).returning();
+    } catch (insertErr: any) {
+      if (insertErr?.code === "23503" && values.parentRunId) {
+        console.error(
+          `Foreign key violation: parentRunId ${values.parentRunId} does not exist in runs table`
+        );
+        res.status(400).json({
+          error: `parentRunId ${values.parentRunId} does not exist`,
+        });
+        return;
+      }
+      throw insertErr;
+    }
 
     res.status(201).json(created);
   } catch (err) {
