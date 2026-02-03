@@ -1,7 +1,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
 RUN npm run build
 
@@ -10,6 +10,6 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/package*.json ./
-RUN npm install --production
+RUN npm ci --omit=dev
 ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 CMD ["node", "dist/index.js"]
