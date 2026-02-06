@@ -16,6 +16,24 @@ All endpoints (except `/health`) require an API key via the `X-API-Key` header.
 curl -H "X-API-Key: your-secret-api-key" https://your-deployment-url/v1/runs
 ```
 
+## OpenAPI Specification
+
+The service exposes its OpenAPI 3.0 spec at `/openapi.json` (no authentication required).
+
+```bash
+curl https://your-deployment-url/openapi.json
+```
+
+To regenerate the spec locally:
+
+```bash
+npm run generate:openapi
+```
+
+The spec is also regenerated automatically on every `npm run build`.
+
+---
+
 ## API Reference
 
 ### Health Check
@@ -373,7 +391,8 @@ npm run dev            # start with hot reload
 
 ```bash
 npm run dev              # development with hot reload
-npm run build            # compile TypeScript
+npm run build            # compile TypeScript + generate OpenAPI spec
+npm run generate:openapi # regenerate OpenAPI spec only
 npm run start            # production server
 npm test                 # run all tests
 npm run test:unit        # unit tests only
