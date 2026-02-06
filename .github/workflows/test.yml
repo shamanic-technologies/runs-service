@@ -16,6 +16,7 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      - run: npm run generate:openapi
       - run: npm run test:unit
 
   test-integration:
@@ -48,6 +49,9 @@ jobs:
         run: npx drizzle-kit push --force
         env:
           RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
+
+      - name: Generate OpenAPI spec
+        run: npm run generate:openapi
 
       - name: Run integration tests
         run: npm run test:integration
