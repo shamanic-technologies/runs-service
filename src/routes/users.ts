@@ -53,7 +53,7 @@ router.post("/v1/users", requireApiKey, async (req, res) => {
 
     res.status(201).json(created);
   } catch (err) {
-    console.error("Error upserting user:", err);
+    console.error("[Runs Service] Error upserting user:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

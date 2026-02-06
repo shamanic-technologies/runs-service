@@ -26,13 +26,13 @@ app.use((_req, res) => {
 if (process.env.NODE_ENV !== "test") {
   migrate(db, { migrationsFolder: "./drizzle" })
     .then(() => {
-      console.log("Migrations complete");
+      console.log("[Runs Service] Migrations complete");
       app.listen(Number(PORT), "::", () => {
-        console.log(`Service running on port ${PORT}`);
+        console.log(`[Runs Service] Service running on port ${PORT}`);
       });
     })
     .catch((err) => {
-      console.error("Migration failed:", err);
+      console.error("[Runs Service] Migration failed:", err);
       process.exit(1);
     });
 }

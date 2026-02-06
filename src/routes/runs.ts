@@ -43,7 +43,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     } catch (insertErr: any) {
       if (insertErr?.code === "23503" && values.parentRunId) {
         console.error(
-          `Foreign key violation: parentRunId ${values.parentRunId} does not exist in runs table`
+          `[Runs Service] Foreign key violation: parentRunId ${values.parentRunId} does not exist in runs table`
         );
         res.status(400).json({
           error: `parentRunId ${values.parentRunId} does not exist`,
@@ -55,7 +55,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
 
     res.status(201).json(created);
   } catch (err) {
-    console.error("Error creating run:", err);
+    console.error("[Runs Service] Error creating run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -113,7 +113,7 @@ router.get("/v1/runs/summary", requireApiKey, async (req, res) => {
 
     res.json({ breakdown: result });
   } catch (err) {
-    console.error("Error getting summary:", err);
+    console.error("[Runs Service] Error getting summary:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -169,7 +169,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       childrenCostInUsdCents: childrenTotal.toFixed(10),
     });
   } catch (err) {
-    console.error("Error getting run:", err);
+    console.error("[Runs Service] Error getting run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -231,7 +231,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
 
     res.status(201).json({ costs: inserted });
   } catch (err) {
-    console.error("Error adding run costs:", err);
+    console.error("[Runs Service] Error adding run costs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -264,7 +264,7 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error("Error updating run:", err);
+    console.error("[Runs Service] Error updating run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -313,7 +313,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
 
     res.json({ runs: result, limit, offset });
   } catch (err) {
-    console.error("Error listing runs:", err);
+    console.error("[Runs Service] Error listing runs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
