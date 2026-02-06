@@ -36,7 +36,7 @@ router.post("/v1/organizations", requireApiKey, async (req, res) => {
 
     res.status(201).json(created);
   } catch (err) {
-    console.error("Error upserting organization:", err);
+    console.error("[Runs Service] Error upserting organization:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
