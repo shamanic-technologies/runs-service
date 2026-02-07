@@ -8,5 +8,9 @@ if (!connectionString) {
   throw new Error("RUNS_SERVICE_DATABASE_URL is not set");
 }
 
-export const sql = postgres(connectionString);
+export const sql = postgres(connectionString, {
+  max: 10,
+  idle_timeout: 20,
+  connect_timeout: 10,
+});
 export const db = drizzle(sql, { schema });
