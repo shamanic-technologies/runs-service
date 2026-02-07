@@ -42,11 +42,16 @@ The spec is also regenerated automatically on every `npm run build`.
 GET /health
 ```
 
-No authentication required.
+No authentication required. Verifies database connectivity.
 
-**Response** `200`
+**Response** `200` (healthy)
 ```json
-{ "status": "ok", "service": "runs-service" }
+{ "status": "ok", "service": "runs-service", "database": "ok" }
+```
+
+**Response** `503` (degraded — database unreachable)
+```json
+{ "status": "degraded", "service": "runs-service", "database": "unreachable" }
 ```
 
 ---

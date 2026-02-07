@@ -52,6 +52,28 @@ describe("cost-resolver", () => {
       );
     });
 
+    it("passes an abort signal to fetch", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            name: "test",
+            costPerUnitInUsdCents: "0.01",
+          }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await resolveUnitCost("test");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        })
+      );
+    });
+
     it("sends API key header when configured", async () => {
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,

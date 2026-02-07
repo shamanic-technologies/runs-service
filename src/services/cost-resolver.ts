@@ -1,5 +1,6 @@
 const COSTS_SERVICE_URL = process.env.COSTS_SERVICE_URL || "https://costs.mcpfactory.org";
 const COSTS_SERVICE_API_KEY = process.env.COSTS_SERVICE_API_KEY;
+const FETCH_TIMEOUT_MS = 10_000;
 
 export class CostNotFoundError extends Error {
   constructor(public readonly costName: string) {
@@ -20,7 +21,7 @@ export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
 
   const res = await fetch(
     `${COSTS_SERVICE_URL}/v1/costs/${encodeURIComponent(name)}`,
-    { headers }
+    { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
   );
 
   if (res.status === 404) {
