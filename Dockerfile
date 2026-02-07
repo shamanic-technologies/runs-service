@@ -9,6 +9,7 @@ FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/drizzle ./drizzle
+COPY --from=builder /app/openapi.json ./
 COPY --from=builder /app/package*.json ./
 RUN npm ci --omit=dev
 ENV NODE_OPTIONS="--dns-result-order=ipv4first"
