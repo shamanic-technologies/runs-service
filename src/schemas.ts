@@ -31,46 +31,6 @@ export const ValidationErrorSchema = z
   })
   .openapi("ValidationError");
 
-// --- Organization schemas ---
-
-export const OrganizationSchema = z
-  .object({
-    id: z.string().uuid(),
-    externalId: z.string(),
-    createdAt: z.string().datetime(),
-    updatedAt: z.string().datetime(),
-  })
-  .openapi("Organization");
-
-export const CreateOrganizationRequestSchema = z
-  .object({
-    externalId: z.string().min(1),
-  })
-  .openapi("CreateOrganizationRequest");
-
-export type CreateOrganizationRequest = z.infer<typeof CreateOrganizationRequestSchema>;
-
-// --- User schemas ---
-
-export const UserSchema = z
-  .object({
-    id: z.string().uuid(),
-    externalId: z.string(),
-    organizationId: z.string().uuid(),
-    createdAt: z.string().datetime(),
-    updatedAt: z.string().datetime(),
-  })
-  .openapi("User");
-
-export const CreateUserRequestSchema = z
-  .object({
-    externalId: z.string().min(1),
-    organizationId: z.string().uuid(),
-  })
-  .openapi("CreateUserRequest");
-
-export type CreateUserRequest = z.infer<typeof CreateUserRequestSchema>;
-
 // --- Run schemas ---
 
 export const RunSchema = z
@@ -78,6 +38,9 @@ export const RunSchema = z
     id: z.string().uuid(),
     organizationId: z.string().uuid(),
     userId: z.string().uuid().nullable(),
+    appId: z.string(),
+    brandId: z.string().nullable(),
+    campaignId: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -89,12 +52,19 @@ export const RunSchema = z
   })
   .openapi("Run");
 
+export const RunWithOwnCostSchema = RunSchema.extend({
+  ownCostInUsdCents: z.string(),
+}).openapi("RunWithOwnCost");
+
 export const CreateRunRequestSchema = z
   .object({
-    organizationId: z.string().uuid(),
+    clerkOrgId: z.string().min(1),
+    clerkUserId: z.string().min(1).optional(),
+    appId: z.string().min(1),
+    brandId: z.string().min(1).optional(),
+    campaignId: z.string().min(1).optional(),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
-    userId: z.string().uuid().optional(),
     parentRunId: z.string().uuid().optional(),
   })
   .openapi("CreateRunRequest");
@@ -144,11 +114,28 @@ export const AddCostsResponseSchema = z
   })
   .openapi("AddCostsResponse");
 
+export const DescendantRunSchema = z
+  .object({
+    id: z.string().uuid(),
+    parentRunId: z.string().uuid().nullable(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    status: z.string(),
+    startedAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
+    costs: z.array(CostSchema),
+    ownCostInUsdCents: z.string(),
+  })
+  .openapi("DescendantRun");
+
 export const RunWithCostsSchema = z
   .object({
     id: z.string().uuid(),
     organizationId: z.string().uuid(),
     userId: z.string().uuid().nullable(),
+    appId: z.string(),
+    brandId: z.string().nullable(),
+    campaignId: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -161,31 +148,17 @@ export const RunWithCostsSchema = z
     totalCostInUsdCents: z.string(),
     ownCostInUsdCents: z.string(),
     childrenCostInUsdCents: z.string(),
+    descendantRuns: z.array(DescendantRunSchema),
   })
   .openapi("RunWithCosts");
 
 export const ListRunsResponseSchema = z
   .object({
-    runs: z.array(RunSchema),
+    runs: z.array(RunWithOwnCostSchema),
     limit: z.number(),
     offset: z.number(),
   })
   .openapi("ListRunsResponse");
-
-export const CostSummaryBreakdownItemSchema = z
-  .object({
-    key: z.string().nullable(),
-    totalCostInUsdCents: z.string().nullable(),
-    runCount: z.number().optional(),
-    totalQuantity: z.string().optional(),
-  })
-  .openapi("CostSummaryBreakdownItem");
-
-export const CostSummaryResponseSchema = z
-  .object({
-    breakdown: z.array(CostSummaryBreakdownItemSchema),
-  })
-  .openapi("CostSummaryResponse");
 
 export const HealthResponseSchema = z
   .object({
@@ -229,69 +202,10 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
-  path: "/v1/organizations",
-  summary: "Create or retrieve an organization",
-  description: "Upserts by externalId — returns the existing organization if it already exists",
-  security: [{ apiKey: [] }],
-  request: {
-    body: {
-      content: { "application/json": { schema: CreateOrganizationRequestSchema } },
-    },
-  },
-  responses: {
-    200: {
-      description: "Organization already exists",
-      content: { "application/json": { schema: OrganizationSchema } },
-    },
-    201: {
-      description: "Organization created",
-      content: { "application/json": { schema: OrganizationSchema } },
-    },
-    400: {
-      description: "Invalid request",
-      content: { "application/json": { schema: ValidationErrorSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/v1/users",
-  summary: "Create or retrieve a user",
-  description: "Upserts by externalId. The organization must exist.",
-  security: [{ apiKey: [] }],
-  request: {
-    body: {
-      content: { "application/json": { schema: CreateUserRequestSchema } },
-    },
-  },
-  responses: {
-    200: {
-      description: "User already exists",
-      content: { "application/json": { schema: UserSchema } },
-    },
-    201: {
-      description: "User created",
-      content: { "application/json": { schema: UserSchema } },
-    },
-    400: {
-      description: "Invalid request",
-      content: { "application/json": { schema: ValidationErrorSchema } },
-    },
-    401: { description: "Unauthorized" },
-    404: {
-      description: "Organization not found",
-      content: { "application/json": { schema: ErrorSchema } },
-    },
-  },
-});
-
-registry.registerPath({
-  method: "post",
   path: "/v1/runs",
   summary: "Create a run",
-  description: "Creates a new execution run",
+  description:
+    "Creates a new execution run. Organizations and users are resolved automatically from clerkOrgId/clerkUserId.",
   security: [{ apiKey: [] }],
   request: {
     body: {
@@ -315,15 +229,20 @@ registry.registerPath({
   method: "get",
   path: "/v1/runs",
   summary: "List runs",
-  description: "Lists runs filtered by organization and optional parameters",
+  description:
+    "Lists runs filtered by clerkOrgId and optional parameters. Each run includes ownCostInUsdCents.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      organizationId: z.string().uuid(),
+      clerkOrgId: z.string(),
+      clerkUserId: z.string().optional(),
+      appId: z.string().optional(),
+      brandId: z.string().optional(),
+      campaignId: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
-      userId: z.string().uuid().optional(),
       status: z.string().optional(),
+      parentRunId: z.string().uuid().optional(),
       startedAfter: z.string().datetime().optional(),
       startedBefore: z.string().datetime().optional(),
       limit: z.string().optional(),
@@ -332,11 +251,11 @@ registry.registerPath({
   },
   responses: {
     200: {
-      description: "List of runs",
+      description: "List of runs with cost totals",
       content: { "application/json": { schema: ListRunsResponseSchema } },
     },
     400: {
-      description: "Missing organizationId",
+      description: "Missing clerkOrgId",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
@@ -347,7 +266,8 @@ registry.registerPath({
   method: "get",
   path: "/v1/runs/{id}",
   summary: "Get a run with costs",
-  description: "Returns the run with its cost breakdown, including recursively aggregated children costs",
+  description:
+    "Returns the run with its cost breakdown, including all descendant runs and their costs",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -356,7 +276,7 @@ registry.registerPath({
   },
   responses: {
     200: {
-      description: "Run with cost details",
+      description: "Run with cost details and descendant runs",
       content: { "application/json": { schema: RunWithCostsSchema } },
     },
     401: { description: "Unauthorized" },
@@ -371,7 +291,8 @@ registry.registerPath({
   method: "post",
   path: "/v1/runs/{id}/costs",
   summary: "Add costs to a run",
-  description: "Adds cost line items. Unit costs are resolved automatically from the costs-service.",
+  description:
+    "Adds cost line items. Unit costs are resolved automatically from the costs-service.",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -406,7 +327,8 @@ registry.registerPath({
   method: "patch",
   path: "/v1/runs/{id}",
   summary: "Update run status",
-  description: "Updates the run status to completed or failed. Sets completedAt automatically.",
+  description:
+    "Updates the run status to completed or failed. Sets completedAt automatically.",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -430,34 +352,5 @@ registry.registerPath({
       description: "Run not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
-  },
-});
-
-registry.registerPath({
-  method: "get",
-  path: "/v1/runs/summary",
-  summary: "Get cost summary",
-  description: "Aggregates costs across runs with optional grouping",
-  security: [{ apiKey: [] }],
-  request: {
-    query: z.object({
-      organizationId: z.string().uuid(),
-      serviceName: z.string().optional(),
-      taskName: z.string().optional(),
-      startedAfter: z.string().datetime().optional(),
-      startedBefore: z.string().datetime().optional(),
-      groupBy: z.enum(["serviceName", "userId", "costName"]).optional(),
-    }),
-  },
-  responses: {
-    200: {
-      description: "Cost summary breakdown",
-      content: { "application/json": { schema: CostSummaryResponseSchema } },
-    },
-    400: {
-      description: "Missing organizationId",
-      content: { "application/json": { schema: ErrorSchema } },
-    },
-    401: { description: "Unauthorized" },
   },
 });

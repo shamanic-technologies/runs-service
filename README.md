@@ -1,6 +1,6 @@
 # Runs Service
 
-REST API for tracking service execution runs and their associated costs. Supports hierarchical runs (parent-child), cost aggregation, and multi-tenant isolation via organizations.
+REST API for tracking service execution runs and their associated costs. Supports hierarchical runs (parent-child), cost aggregation with full descendant tree, and multi-tenant isolation via Clerk organization IDs.
 
 ## Base URL
 
@@ -56,69 +56,6 @@ No authentication required. Verifies database connectivity.
 
 ---
 
-### Organizations
-
-#### Create or retrieve an organization
-
-```
-POST /v1/organizations
-```
-
-Upserts by `externalId` — returns the existing organization if it already exists.
-
-**Request body**
-```json
-{ "externalId": "org_clerk_123" }
-```
-
-**Response** `201` (created) or `200` (already exists)
-```json
-{
-  "id": "uuid",
-  "externalId": "org_clerk_123",
-  "createdAt": "2025-01-01T00:00:00.000Z",
-  "updatedAt": "2025-01-01T00:00:00.000Z"
-}
-```
-
----
-
-### Users
-
-#### Create or retrieve a user
-
-```
-POST /v1/users
-```
-
-Upserts by `externalId`. The organization must exist.
-
-**Request body**
-```json
-{
-  "externalId": "user_clerk_456",
-  "organizationId": "uuid"
-}
-```
-
-**Response** `201` (created) or `200` (already exists)
-```json
-{
-  "id": "uuid",
-  "externalId": "user_clerk_456",
-  "organizationId": "uuid",
-  "createdAt": "2025-01-01T00:00:00.000Z",
-  "updatedAt": "2025-01-01T00:00:00.000Z"
-}
-```
-
-**Errors**
-| Status | Meaning |
-|--------|---------|
-| `404` | Organization not found |
-
----
-
 ### Runs
 
 #### Create a run
@@ -127,23 +64,31 @@ Upserts by `externalId`. The organization must exist.
 POST /v1/runs
 ```
 
+Organizations and users are resolved automatically from `clerkOrgId`/`clerkUserId` (get-or-create).
+
 **Request body**
 ```json
 {
-  "organizationId": "uuid",
+  "clerkOrgId": "org_clerk_123",
+  "clerkUserId": "user_clerk_456",
+  "appId": "my-app",
+  "brandId": "brand_1",
+  "campaignId": "campaign_1",
   "serviceName": "my-agent",
   "taskName": "generate-report",
-  "userId": "uuid",
   "parentRunId": "uuid"
 }
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `organizationId` | yes | Organization owning this run |
+| `clerkOrgId` | yes | Clerk organization ID (auto-resolved internally) |
+| `appId` | yes | Application identifier |
 | `serviceName` | yes | Name of the calling service |
 | `taskName` | yes | Name of the task being executed |
-| `userId` | no | User who triggered the run |
+| `clerkUserId` | no | Clerk user ID (auto-resolved internally) |
+| `brandId` | no | Brand identifier |
+| `campaignId` | no | Campaign identifier |
 | `parentRunId` | no | Parent run ID for hierarchical tracking |
 
 **Response** `201`
@@ -151,6 +96,10 @@ POST /v1/runs
 {
   "id": "uuid",
   "organizationId": "uuid",
+  "userId": "uuid",
+  "appId": "my-app",
+  "brandId": "brand_1",
+  "campaignId": "campaign_1",
   "serviceName": "my-agent",
   "taskName": "generate-report",
   "status": "running",
@@ -166,16 +115,23 @@ POST /v1/runs
 #### List runs
 
 ```
-GET /v1/runs?organizationId=uuid
+GET /v1/runs?clerkOrgId=org_clerk_123
 ```
+
+Each run in the response includes `ownCostInUsdCents`.
 
 **Query parameters**
 | Param | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `organizationId` | yes | — | Filter by organization |
+| `clerkOrgId` | yes | — | Filter by Clerk organization ID |
+| `clerkUserId` | no | — | Filter by Clerk user ID |
+| `appId` | no | — | Filter by application ID |
+| `brandId` | no | — | Filter by brand ID |
+| `campaignId` | no | — | Filter by campaign ID |
 | `serviceName` | no | — | Filter by service name |
-| `userId` | no | — | Filter by user |
+| `taskName` | no | — | Filter by task name |
 | `status` | no | — | `running`, `completed`, or `failed` |
+| `parentRunId` | no | — | Filter by parent run ID |
 | `startedAfter` | no | — | ISO 8601 timestamp |
 | `startedBefore` | no | — | ISO 8601 timestamp |
 | `limit` | no | `50` | Max `200` |
@@ -184,7 +140,17 @@ GET /v1/runs?organizationId=uuid
 **Response** `200`
 ```json
 {
-  "runs": [ ... ],
+  "runs": [
+    {
+      "id": "uuid",
+      "appId": "my-app",
+      "serviceName": "my-agent",
+      "taskName": "chat",
+      "status": "completed",
+      "ownCostInUsdCents": "0.3750000000",
+      "..."
+    }
+  ],
   "limit": 50,
   "offset": 0
 }
@@ -192,36 +158,54 @@ GET /v1/runs?organizationId=uuid
 
 ---
 
-#### Get a run (with costs)
+#### Get a run (with costs and descendants)
 
 ```
 GET /v1/runs/:id
 ```
 
-Returns the run with its cost breakdown, including recursively aggregated children costs.
+Returns the run with its cost breakdown, including all descendant runs and their costs in a flat `descendantRuns` array. Each descendant includes its `parentRunId` so the tree can be reconstructed client-side.
 
 **Response** `200`
 ```json
 {
   "id": "uuid",
   "organizationId": "uuid",
-  "serviceName": "my-agent",
-  "taskName": "generate-report",
+  "appId": "my-app",
+  "serviceName": "lead-service",
+  "taskName": "enrich-lead",
   "status": "completed",
-  "startedAt": "2025-01-01T00:00:00.000Z",
-  "completedAt": "2025-01-01T00:01:00.000Z",
   "costs": [
     {
       "id": "uuid",
-      "costName": "gpt-4o-input-tokens",
-      "quantity": "1500.000000",
-      "unitCostInUsdCents": "0.0002500000",
-      "totalCostInUsdCents": "0.3750000000"
+      "costName": "anthropic-opus-4.5-tokens-input",
+      "quantity": "3867.000000",
+      "unitCostInUsdCents": "0.0050000000",
+      "totalCostInUsdCents": "0.0193000000"
     }
   ],
-  "ownCostInUsdCents": "0.3750000000",
-  "childrenCostInUsdCents": "0.1200000000",
-  "totalCostInUsdCents": "0.4950000000"
+  "ownCostInUsdCents": "0.0212000000",
+  "childrenCostInUsdCents": "0.3400000000",
+  "totalCostInUsdCents": "0.3612000000",
+  "descendantRuns": [
+    {
+      "id": "uuid",
+      "parentRunId": "uuid",
+      "serviceName": "apollo-service",
+      "taskName": "search-people",
+      "status": "completed",
+      "costs": [
+        {
+          "id": "uuid",
+          "costName": "apollo-enrichment-credit",
+          "quantity": "1.000000",
+          "unitCostInUsdCents": "0.3400000000",
+          "totalCostInUsdCents": "0.3400000000"
+        }
+      ],
+      "ownCostInUsdCents": "0.3400000000"
+    }
+  ]
 }
 ```
 
@@ -298,69 +282,83 @@ Allowed values: `completed`, `failed`. Sets `completedAt` automatically.
 
 ---
 
-#### Get cost summary
-
-```
-GET /v1/runs/summary?organizationId=uuid
-```
-
-Aggregates costs across runs with optional grouping.
-
-**Query parameters**
-| Param | Required | Description |
-|-------|----------|-------------|
-| `organizationId` | yes | Filter by organization |
-| `serviceName` | no | Filter by service name |
-| `startedAfter` | no | ISO 8601 timestamp |
-| `startedBefore` | no | ISO 8601 timestamp |
-| `groupBy` | no | `serviceName`, `userId`, or `costName` |
-
-**Response** `200`
-```json
-{
-  "breakdown": [
-    {
-      "key": "my-agent",
-      "totalCostInUsdCents": "12.5000000000",
-      "runCount": 5
-    }
-  ]
-}
-```
-
----
-
 ## Quick Start (calling the API)
 
 ```bash
-# 1. Register your organization
-ORG=$(curl -s -X POST https://your-url/v1/organizations \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"externalId": "my-org"}')
-
-ORG_ID=$(echo $ORG | jq -r '.id')
-
-# 2. Start a run
+# 1. Start a run (org is auto-created from clerkOrgId)
 RUN=$(curl -s -X POST https://your-url/v1/runs \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"organizationId\": \"$ORG_ID\", \"serviceName\": \"my-agent\", \"taskName\": \"chat\"}")
+  -d '{"clerkOrgId": "org_clerk_123", "appId": "my-app", "serviceName": "my-agent", "taskName": "chat"}')
 
 RUN_ID=$(echo $RUN | jq -r '.id')
 
-# 3. Record costs
+# 2. Record costs
 curl -s -X POST https://your-url/v1/runs/$RUN_ID/costs \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"items": [{"costName": "gpt-4o-input-tokens", "quantity": 2000}]}'
 
-# 4. Complete the run
+# 3. Complete the run
 curl -s -X PATCH https://your-url/v1/runs/$RUN_ID \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"status": "completed"}'
+
+# 4. Get full cost tree
+curl -s https://your-url/v1/runs/$RUN_ID \
+  -H "X-API-Key: $API_KEY" | jq .
 ```
+
+---
+
+## Database Schema
+
+### organizations (internal, auto-managed)
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid | Primary key |
+| `externalId` | text | Clerk organization ID (unique) |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+### users (internal, auto-managed)
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid | Primary key |
+| `externalId` | text | Clerk user ID (unique) |
+| `organizationId` | uuid | FK to organizations |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+### runs
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid | Primary key |
+| `parentRunId` | uuid | Self-referencing FK (nullable) |
+| `organizationId` | uuid | FK to organizations |
+| `userId` | uuid | FK to users (nullable) |
+| `appId` | text | Application identifier (NOT NULL) |
+| `brandId` | text | Brand identifier (nullable) |
+| `campaignId` | text | Campaign identifier (nullable) |
+| `serviceName` | text | Service that created the run |
+| `taskName` | text | Task being executed |
+| `status` | text | `running`, `completed`, `failed` |
+| `startedAt` | timestamp | |
+| `completedAt` | timestamp | Nullable |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+### runs_costs
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid | Primary key |
+| `runId` | uuid | FK to runs (cascade delete) |
+| `costName` | text | Cost type identifier |
+| `quantity` | numeric(20,6) | |
+| `unitCostInUsdCents` | numeric(12,10) | |
+| `totalCostInUsdCents` | numeric(16,10) | |
+| `createdAt` | timestamp | |
 
 ---
 

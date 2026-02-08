@@ -38,6 +38,9 @@ export const runs = pgTable(
       .notNull()
       .references(() => organizations.id),
     userId: uuid("user_id").references(() => users.id),
+    appId: text("app_id").notNull(),
+    brandId: text("brand_id"),
+    campaignId: text("campaign_id"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
     status: text("status").notNull().default("running"),
@@ -52,6 +55,9 @@ export const runs = pgTable(
     index("idx_runs_status").on(table.status),
     index("idx_runs_started_at").on(table.startedAt),
     index("idx_runs_parent").on(table.parentRunId),
+    index("idx_runs_app").on(table.appId),
+    index("idx_runs_brand").on(table.brandId),
+    index("idx_runs_campaign").on(table.campaignId),
   ]
 );
 

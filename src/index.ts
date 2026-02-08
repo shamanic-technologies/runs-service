@@ -5,8 +5,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import healthRoutes from "./routes/health.js";
-import organizationRoutes from "./routes/organizations.js";
-import userRoutes from "./routes/users.js";
 import runsRoutes from "./routes/runs.js";
 import { db } from "./db/index.js";
 
@@ -33,8 +31,6 @@ app.get("/openapi.json", async (_req, res) => {
 });
 
 app.use(healthRoutes);
-app.use(organizationRoutes);
-app.use(userRoutes);
 app.use(runsRoutes);
 
 app.use((_req, res) => {

@@ -25,6 +25,9 @@ export async function insertTestRun(data: {
   organizationId: string;
   serviceName: string;
   taskName: string;
+  appId?: string;
+  brandId?: string;
+  campaignId?: string;
   userId?: string;
   parentRunId?: string;
   status?: string;
@@ -35,6 +38,9 @@ export async function insertTestRun(data: {
       organizationId: data.organizationId,
       serviceName: data.serviceName,
       taskName: data.taskName,
+      appId: data.appId || "test-app",
+      brandId: data.brandId || null,
+      campaignId: data.campaignId || null,
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",

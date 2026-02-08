@@ -1,91 +1,77 @@
 import { describe, it, expect } from "vitest";
 import {
-  CreateOrganizationRequestSchema,
-  CreateUserRequestSchema,
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
 } from "../../src/schemas.js";
 
 describe("schemas", () => {
-  describe("CreateOrganizationRequestSchema", () => {
-    it("accepts valid input", () => {
-      const result = CreateOrganizationRequestSchema.safeParse({
-        externalId: "org_123",
-      });
-      expect(result.success).toBe(true);
-    });
-
-    it("rejects missing externalId", () => {
-      const result = CreateOrganizationRequestSchema.safeParse({});
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects empty externalId", () => {
-      const result = CreateOrganizationRequestSchema.safeParse({
-        externalId: "",
-      });
-      expect(result.success).toBe(false);
-    });
-  });
-
-  describe("CreateUserRequestSchema", () => {
-    it("accepts valid input", () => {
-      const result = CreateUserRequestSchema.safeParse({
-        externalId: "user_456",
-        organizationId: "550e8400-e29b-41d4-a716-446655440000",
-      });
-      expect(result.success).toBe(true);
-    });
-
-    it("rejects missing organizationId", () => {
-      const result = CreateUserRequestSchema.safeParse({
-        externalId: "user_456",
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects invalid uuid for organizationId", () => {
-      const result = CreateUserRequestSchema.safeParse({
-        externalId: "user_456",
-        organizationId: "not-a-uuid",
-      });
-      expect(result.success).toBe(false);
-    });
-  });
-
   describe("CreateRunRequestSchema", () => {
     it("accepts valid input with required fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        organizationId: "550e8400-e29b-41d4-a716-446655440000",
+        clerkOrgId: "org_clerk_123",
+        appId: "my-app",
         serviceName: "my-agent",
         taskName: "run-task",
       });
       expect(result.success).toBe(true);
     });
 
-    it("accepts optional userId and parentRunId", () => {
+    it("accepts all optional fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        organizationId: "550e8400-e29b-41d4-a716-446655440000",
+        clerkOrgId: "org_clerk_123",
+        clerkUserId: "user_clerk_456",
+        appId: "my-app",
+        brandId: "brand_1",
+        campaignId: "campaign_1",
         serviceName: "my-agent",
         taskName: "run-task",
-        userId: "660e8400-e29b-41d4-a716-446655440000",
         parentRunId: "770e8400-e29b-41d4-a716-446655440000",
       });
       expect(result.success).toBe(true);
     });
 
-    it("rejects missing required fields", () => {
+    it("rejects missing clerkOrgId", () => {
       const result = CreateRunRequestSchema.safeParse({
-        organizationId: "550e8400-e29b-41d4-a716-446655440000",
+        appId: "my-app",
+        serviceName: "my-agent",
+        taskName: "run-task",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects missing appId", () => {
+      const result = CreateRunRequestSchema.safeParse({
+        clerkOrgId: "org_clerk_123",
+        serviceName: "my-agent",
+        taskName: "run-task",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects missing serviceName", () => {
+      const result = CreateRunRequestSchema.safeParse({
+        clerkOrgId: "org_clerk_123",
+        appId: "my-app",
       });
       expect(result.success).toBe(false);
     });
 
     it("rejects empty serviceName", () => {
       const result = CreateRunRequestSchema.safeParse({
-        organizationId: "550e8400-e29b-41d4-a716-446655440000",
+        clerkOrgId: "org_clerk_123",
+        appId: "my-app",
         serviceName: "",
+        taskName: "task",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects empty appId", () => {
+      const result = CreateRunRequestSchema.safeParse({
+        clerkOrgId: "org_clerk_123",
+        appId: "",
+        serviceName: "svc",
         taskName: "task",
       });
       expect(result.success).toBe(false);
