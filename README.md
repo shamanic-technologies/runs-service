@@ -18,7 +18,7 @@ curl -H "X-API-Key: your-secret-api-key" https://your-deployment-url/v1/runs
 
 ## OpenAPI Specification
 
-The service exposes its OpenAPI 3.0 spec at `/openapi.json` (no authentication required).
+The service exposes its OpenAPI 3.0 spec at `/openapi.json` (no authentication required). The spec is generated from Zod schemas in `src/schemas.ts` using `@asteasolutions/zod-to-openapi`, ensuring documentation stays in sync with runtime validation.
 
 ```bash
 curl https://your-deployment-url/openapi.json
@@ -421,6 +421,7 @@ docker run -e RUNS_SERVICE_DATABASE_URL=... -e RUNS_SERVICE_API_KEY=... -p 3000:
 
 - **Runtime:** Node.js 20 + TypeScript (strict)
 - **Framework:** Express
+- **Validation:** Zod + @asteasolutions/zod-to-openapi
 - **Database:** PostgreSQL + Drizzle ORM
 - **Hosting:** Railway (Docker)
 - **Tests:** Vitest + Supertest

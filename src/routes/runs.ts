@@ -7,27 +7,25 @@ import {
   resolveMultipleUnitCosts,
   CostNotFoundError,
 } from "../services/cost-resolver.js";
+import {
+  CreateRunRequestSchema,
+  UpdateRunRequestSchema,
+  AddCostsRequestSchema,
+} from "../schemas.js";
 
 const router = Router();
 
 // POST /v1/runs — create a run
 router.post("/v1/runs", requireApiKey, async (req, res) => {
   try {
-    const { organizationId, userId, serviceName, taskName, parentRunId } =
-      req.body;
+    const parsed = CreateRunRequestSchema.safeParse(req.body);
 
-    if (!organizationId) {
-      res.status(400).json({ error: "organizationId is required" });
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
-    if (!serviceName) {
-      res.status(400).json({ error: "serviceName is required" });
-      return;
-    }
-    if (!taskName) {
-      res.status(400).json({ error: "taskName is required" });
-      return;
-    }
+
+    const { organizationId, userId, serviceName, taskName, parentRunId } = parsed.data;
 
     const values = {
       organizationId,
@@ -178,12 +176,15 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
 router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
-    const { items } = req.body;
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      res.status(400).json({ error: "items array is required" });
+    const parsed = AddCostsRequestSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
+
+    const { items } = parsed.data;
 
     // Verify run exists
     const [run] = await db
@@ -198,7 +199,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     }
 
     // Resolve unit costs from costs-service
-    const names = items.map((i: any) => i.costName as string);
+    const names = items.map((i) => i.costName);
     let costMap: Map<string, string>;
     try {
       costMap = await resolveMultipleUnitCosts(names);
@@ -213,13 +214,13 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     }
 
     // Build cost rows
-    const costRows = items.map((item: any) => {
+    const costRows = items.map((item) => {
       const unitCost = costMap.get(item.costName)!;
       const qty = Number(item.quantity);
       const total = (qty * Number(unitCost)).toFixed(10);
       return {
         runId: id,
-        costName: item.costName as string,
+        costName: item.costName,
         quantity: String(item.quantity),
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
@@ -240,12 +241,15 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
 router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
 
-    if (!status || !['completed', 'failed'].includes(status)) {
-      res.status(400).json({ error: "status must be 'completed' or 'failed'" });
+    const parsed = UpdateRunRequestSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
+
+    const { status } = parsed.data;
 
     const [updated] = await db
       .update(runs)

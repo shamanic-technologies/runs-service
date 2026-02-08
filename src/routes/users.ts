@@ -3,23 +3,21 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { users, organizations } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
+import { CreateUserRequestSchema } from "../schemas.js";
 
 const router = Router();
 
 // POST /v1/users — upsert user (externalId -> internalId)
 router.post("/v1/users", requireApiKey, async (req, res) => {
   try {
-    const { externalId, organizationId } = req.body;
+    const parsed = CreateUserRequestSchema.safeParse(req.body);
 
-    if (!externalId) {
-      res.status(400).json({ error: "externalId is required" });
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
 
-    if (!organizationId) {
-      res.status(400).json({ error: "organizationId is required" });
-      return;
-    }
+    const { externalId, organizationId } = parsed.data;
 
     // Verify org exists
     const [org] = await db
