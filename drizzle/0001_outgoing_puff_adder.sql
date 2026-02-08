@@ -1,4 +1,6 @@
-ALTER TABLE "runs" ADD COLUMN "app_id" text NOT NULL;--> statement-breakpoint
+ALTER TABLE "runs" ADD COLUMN "app_id" text;--> statement-breakpoint
+UPDATE "runs" SET "app_id" = 'unknown' WHERE "app_id" IS NULL;--> statement-breakpoint
+ALTER TABLE "runs" ALTER COLUMN "app_id" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "runs" ADD COLUMN "brand_id" text;--> statement-breakpoint
 ALTER TABLE "runs" ADD COLUMN "campaign_id" text;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_runs_app" ON "runs" USING btree ("app_id");--> statement-breakpoint
