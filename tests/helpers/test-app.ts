@@ -4,8 +4,6 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import healthRoutes from "../../src/routes/health.js";
-import organizationRoutes from "../../src/routes/organizations.js";
-import userRoutes from "../../src/routes/users.js";
 import runsRoutes from "../../src/routes/runs.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,8 +28,6 @@ export function createTestApp() {
   });
 
   app.use(healthRoutes);
-  app.use(organizationRoutes);
-  app.use(userRoutes);
   app.use(runsRoutes);
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });

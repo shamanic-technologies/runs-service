@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { runs, runsCosts } from "../db/schema.js";
+import { runs, runsCosts, organizations, users } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
   resolveMultipleUnitCosts,
@@ -15,6 +15,38 @@ import {
 
 const router = Router();
 
+// --- Helpers ---
+
+async function getOrCreateOrg(externalId: string) {
+  const [existing] = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.externalId, externalId))
+    .limit(1);
+  if (existing) return existing;
+
+  const [created] = await db
+    .insert(organizations)
+    .values({ externalId })
+    .returning();
+  return created;
+}
+
+async function getOrCreateUser(externalId: string, organizationId: string) {
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.externalId, externalId))
+    .limit(1);
+  if (existing) return existing;
+
+  const [created] = await db
+    .insert(users)
+    .values({ externalId, organizationId })
+    .returning();
+  return created;
+}
+
 // POST /v1/runs — create a run
 router.post("/v1/runs", requireApiKey, async (req, res) => {
   try {
@@ -25,11 +57,24 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { organizationId, userId, serviceName, taskName, parentRunId } = parsed.data;
+    const { clerkOrgId, clerkUserId, appId, brandId, campaignId, serviceName, taskName, parentRunId } = parsed.data;
+
+    // Get-or-create org
+    const org = await getOrCreateOrg(clerkOrgId);
+
+    // Get-or-create user (optional)
+    let userId: string | null = null;
+    if (clerkUserId) {
+      const user = await getOrCreateUser(clerkUserId, org.id);
+      userId = user.id;
+    }
 
     const values = {
-      organizationId,
-      userId: userId || null,
+      organizationId: org.id,
+      userId,
+      appId,
+      brandId: brandId || null,
+      campaignId: campaignId || null,
       serviceName,
       taskName,
       parentRunId: parentRunId || null,
@@ -58,65 +103,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
   }
 });
 
-// GET /v1/runs/summary — aggregate costs
-router.get("/v1/runs/summary", requireApiKey, async (req, res) => {
-  try {
-    const { organizationId, serviceName, taskName, startedAfter, startedBefore, groupBy } =
-      req.query;
-
-    if (!organizationId) {
-      res.status(400).json({ error: "organizationId query param is required" });
-      return;
-    }
-
-    const conditions = [eq(runs.organizationId, organizationId as string)];
-    if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
-    if (taskName) conditions.push(eq(runs.taskName, taskName as string));
-    if (startedAfter)
-      conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
-    if (startedBefore)
-      conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
-
-    const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
-
-    if (groupBy === "costName") {
-      const result = await db
-        .select({
-          key: runsCosts.costName,
-          totalCostInUsdCents: sql<string>`sum(${runsCosts.totalCostInUsdCents})`,
-          totalQuantity: sql<string>`sum(${runsCosts.quantity})`,
-        })
-        .from(runsCosts)
-        .innerJoin(runs, eq(runsCosts.runId, runs.id))
-        .where(whereClause)
-        .groupBy(runsCosts.costName);
-
-      res.json({ breakdown: result });
-      return;
-    }
-
-    const groupColumn =
-      groupBy === "userId" ? runs.userId : runs.serviceName;
-
-    const result = await db
-      .select({
-        key: groupColumn,
-        totalCostInUsdCents: sql<string>`sum(${runsCosts.totalCostInUsdCents})`,
-        runCount: sql<number>`count(distinct ${runs.id})`,
-      })
-      .from(runs)
-      .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
-      .where(whereClause)
-      .groupBy(groupColumn);
-
-    res.json({ breakdown: result });
-  } catch (err) {
-    console.error("[Runs Service] Error getting summary:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// GET /v1/runs/:id — get run with costs (including children costs)
+// GET /v1/runs/:id — get run with costs and descendant runs
 router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
@@ -143,20 +130,61 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       0
     );
 
-    // Get children runs and their costs recursively using CTE
-    const childrenCostResult = await db.execute(
+    // Get all descendant run IDs using recursive CTE
+    const descendantResult = await db.execute(
       sql`WITH RECURSIVE descendants AS (
-        SELECT id FROM runs WHERE parent_run_id = ${id}
+        SELECT id, parent_run_id, service_name, task_name, status, started_at, completed_at
+        FROM runs WHERE parent_run_id = ${id}
         UNION ALL
-        SELECT r.id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        SELECT r.id, r.parent_run_id, r.service_name, r.task_name, r.status, r.started_at, r.completed_at
+        FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
       )
-      SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) as children_total
-      FROM runs_costs rc
-      WHERE rc.run_id IN (SELECT id FROM descendants)`
+      SELECT * FROM descendants`
     );
 
-    const childrenTotal = Number(
-      (childrenCostResult as any)[0]?.children_total || 0
+    const descendantRows = descendantResult as any[];
+    const descendantIds = descendantRows.map((r: any) => r.id);
+
+    // Get all descendant costs in one query
+    let allDescendantCosts: any[] = [];
+    if (descendantIds.length > 0) {
+      allDescendantCosts = await db
+        .select()
+        .from(runsCosts)
+        .where(inArray(runsCosts.runId, descendantIds));
+    }
+
+    // Group costs by runId
+    const costsByRunId = new Map<string, any[]>();
+    for (const cost of allDescendantCosts) {
+      const list = costsByRunId.get(cost.runId) || [];
+      list.push(cost);
+      costsByRunId.set(cost.runId, list);
+    }
+
+    // Build descendant runs with costs
+    const descendantRuns = descendantRows.map((r: any) => {
+      const runCosts = costsByRunId.get(r.id) || [];
+      const runOwnTotal = runCosts.reduce(
+        (sum: number, c: any) => sum + Number(c.totalCostInUsdCents),
+        0
+      );
+      return {
+        id: r.id,
+        parentRunId: r.parent_run_id,
+        serviceName: r.service_name,
+        taskName: r.task_name,
+        status: r.status,
+        startedAt: r.started_at,
+        completedAt: r.completed_at,
+        costs: runCosts,
+        ownCostInUsdCents: runOwnTotal.toFixed(10),
+      };
+    });
+
+    const childrenTotal = allDescendantCosts.reduce(
+      (sum, c) => sum + Number(c.totalCostInUsdCents),
+      0
     );
 
     res.json({
@@ -165,6 +193,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       totalCostInUsdCents: (ownTotal + childrenTotal).toFixed(10),
       ownCostInUsdCents: ownTotal.toFixed(10),
       childrenCostInUsdCents: childrenTotal.toFixed(10),
+      descendantRuns,
     });
   } catch (err) {
     console.error("[Runs Service] Error getting run:", err);
@@ -273,31 +302,66 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
   }
 });
 
-// GET /v1/runs — list runs
+// GET /v1/runs — list runs with cost totals
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      organizationId,
+      clerkOrgId,
+      clerkUserId,
+      appId,
+      brandId,
+      campaignId,
       serviceName,
       taskName,
-      userId,
       status,
+      parentRunId,
       startedAfter,
       startedBefore,
       limit: limitStr,
       offset: offsetStr,
     } = req.query;
 
-    if (!organizationId) {
-      res.status(400).json({ error: "organizationId query param is required" });
+    if (!clerkOrgId) {
+      res.status(400).json({ error: "clerkOrgId query param is required" });
       return;
     }
 
-    const conditions = [eq(runs.organizationId, organizationId as string)];
+    // Resolve clerkOrgId to internal org ID
+    const [org] = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.externalId, clerkOrgId as string))
+      .limit(1);
+
+    if (!org) {
+      // Org doesn't exist — no runs possible
+      res.json({ runs: [], limit: Math.min(Number(limitStr) || 50, 200), offset: Number(offsetStr) || 0 });
+      return;
+    }
+
+    const conditions = [eq(runs.organizationId, org.id)];
+
+    // Resolve clerkUserId to internal user ID
+    if (clerkUserId) {
+      const [user] = await db
+        .select()
+        .from(users)
+        .where(eq(users.externalId, clerkUserId as string))
+        .limit(1);
+      if (!user) {
+        res.json({ runs: [], limit: Math.min(Number(limitStr) || 50, 200), offset: Number(offsetStr) || 0 });
+        return;
+      }
+      conditions.push(eq(runs.userId, user.id));
+    }
+
+    if (appId) conditions.push(eq(runs.appId, appId as string));
+    if (brandId) conditions.push(eq(runs.brandId, brandId as string));
+    if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
-    if (userId) conditions.push(eq(runs.userId, userId as string));
     if (status) conditions.push(eq(runs.status, status as string));
+    if (parentRunId) conditions.push(eq(runs.parentRunId, parentRunId as string));
     if (startedAfter)
       conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
     if (startedBefore)
@@ -307,15 +371,55 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     const limit = Math.min(Number(limitStr) || 50, 200);
     const offset = Number(offsetStr) || 0;
 
+    // Select runs with own cost totals via LEFT JOIN + SUM
     const result = await db
-      .select()
+      .select({
+        id: runs.id,
+        parentRunId: runs.parentRunId,
+        organizationId: runs.organizationId,
+        userId: runs.userId,
+        appId: runs.appId,
+        brandId: runs.brandId,
+        campaignId: runs.campaignId,
+        serviceName: runs.serviceName,
+        taskName: runs.taskName,
+        status: runs.status,
+        startedAt: runs.startedAt,
+        completedAt: runs.completedAt,
+        createdAt: runs.createdAt,
+        updatedAt: runs.updatedAt,
+        ownCostInUsdCents: sql<string>`COALESCE(SUM(${runsCosts.totalCostInUsdCents}), 0)`.as("own_cost_in_usd_cents"),
+      })
       .from(runs)
+      .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
       .where(whereClause)
+      .groupBy(
+        runs.id,
+        runs.parentRunId,
+        runs.organizationId,
+        runs.userId,
+        runs.appId,
+        runs.brandId,
+        runs.campaignId,
+        runs.serviceName,
+        runs.taskName,
+        runs.status,
+        runs.startedAt,
+        runs.completedAt,
+        runs.createdAt,
+        runs.updatedAt,
+      )
       .orderBy(desc(runs.startedAt))
       .limit(limit)
       .offset(offset);
 
-    res.json({ runs: result, limit, offset });
+    // Format ownCostInUsdCents to fixed decimal
+    const formattedRuns = result.map((r) => ({
+      ...r,
+      ownCostInUsdCents: Number(r.ownCostInUsdCents).toFixed(10),
+    }));
+
+    res.json({ runs: formattedRuns, limit, offset });
   } catch (err) {
     console.error("[Runs Service] Error listing runs:", err);
     res.status(500).json({ error: "Internal server error" });

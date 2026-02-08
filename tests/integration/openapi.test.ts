@@ -13,18 +13,16 @@ describe("OpenAPI", () => {
     expect(res.body.paths).toBeDefined();
     expect(res.body.paths["/health"]).toBeDefined();
     expect(res.body.paths["/v1/runs"]).toBeDefined();
-    expect(res.body.paths["/v1/organizations"]).toBeDefined();
-    expect(res.body.paths["/v1/users"]).toBeDefined();
+    expect(res.body.paths["/v1/runs/{id}"]).toBeDefined();
     expect(res.body.components?.schemas).toBeDefined();
     expect(res.body.components.schemas.Run).toBeDefined();
-    expect(res.body.components.schemas.Organization).toBeDefined();
-    expect(res.body.components.schemas.User).toBeDefined();
     expect(res.body.components.schemas.Cost).toBeDefined();
+    expect(res.body.components.schemas.RunWithCosts).toBeDefined();
+    expect(res.body.components.schemas.DescendantRun).toBeDefined();
   });
 
   it("GET /openapi.json does not require authentication", async () => {
     const res = await request(app).get("/openapi.json");
-    // Should succeed without X-API-Key header
     expect(res.status).toBe(200);
   });
 });

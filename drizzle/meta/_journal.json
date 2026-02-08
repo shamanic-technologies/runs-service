@@ -8,6 +8,13 @@
       "when": 1770010437613,
       "tag": "0000_military_mastermind",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1770549111756,
+      "tag": "0001_outgoing_puff_adder",
+      "breakpoints": true
     }
   ]
 }
