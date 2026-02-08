@@ -15,6 +15,11 @@ describe("OpenAPI", () => {
     expect(res.body.paths["/v1/runs"]).toBeDefined();
     expect(res.body.paths["/v1/organizations"]).toBeDefined();
     expect(res.body.paths["/v1/users"]).toBeDefined();
+    expect(res.body.components?.schemas).toBeDefined();
+    expect(res.body.components.schemas.Run).toBeDefined();
+    expect(res.body.components.schemas.Organization).toBeDefined();
+    expect(res.body.components.schemas.User).toBeDefined();
+    expect(res.body.components.schemas.Cost).toBeDefined();
   });
 
   it("GET /openapi.json does not require authentication", async () => {
