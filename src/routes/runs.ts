@@ -6,6 +6,7 @@ import { requireApiKey } from "../middleware/auth.js";
 import {
   resolveMultipleUnitCosts,
   CostNotFoundError,
+  UpstreamError,
 } from "../services/cost-resolver.js";
 import {
   CreateRunRequestSchema,
@@ -261,6 +262,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
 
     res.status(201).json({ costs: inserted });
   } catch (err) {
+    if (err instanceof UpstreamError) {
+      console.error(`[Runs Service] costs-service unavailable (${err.statusCode}):`, err.message);
+      res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
+      return;
+    }
     console.error("[Runs Service] Error adding run costs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
