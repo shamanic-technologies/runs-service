@@ -25,6 +25,13 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
       this.costName = costName;
     }
   },
+  UpstreamError: class UpstreamError extends Error {
+    statusCode: number;
+    constructor(statusCode: number, message: string) {
+      super(message);
+      this.statusCode = statusCode;
+    }
+  },
 }));
 
 describe("Runs CRUD", () => {
@@ -200,6 +207,29 @@ describe("Runs CRUD", () => {
         .send({ items: [{ costName: "test", quantity: 1 }] });
 
       expect(res.status).toBe(404);
+    });
+
+    it("returns 502 when costs-service is unavailable", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const { UpstreamError } = await import("../../src/services/cost-resolver.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+
+      const org = await insertTestOrg("org-upstream");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      mockedResolve.mockRejectedValueOnce(new UpstreamError(502, "costs-service returned 502"));
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({ items: [{ costName: "gpt-4o-input-token", quantity: 1000 }] });
+
+      expect(res.status).toBe(502);
+      expect(res.body.error).toContain("costs-service");
     });
   });
 

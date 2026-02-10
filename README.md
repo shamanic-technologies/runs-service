@@ -222,7 +222,7 @@ Returns the run with its cost breakdown, including all descendant runs and their
 POST /v1/runs/:id/costs
 ```
 
-Adds cost line items. Unit costs are resolved automatically from the [costs-service](https://github.com/shamanic-technologies/costs-service).
+Adds cost line items. Unit costs are resolved automatically from the [costs-service](https://github.com/shamanic-technologies/costs-service). Requests to the costs-service are retried up to 3 times with exponential backoff (1s, 2s, 4s) on transient errors (502, 503, 429) and network failures.
 
 **Request body**
 ```json
@@ -256,6 +256,7 @@ Adds cost line items. Unit costs are resolved automatically from the [costs-serv
 |--------|---------|
 | `404` | Run not found |
 | `422` | Unknown cost name (not found in costs-service) |
+| `502` | Costs-service unavailable after retries |
 
 ---
 
