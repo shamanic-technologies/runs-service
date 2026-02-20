@@ -83,6 +83,8 @@ export type UpdateRunRequest = z.infer<typeof UpdateRunRequestSchema>;
 
 // --- Cost schemas ---
 
+export const CostStatusEnum = z.enum(["actual", "provisioned", "cancelled"]).openapi("CostStatus");
+
 export const CostSchema = z
   .object({
     id: z.string().uuid(),
@@ -91,7 +93,7 @@ export const CostSchema = z
     quantity: z.string(),
     unitCostInUsdCents: z.string(),
     totalCostInUsdCents: z.string(),
-    provisioned: z.boolean(),
+    status: CostStatusEnum,
     createdAt: z.string().datetime(),
   })
   .openapi("Cost");
@@ -100,7 +102,7 @@ export const CostItemSchema = z
   .object({
     costName: z.string().min(1),
     quantity: z.number().positive(),
-    provisioned: z.boolean().default(false),
+    status: CostStatusEnum.default("actual"),
   })
   .openapi("CostItem");
 
@@ -114,7 +116,7 @@ export type AddCostsRequest = z.infer<typeof AddCostsRequestSchema>;
 
 export const UpdateCostRequestSchema = z
   .object({
-    provisioned: z.boolean(),
+    status: CostStatusEnum,
   })
   .openapi("UpdateCostRequest");
 
@@ -346,9 +348,9 @@ registry.registerPath({
 registry.registerPath({
   method: "patch",
   path: "/v1/runs/{id}/costs/{costId}",
-  summary: "Update a cost item",
+  summary: "Update a cost item status",
   description:
-    "Updates a cost item. Use to realize a provisioned cost by setting provisioned to false.",
+    "Updates a cost item status. Use to realize a provisioned cost (set status to 'actual') or cancel it (set status to 'cancelled').",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -368,29 +370,6 @@ registry.registerPath({
       description: "Invalid request",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
-    401: { description: "Unauthorized" },
-    404: {
-      description: "Run or cost not found",
-      content: { "application/json": { schema: ErrorSchema } },
-    },
-  },
-});
-
-registry.registerPath({
-  method: "delete",
-  path: "/v1/runs/{id}/costs/{costId}",
-  summary: "Cancel a cost item",
-  description:
-    "Deletes a cost item. Intended for cancelling provisioned costs when an email sequence stops early.",
-  security: [{ apiKey: [] }],
-  request: {
-    params: z.object({
-      id: z.string().uuid(),
-      costId: z.string().uuid(),
-    }),
-  },
-  responses: {
-    204: { description: "Cost deleted" },
     401: { description: "Unauthorized" },
     404: {
       description: "Run or cost not found",

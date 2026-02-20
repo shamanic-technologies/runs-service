@@ -403,7 +403,7 @@ describe("Runs CRUD", () => {
     });
   });
 
-  describe("POST /v1/runs/:id/costs (provisioned)", () => {
+  describe("POST /v1/runs/:id/costs (cost status)", () => {
     it("creates provisioned cost items", async () => {
       const org = await insertTestOrg("org-prov");
       const run = await insertTestRun({
@@ -417,15 +417,15 @@ describe("Runs CRUD", () => {
         .set(authHeaders)
         .send({
           items: [
-            { costName: "gpt-4o-input-token", quantity: 1000, provisioned: true },
+            { costName: "gpt-4o-input-token", quantity: 1000, status: "provisioned" },
           ],
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.costs[0].provisioned).toBe(true);
+      expect(res.body.costs[0].status).toBe("provisioned");
     });
 
-    it("defaults provisioned to false when omitted", async () => {
+    it("defaults status to actual when omitted", async () => {
       const org = await insertTestOrg("org-prov-default");
       const run = await insertTestRun({
         organizationId: org.id,
@@ -441,7 +441,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.costs[0].provisioned).toBe(false);
+      expect(res.body.costs[0].status).toBe("actual");
     });
   });
 
@@ -459,17 +459,78 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
-        provisioned: true,
+        status: "provisioned",
       });
 
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
         .set(authHeaders)
-        .send({ provisioned: false });
+        .send({ status: "actual" });
 
       expect(res.status).toBe(200);
-      expect(res.body.provisioned).toBe(false);
+      expect(res.body.status).toBe("actual");
       expect(res.body.id).toBe(cost.id);
+    });
+
+    it("cancels a provisioned cost", async () => {
+      const org = await insertTestOrg("org-cancel");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        status: "provisioned",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ status: "cancelled" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("cancelled");
+    });
+
+    it("cancelled costs are excluded from totals", async () => {
+      const org = await insertTestOrg("org-cancel-totals");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        status: "actual",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        status: "cancelled",
+      });
+
+      const res = await request(app)
+        .get(`/v1/runs/${run.id}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.costs).toHaveLength(2);
+      expect(res.body.ownCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.ownActualCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.ownProvisionedCostInUsdCents).toBe("0.0000000000");
     });
 
     it("returns 404 for non-existent cost", async () => {
@@ -483,7 +544,7 @@ describe("Runs CRUD", () => {
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
         .set(authHeaders)
-        .send({ provisioned: false });
+        .send({ status: "actual" });
 
       expect(res.status).toBe(404);
     });
@@ -498,81 +559,31 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.0010000000",
         totalCostInUsdCents: "0.0010000000",
-        provisioned: true,
+        status: "provisioned",
       });
 
       const res = await request(app)
         .patch(`/v1/runs/${run2.id}/costs/${cost.id}`)
         .set(authHeaders)
-        .send({ provisioned: false });
+        .send({ status: "actual" });
 
       expect(res.status).toBe(404);
     });
 
-    it("rejects invalid body", async () => {
+    it("rejects invalid status value", async () => {
       const org = await insertTestOrg("org-realize-bad");
       const run = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "task" });
 
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
         .set(authHeaders)
-        .send({ provisioned: "maybe" });
+        .send({ status: "maybe" });
 
       expect(res.status).toBe(400);
     });
   });
 
-  describe("DELETE /v1/runs/:id/costs/:costId", () => {
-    it("cancels a provisioned cost", async () => {
-      const org = await insertTestOrg("org-cancel");
-      const run = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-      });
-      const cost = await insertTestRunCost({
-        runId: run.id,
-        costName: "email-send",
-        quantity: "1",
-        unitCostInUsdCents: "0.5000000000",
-        totalCostInUsdCents: "0.5000000000",
-        provisioned: true,
-      });
-
-      const res = await request(app)
-        .delete(`/v1/runs/${run.id}/costs/${cost.id}`)
-        .set(authHeaders);
-
-      expect(res.status).toBe(204);
-
-      // Verify cost is gone via GET
-      const getRes = await request(app)
-        .get(`/v1/runs/${run.id}`)
-        .set(authHeaders);
-      expect(getRes.body.costs).toHaveLength(0);
-    });
-
-    it("returns 404 for non-existent cost", async () => {
-      const org = await insertTestOrg("org-cancel-404");
-      const run = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "task" });
-
-      const res = await request(app)
-        .delete(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
-        .set(authHeaders);
-
-      expect(res.status).toBe(404);
-    });
-
-    it("returns 404 for non-existent run", async () => {
-      const res = await request(app)
-        .delete("/v1/runs/00000000-0000-0000-0000-000000000000/costs/00000000-0000-0000-0000-000000000001")
-        .set(authHeaders);
-
-      expect(res.status).toBe(404);
-    });
-  });
-
-  describe("GET /v1/runs/:id (provisioned cost breakdown)", () => {
+  describe("GET /v1/runs/:id (cost status breakdown)", () => {
     it("returns actual vs provisioned cost breakdown", async () => {
       const org = await insertTestOrg("org-breakdown");
       const run = await insertTestRun({
@@ -588,7 +599,7 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
-        provisioned: false,
+        status: "actual",
       });
 
       // Provisioned costs (emails 2 and 3 scheduled)
@@ -598,7 +609,7 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
-        provisioned: true,
+        status: "provisioned",
       });
       await insertTestRunCost({
         runId: run.id,
@@ -606,7 +617,7 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
-        provisioned: true,
+        status: "provisioned",
       });
 
       const res = await request(app)
@@ -642,7 +653,7 @@ describe("Runs CRUD", () => {
         quantity: "1",
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
-        provisioned: true,
+        status: "provisioned",
       });
 
       const res = await request(app)
@@ -768,7 +779,7 @@ describe("Runs CRUD", () => {
         quantity: "100",
         unitCostInUsdCents: "0.0010000000",
         totalCostInUsdCents: "0.1000000000",
-        provisioned: false,
+        status: "actual",
       });
       await insertTestRunCost({
         runId: run.id,
@@ -776,7 +787,7 @@ describe("Runs CRUD", () => {
         quantity: "200",
         unitCostInUsdCents: "0.0010000000",
         totalCostInUsdCents: "0.2000000000",
-        provisioned: true,
+        status: "provisioned",
       });
 
       const res = await request(app)

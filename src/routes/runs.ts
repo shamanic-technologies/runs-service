@@ -51,12 +51,13 @@ async function getOrCreateUser(externalId: string, organizationId: string) {
 
 // --- Cost breakdown helper ---
 
-function computeCostBreakdown(costs: { totalCostInUsdCents: string | number; provisioned: boolean }[]) {
+function computeCostBreakdown(costs: { totalCostInUsdCents: string | number; status: string }[]) {
   let actual = 0;
   let provisioned = 0;
   for (const c of costs) {
+    if (c.status === "cancelled") continue;
     const amount = Number(c.totalCostInUsdCents);
-    if (c.provisioned) {
+    if (c.status === "provisioned") {
       provisioned += amount;
     } else {
       actual += amount;
@@ -270,7 +271,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         quantity: String(item.quantity),
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
-        provisioned: item.provisioned ?? false,
+        status: item.status ?? "actual",
       };
     });
 
@@ -310,7 +311,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     // Update the cost row (must belong to this run)
     const [updated] = await db
       .update(runsCosts)
-      .set({ provisioned: parsed.data.provisioned })
+      .set({ status: parsed.data.status })
       .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
       .returning();
 
@@ -322,36 +323,6 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     res.json(updated);
   } catch (err) {
     console.error("[Runs Service] Error updating cost:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// DELETE /v1/runs/:id/costs/:costId — cancel a cost item
-router.delete("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
-  try {
-    const { id, costId } = req.params;
-
-    // Verify run exists
-    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
-    if (!run) {
-      res.status(404).json({ error: "Run not found" });
-      return;
-    }
-
-    // Delete the cost row (must belong to this run)
-    const [deleted] = await db
-      .delete(runsCosts)
-      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
-      .returning();
-
-    if (!deleted) {
-      res.status(404).json({ error: "Cost not found" });
-      return;
-    }
-
-    res.status(204).send();
-  } catch (err) {
-    console.error("[Runs Service] Error deleting cost:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -478,9 +449,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         completedAt: runs.completedAt,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
-        ownCostInUsdCents: sql<string>`COALESCE(SUM(${runsCosts.totalCostInUsdCents}), 0)`.as("own_cost_in_usd_cents"),
-        ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.provisioned} = false THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
-        ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.provisioned} = true THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
+        ownCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} != 'cancelled' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_cost_in_usd_cents"),
+        ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'actual' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
+        ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'provisioned' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
       })
       .from(runs)
       .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
