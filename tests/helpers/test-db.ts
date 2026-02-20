@@ -28,6 +28,7 @@ export async function insertTestRun(data: {
   appId?: string;
   brandId?: string;
   campaignId?: string;
+  workflowName?: string;
   userId?: string;
   parentRunId?: string;
   status?: string;
@@ -41,6 +42,7 @@ export async function insertTestRun(data: {
       appId: data.appId || "test-app",
       brandId: data.brandId || null,
       campaignId: data.campaignId || null,
+      workflowName: data.workflowName || null,
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",

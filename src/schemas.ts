@@ -41,6 +41,7 @@ export const RunSchema = z
     appId: z.string(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
+    workflowName: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -65,6 +66,7 @@ export const CreateRunRequestSchema = z
     appId: z.string().min(1),
     brandId: z.string().min(1).optional(),
     campaignId: z.string().min(1).optional(),
+    workflowName: z.string().min(1).optional(),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
     parentRunId: z.string().uuid().optional(),
@@ -152,6 +154,7 @@ export const RunWithCostsSchema = z
     appId: z.string(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
+    workflowName: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -261,6 +264,7 @@ registry.registerPath({
       appId: z.string().optional(),
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
+      workflowName: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
       status: z.string().optional(),
@@ -401,6 +405,210 @@ registry.registerPath({
     400: {
       description: "Invalid status value",
       content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+// --- Stats schemas ---
+
+export const StatsFiltersSchema = z.object({
+  clerkOrgId: z.string().min(1),
+  brandId: z.string().optional(),
+  campaignId: z.string().optional(),
+  workflowName: z.string().optional(),
+  serviceName: z.string().optional(),
+  taskName: z.string().optional(),
+  appId: z.string().optional(),
+  startedAfter: z.string().datetime().optional(),
+  startedBefore: z.string().datetime().optional(),
+});
+
+export const StatsCostsQuerySchema = StatsFiltersSchema.extend({
+  groupBy: z.string().min(1),
+}).openapi("StatsCostsQuery");
+
+export const StatsCostsResponseSchema = z
+  .object({
+    groups: z.array(
+      z.object({
+        dimensions: z.record(z.string(), z.string().nullable()),
+        totalCostInUsdCents: z.string(),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        cancelledCostInUsdCents: z.string(),
+        runCount: z.number(),
+      })
+    ),
+  })
+  .openapi("StatsCostsResponse");
+
+export const StatsCostsByCostNameResponseSchema = z
+  .object({
+    costs: z.array(
+      z.object({
+        costName: z.string(),
+        totalCostInUsdCents: z.string(),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        cancelledCostInUsdCents: z.string(),
+        totalQuantity: z.string(),
+      })
+    ),
+  })
+  .openapi("StatsCostsByCostNameResponse");
+
+export const BudgetWindowSchema = z.object({
+  label: z.string().min(1),
+  since: z.string().datetime().optional(),
+});
+
+export const BudgetRequestSchema = z
+  .object({
+    clerkOrgId: z.string().min(1),
+    campaignId: z.string().optional(),
+    brandId: z.string().optional(),
+    workflowName: z.string().optional(),
+    appId: z.string().optional(),
+    windows: z.array(BudgetWindowSchema).min(1).max(10),
+  })
+  .openapi("BudgetRequest");
+
+export const BudgetResponseSchema = z
+  .object({
+    windows: z.array(
+      z.object({
+        label: z.string(),
+        totalCostInUsdCents: z.string(),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+      })
+    ),
+  })
+  .openapi("BudgetResponse");
+
+export const ChildSummarySchema = z
+  .object({
+    id: z.string().uuid(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    status: z.string(),
+    startedAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
+    totalCostInUsdCents: z.string(),
+    actualCostInUsdCents: z.string(),
+    provisionedCostInUsdCents: z.string(),
+    costsByName: z.array(
+      z.object({
+        costName: z.string(),
+        totalCostInUsdCents: z.string(),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+      })
+    ),
+  })
+  .openapi("ChildSummary");
+
+export const ChildrenSummaryResponseSchema = z
+  .object({
+    parentRunId: z.string().uuid(),
+    children: z.array(ChildSummarySchema),
+  })
+  .openapi("ChildrenSummaryResponse");
+
+// --- Stats path registrations ---
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/costs",
+  summary: "Aggregate costs with GROUP BY",
+  description:
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName, appId). All standard filters apply.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: StatsCostsQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Aggregated cost groups",
+      content: { "application/json": { schema: StatsCostsResponseSchema } },
+    },
+    400: {
+      description: "Invalid groupBy value or missing clerkOrgId",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/costs/by-cost-name",
+  summary: "Cost breakdown by cost name",
+  description:
+    "Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Includes actual/provisioned/cancelled breakdown and total quantity.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: StatsFiltersSchema,
+  },
+  responses: {
+    200: {
+      description: "Cost breakdown by name",
+      content: { "application/json": { schema: StatsCostsByCostNameResponseSchema } },
+    },
+    400: {
+      description: "Missing clerkOrgId",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/stats/budget",
+  summary: "Budget check with temporal windows",
+  description:
+    "Returns aggregated actual + provisioned costs across temporal windows (e.g., today, 7d, month, all). Used by the DAG budget gatekeeper before each step.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: BudgetRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Budget per window",
+      content: { "application/json": { schema: BudgetResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/children-summary",
+  summary: "Per-child cost summary",
+  description:
+    "Returns aggregated costs per direct child run, including all descendant costs. Each child includes a costsByName breakdown. Used for per-lead drill-down in a campaign.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({
+      id: z.string().uuid(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Children with aggregated costs",
+      content: { "application/json": { schema: ChildrenSummaryResponseSchema } },
     },
     401: { description: "Unauthorized" },
     404: {

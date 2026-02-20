@@ -76,7 +76,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { clerkOrgId, clerkUserId, appId, brandId, campaignId, serviceName, taskName, parentRunId } = parsed.data;
+    const { clerkOrgId, clerkUserId, appId, brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
 
     // Get-or-create org
     const org = await getOrCreateOrg(clerkOrgId);
@@ -88,12 +88,36 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       userId = user.id;
     }
 
+    // Auto-inherit context fields from parent run
+    let inheritedBrandId = brandId || null;
+    let inheritedCampaignId = campaignId || null;
+    let inheritedWorkflowName = workflowName || null;
+
+    if (parentRunId) {
+      const [parentRun] = await db
+        .select({
+          brandId: runs.brandId,
+          campaignId: runs.campaignId,
+          workflowName: runs.workflowName,
+        })
+        .from(runs)
+        .where(eq(runs.id, parentRunId))
+        .limit(1);
+
+      if (parentRun) {
+        if (!inheritedBrandId) inheritedBrandId = parentRun.brandId;
+        if (!inheritedCampaignId) inheritedCampaignId = parentRun.campaignId;
+        if (!inheritedWorkflowName) inheritedWorkflowName = parentRun.workflowName;
+      }
+    }
+
     const values = {
       organizationId: org.id,
       userId,
       appId,
-      brandId: brandId || null,
-      campaignId: campaignId || null,
+      brandId: inheritedBrandId,
+      campaignId: inheritedCampaignId,
+      workflowName: inheritedWorkflowName,
       serviceName,
       taskName,
       parentRunId: parentRunId || null,
@@ -372,6 +396,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       appId,
       brandId,
       campaignId,
+      workflowName,
       serviceName,
       taskName,
       status,
@@ -419,6 +444,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (appId) conditions.push(eq(runs.appId, appId as string));
     if (brandId) conditions.push(eq(runs.brandId, brandId as string));
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
+    if (workflowName) conditions.push(eq(runs.workflowName, workflowName as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (status) conditions.push(eq(runs.status, status as string));
@@ -442,6 +468,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         appId: runs.appId,
         brandId: runs.brandId,
         campaignId: runs.campaignId,
+        workflowName: runs.workflowName,
         serviceName: runs.serviceName,
         taskName: runs.taskName,
         status: runs.status,
@@ -464,6 +491,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         runs.appId,
         runs.brandId,
         runs.campaignId,
+        runs.workflowName,
         runs.serviceName,
         runs.taskName,
         runs.status,

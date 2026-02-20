@@ -175,6 +175,121 @@ describe("Runs CRUD", () => {
       expect(res.body.brandId).toBe("brand_1");
       expect(res.body.campaignId).toBe("campaign_1");
     });
+
+    it("stores workflowName when provided", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          clerkOrgId: "org_wf",
+          appId: "my-app",
+          workflowName: "sales-cold-email-v1",
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.workflowName).toBe("sales-cold-email-v1");
+    });
+
+    it("workflowName defaults to null", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          clerkOrgId: "org_wf_null",
+          appId: "my-app",
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.workflowName).toBeNull();
+    });
+
+    it("inherits workflowName, brandId, campaignId from parent", async () => {
+      const org = await insertTestOrg("org-inherit");
+      const parent = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        brandId: "inherited-brand",
+        campaignId: "inherited-campaign",
+        workflowName: "inherited-workflow",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          clerkOrgId: "org-inherit",
+          appId: "my-app",
+          serviceName: "child-svc",
+          taskName: "child-task",
+          parentRunId: parent.id,
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("inherited-brand");
+      expect(res.body.campaignId).toBe("inherited-campaign");
+      expect(res.body.workflowName).toBe("inherited-workflow");
+    });
+
+    it("child values take precedence over parent", async () => {
+      const org = await insertTestOrg("org-override");
+      const parent = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        brandId: "parent-brand",
+        campaignId: "parent-campaign",
+        workflowName: "parent-workflow",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          clerkOrgId: "org-override",
+          appId: "my-app",
+          serviceName: "child-svc",
+          taskName: "child-task",
+          parentRunId: parent.id,
+          brandId: "child-brand",
+          campaignId: "child-campaign",
+          workflowName: "child-workflow",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("child-brand");
+      expect(res.body.campaignId).toBe("child-campaign");
+      expect(res.body.workflowName).toBe("child-workflow");
+    });
+
+    it("no inheritance when parent has null values", async () => {
+      const org = await insertTestOrg("org-inherit-null");
+      const parent = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          clerkOrgId: "org-inherit-null",
+          appId: "my-app",
+          serviceName: "child-svc",
+          taskName: "child-task",
+          parentRunId: parent.id,
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBeNull();
+      expect(res.body.campaignId).toBeNull();
+      expect(res.body.workflowName).toBeNull();
+    });
   });
 
   describe("POST /v1/runs/:id/costs", () => {
@@ -798,6 +913,30 @@ describe("Runs CRUD", () => {
       expect(res.body.runs[0].ownCostInUsdCents).toBe("0.3000000000");
       expect(res.body.runs[0].ownActualCostInUsdCents).toBe("0.1000000000");
       expect(res.body.runs[0].ownProvisionedCostInUsdCents).toBe("0.2000000000");
+    });
+
+    it("filters by workflowName", async () => {
+      const org = await insertTestOrg("org-wf-filter");
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "sales-cold-email-v1",
+      });
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "journalist-outreach-v2",
+      });
+
+      const res = await request(app)
+        .get("/v1/runs?clerkOrgId=org-wf-filter&workflowName=sales-cold-email-v1")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.runs).toHaveLength(1);
+      expect(res.body.runs[0].workflowName).toBe("sales-cold-email-v1");
     });
 
     it("filters by appId", async () => {
