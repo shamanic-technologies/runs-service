@@ -403,6 +403,260 @@ describe("Runs CRUD", () => {
     });
   });
 
+  describe("POST /v1/runs/:id/costs (provisioned)", () => {
+    it("creates provisioned cost items", async () => {
+      const org = await insertTestOrg("org-prov");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "email-svc",
+        taskName: "send-sequence",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", quantity: 1000, provisioned: true },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.costs[0].provisioned).toBe(true);
+    });
+
+    it("defaults provisioned to false when omitted", async () => {
+      const org = await insertTestOrg("org-prov-default");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [{ costName: "gpt-4o-input-token", quantity: 1000 }],
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.costs[0].provisioned).toBe(false);
+    });
+  });
+
+  describe("PATCH /v1/runs/:id/costs/:costId", () => {
+    it("realizes a provisioned cost", async () => {
+      const org = await insertTestOrg("org-realize");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ provisioned: false });
+
+      expect(res.status).toBe(200);
+      expect(res.body.provisioned).toBe(false);
+      expect(res.body.id).toBe(cost.id);
+    });
+
+    it("returns 404 for non-existent cost", async () => {
+      const org = await insertTestOrg("org-realize-404");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
+        .set(authHeaders)
+        .send({ provisioned: false });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for cost belonging to different run", async () => {
+      const org = await insertTestOrg("org-realize-wrong");
+      const run1 = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "t1" });
+      const run2 = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "t2" });
+      const cost = await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "1",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0010000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run2.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ provisioned: false });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("rejects invalid body", async () => {
+      const org = await insertTestOrg("org-realize-bad");
+      const run = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "task" });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
+        .set(authHeaders)
+        .send({ provisioned: "maybe" });
+
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("DELETE /v1/runs/:id/costs/:costId", () => {
+    it("cancels a provisioned cost", async () => {
+      const org = await insertTestOrg("org-cancel");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .delete(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(204);
+
+      // Verify cost is gone via GET
+      const getRes = await request(app)
+        .get(`/v1/runs/${run.id}`)
+        .set(authHeaders);
+      expect(getRes.body.costs).toHaveLength(0);
+    });
+
+    it("returns 404 for non-existent cost", async () => {
+      const org = await insertTestOrg("org-cancel-404");
+      const run = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "task" });
+
+      const res = await request(app)
+        .delete(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for non-existent run", async () => {
+      const res = await request(app)
+        .delete("/v1/runs/00000000-0000-0000-0000-000000000000/costs/00000000-0000-0000-0000-000000000001")
+        .set(authHeaders);
+
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /v1/runs/:id (provisioned cost breakdown)", () => {
+    it("returns actual vs provisioned cost breakdown", async () => {
+      const org = await insertTestOrg("org-breakdown");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "email-svc",
+        taskName: "send-sequence",
+      });
+
+      // Actual cost (email 1 sent)
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: false,
+      });
+
+      // Provisioned costs (emails 2 and 3 scheduled)
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: true,
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .get(`/v1/runs/${run.id}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ownCostInUsdCents).toBe("1.5000000000");
+      expect(res.body.ownActualCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.ownProvisionedCostInUsdCents).toBe("1.0000000000");
+      expect(res.body.totalCostInUsdCents).toBe("1.5000000000");
+      expect(res.body.actualCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.provisionedCostInUsdCents).toBe("1.0000000000");
+    });
+
+    it("includes provisioned breakdown for descendant runs", async () => {
+      const org = await insertTestOrg("org-desc-prov");
+      const parent = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "parent",
+      });
+      const child = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "child",
+        parentRunId: parent.id,
+      });
+
+      await insertTestRunCost({
+        runId: child.id,
+        costName: "email-send",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .get(`/v1/runs/${parent.id}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.childrenProvisionedCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.childrenActualCostInUsdCents).toBe("0.0000000000");
+      expect(res.body.descendantRuns[0].ownProvisionedCostInUsdCents).toBe("0.5000000000");
+      expect(res.body.descendantRuns[0].ownActualCostInUsdCents).toBe("0.0000000000");
+    });
+  });
+
   describe("GET /v1/runs", () => {
     it("lists runs filtered by clerkOrgId", async () => {
       const org = await insertTestOrg("org-list");
@@ -498,6 +752,41 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(2);
       expect(res.body.runs.every((r: any) => r.parentRunId === parent.id)).toBe(true);
+    });
+
+    it("includes own actual and provisioned cost per run", async () => {
+      const org = await insertTestOrg("org-list-prov");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+        provisioned: false,
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+        provisioned: true,
+      });
+
+      const res = await request(app)
+        .get("/v1/runs?clerkOrgId=org-list-prov")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.runs[0].ownCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.runs[0].ownActualCostInUsdCents).toBe("0.1000000000");
+      expect(res.body.runs[0].ownProvisionedCostInUsdCents).toBe("0.2000000000");
     });
 
     it("filters by appId", async () => {

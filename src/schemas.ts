@@ -54,6 +54,8 @@ export const RunSchema = z
 
 export const RunWithOwnCostSchema = RunSchema.extend({
   ownCostInUsdCents: z.string(),
+  ownActualCostInUsdCents: z.string(),
+  ownProvisionedCostInUsdCents: z.string(),
 }).openapi("RunWithOwnCost");
 
 export const CreateRunRequestSchema = z
@@ -89,6 +91,7 @@ export const CostSchema = z
     quantity: z.string(),
     unitCostInUsdCents: z.string(),
     totalCostInUsdCents: z.string(),
+    provisioned: z.boolean(),
     createdAt: z.string().datetime(),
   })
   .openapi("Cost");
@@ -97,6 +100,7 @@ export const CostItemSchema = z
   .object({
     costName: z.string().min(1),
     quantity: z.number().positive(),
+    provisioned: z.boolean().default(false),
   })
   .openapi("CostItem");
 
@@ -107,6 +111,14 @@ export const AddCostsRequestSchema = z
   .openapi("AddCostsRequest");
 
 export type AddCostsRequest = z.infer<typeof AddCostsRequestSchema>;
+
+export const UpdateCostRequestSchema = z
+  .object({
+    provisioned: z.boolean(),
+  })
+  .openapi("UpdateCostRequest");
+
+export type UpdateCostRequest = z.infer<typeof UpdateCostRequestSchema>;
 
 export const AddCostsResponseSchema = z
   .object({
@@ -125,6 +137,8 @@ export const DescendantRunSchema = z
     completedAt: z.string().datetime().nullable(),
     costs: z.array(CostSchema),
     ownCostInUsdCents: z.string(),
+    ownActualCostInUsdCents: z.string(),
+    ownProvisionedCostInUsdCents: z.string(),
   })
   .openapi("DescendantRun");
 
@@ -146,8 +160,14 @@ export const RunWithCostsSchema = z
     updatedAt: z.string().datetime(),
     costs: z.array(CostSchema),
     totalCostInUsdCents: z.string(),
+    actualCostInUsdCents: z.string(),
+    provisionedCostInUsdCents: z.string(),
     ownCostInUsdCents: z.string(),
+    ownActualCostInUsdCents: z.string(),
+    ownProvisionedCostInUsdCents: z.string(),
     childrenCostInUsdCents: z.string(),
+    childrenActualCostInUsdCents: z.string(),
+    childrenProvisionedCostInUsdCents: z.string(),
     descendantRuns: z.array(DescendantRunSchema),
   })
   .openapi("RunWithCosts");
@@ -318,6 +338,62 @@ registry.registerPath({
     },
     422: {
       description: "Unknown cost name",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/v1/runs/{id}/costs/{costId}",
+  summary: "Update a cost item",
+  description:
+    "Updates a cost item. Use to realize a provisioned cost by setting provisioned to false.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({
+      id: z.string().uuid(),
+      costId: z.string().uuid(),
+    }),
+    body: {
+      content: { "application/json": { schema: UpdateCostRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Cost updated",
+      content: { "application/json": { schema: CostSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run or cost not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/v1/runs/{id}/costs/{costId}",
+  summary: "Cancel a cost item",
+  description:
+    "Deletes a cost item. Intended for cancelling provisioned costs when an email sequence stops early.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({
+      id: z.string().uuid(),
+      costId: z.string().uuid(),
+    }),
+  },
+  responses: {
+    204: { description: "Cost deleted" },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run or cost not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },

@@ -1,0 +1,2 @@
+ALTER TABLE "runs_costs" ADD COLUMN "provisioned" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_runs_costs_provisioned" ON "runs_costs" USING btree ("run_id","provisioned");

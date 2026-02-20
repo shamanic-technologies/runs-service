@@ -12,6 +12,7 @@ import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
+  UpdateCostRequestSchema,
 } from "../schemas.js";
 
 const router = Router();
@@ -46,6 +47,22 @@ async function getOrCreateUser(externalId: string, organizationId: string) {
     .values({ externalId, organizationId })
     .returning();
   return created;
+}
+
+// --- Cost breakdown helper ---
+
+function computeCostBreakdown(costs: { totalCostInUsdCents: string | number; provisioned: boolean }[]) {
+  let actual = 0;
+  let provisioned = 0;
+  for (const c of costs) {
+    const amount = Number(c.totalCostInUsdCents);
+    if (c.provisioned) {
+      provisioned += amount;
+    } else {
+      actual += amount;
+    }
+  }
+  return { total: actual + provisioned, actual, provisioned };
 }
 
 // POST /v1/runs — create a run
@@ -126,10 +143,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       .from(runsCosts)
       .where(eq(runsCosts.runId, id));
 
-    const ownTotal = costs.reduce(
-      (sum, c) => sum + Number(c.totalCostInUsdCents),
-      0
-    );
+    const ownBreakdown = computeCostBreakdown(costs);
 
     // Get all descendant run IDs using recursive CTE
     const descendantResult = await db.execute(
@@ -166,10 +180,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     // Build descendant runs with costs
     const descendantRuns = descendantRows.map((r: any) => {
       const runCosts = costsByRunId.get(r.id) || [];
-      const runOwnTotal = runCosts.reduce(
-        (sum: number, c: any) => sum + Number(c.totalCostInUsdCents),
-        0
-      );
+      const breakdown = computeCostBreakdown(runCosts);
       return {
         id: r.id,
         parentRunId: r.parent_run_id,
@@ -179,21 +190,26 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         startedAt: r.started_at,
         completedAt: r.completed_at,
         costs: runCosts,
-        ownCostInUsdCents: runOwnTotal.toFixed(10),
+        ownCostInUsdCents: breakdown.total.toFixed(10),
+        ownActualCostInUsdCents: breakdown.actual.toFixed(10),
+        ownProvisionedCostInUsdCents: breakdown.provisioned.toFixed(10),
       };
     });
 
-    const childrenTotal = allDescendantCosts.reduce(
-      (sum, c) => sum + Number(c.totalCostInUsdCents),
-      0
-    );
+    const childrenBreakdown = computeCostBreakdown(allDescendantCosts);
 
     res.json({
       ...run,
       costs,
-      totalCostInUsdCents: (ownTotal + childrenTotal).toFixed(10),
-      ownCostInUsdCents: ownTotal.toFixed(10),
-      childrenCostInUsdCents: childrenTotal.toFixed(10),
+      totalCostInUsdCents: (ownBreakdown.total + childrenBreakdown.total).toFixed(10),
+      actualCostInUsdCents: (ownBreakdown.actual + childrenBreakdown.actual).toFixed(10),
+      provisionedCostInUsdCents: (ownBreakdown.provisioned + childrenBreakdown.provisioned).toFixed(10),
+      ownCostInUsdCents: ownBreakdown.total.toFixed(10),
+      ownActualCostInUsdCents: ownBreakdown.actual.toFixed(10),
+      ownProvisionedCostInUsdCents: ownBreakdown.provisioned.toFixed(10),
+      childrenCostInUsdCents: childrenBreakdown.total.toFixed(10),
+      childrenActualCostInUsdCents: childrenBreakdown.actual.toFixed(10),
+      childrenProvisionedCostInUsdCents: childrenBreakdown.provisioned.toFixed(10),
       descendantRuns,
     });
   } catch (err) {
@@ -254,6 +270,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         quantity: String(item.quantity),
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
+        provisioned: item.provisioned ?? false,
       };
     });
 
@@ -268,6 +285,73 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       return;
     }
     console.error("[Runs Service] Error adding run costs:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /v1/runs/:id/costs/:costId — update a cost item (e.g. realize a provision)
+router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
+  try {
+    const { id, costId } = req.params;
+
+    const parsed = UpdateCostRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    // Verify run exists
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    // Update the cost row (must belong to this run)
+    const [updated] = await db
+      .update(runsCosts)
+      .set({ provisioned: parsed.data.provisioned })
+      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
+      .returning();
+
+    if (!updated) {
+      res.status(404).json({ error: "Cost not found" });
+      return;
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error("[Runs Service] Error updating cost:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// DELETE /v1/runs/:id/costs/:costId — cancel a cost item
+router.delete("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
+  try {
+    const { id, costId } = req.params;
+
+    // Verify run exists
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    // Delete the cost row (must belong to this run)
+    const [deleted] = await db
+      .delete(runsCosts)
+      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
+      .returning();
+
+    if (!deleted) {
+      res.status(404).json({ error: "Cost not found" });
+      return;
+    }
+
+    res.status(204).send();
+  } catch (err) {
+    console.error("[Runs Service] Error deleting cost:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -395,6 +479,8 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
         ownCostInUsdCents: sql<string>`COALESCE(SUM(${runsCosts.totalCostInUsdCents}), 0)`.as("own_cost_in_usd_cents"),
+        ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.provisioned} = false THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
+        ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.provisioned} = true THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
       })
       .from(runs)
       .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
@@ -419,10 +505,12 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       .limit(limit)
       .offset(offset);
 
-    // Format ownCostInUsdCents to fixed decimal
+    // Format cost fields to fixed decimal
     const formattedRuns = result.map((r) => ({
       ...r,
       ownCostInUsdCents: Number(r.ownCostInUsdCents).toFixed(10),
+      ownActualCostInUsdCents: Number(r.ownActualCostInUsdCents).toFixed(10),
+      ownProvisionedCostInUsdCents: Number(r.ownProvisionedCostInUsdCents).toFixed(10),
     }));
 
     res.json({ runs: formattedRuns, limit, offset });
