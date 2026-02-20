@@ -694,6 +694,10 @@
             "type": "string",
             "minLength": 1
           },
+          "appId": {
+            "type": "string",
+            "minLength": 1
+          },
           "campaignId": {
             "type": "string"
           },
@@ -701,9 +705,6 @@
             "type": "string"
           },
           "workflowName": {
-            "type": "string"
-          },
-          "appId": {
             "type": "string"
           },
           "windows": {
@@ -730,6 +731,7 @@
         },
         "required": [
           "clerkOrgId",
+          "appId",
           "windows"
         ]
       },
@@ -1355,6 +1357,15 @@
           },
           {
             "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "appId",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "required": false,
@@ -1391,14 +1402,6 @@
             },
             "required": false,
             "name": "taskName",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "appId",
             "in": "query"
           },
           {
@@ -1441,7 +1444,7 @@
             }
           },
           "400": {
-            "description": "Invalid groupBy value or missing clerkOrgId",
+            "description": "Invalid groupBy value or missing required params (clerkOrgId, appId)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1473,6 +1476,15 @@
             },
             "required": true,
             "name": "clerkOrgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "appId",
             "in": "query"
           },
           {
@@ -1517,14 +1529,6 @@
           },
           {
             "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "appId",
-            "in": "query"
-          },
-          {
-            "schema": {
               "type": "string",
               "format": "date-time"
             },
@@ -1554,7 +1558,7 @@
             }
           },
           "400": {
-            "description": "Missing clerkOrgId",
+            "description": "Missing required params (clerkOrgId, appId)",
             "content": {
               "application/json": {
                 "schema": {

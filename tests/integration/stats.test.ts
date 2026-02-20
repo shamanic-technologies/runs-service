@@ -54,7 +54,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=org-stats-brand&groupBy=brandId")
+        .get("/v1/stats/costs?clerkOrgId=org-stats-brand&appId=test-app&groupBy=brandId")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -86,7 +86,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=org-stats-multi&groupBy=brandId,serviceName")
+        .get("/v1/stats/costs?clerkOrgId=org-stats-multi&appId=test-app&groupBy=brandId,serviceName")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -128,7 +128,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=org-stats-filter&groupBy=brandId&workflowName=wf-1")
+        .get("/v1/stats/costs?clerkOrgId=org-stats-filter&appId=test-app&groupBy=brandId&workflowName=wf-1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -138,16 +138,25 @@ describe("Stats endpoints", () => {
 
     it("returns empty for unknown org", async () => {
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=nonexistent&groupBy=brandId")
+        .get("/v1/stats/costs?clerkOrgId=nonexistent&appId=test-app&groupBy=brandId")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toEqual([]);
     });
 
+    it("rejects missing appId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/costs?clerkOrgId=org1&groupBy=brandId")
+        .set(authHeaders);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("appId");
+    });
+
     it("rejects invalid groupBy", async () => {
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=org1&groupBy=invalidColumn")
+        .get("/v1/stats/costs?clerkOrgId=org1&appId=test-app&groupBy=invalidColumn")
         .set(authHeaders);
 
       expect(res.status).toBe(400);
@@ -189,7 +198,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?clerkOrgId=org-stats-status&groupBy=brandId")
+        .get("/v1/stats/costs?clerkOrgId=org-stats-status&appId=test-app&groupBy=brandId")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -226,7 +235,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?clerkOrgId=org-by-name")
+        .get("/v1/stats/costs/by-cost-name?clerkOrgId=org-by-name&appId=test-app")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -273,7 +282,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?clerkOrgId=org-by-name-status")
+        .get("/v1/stats/costs/by-cost-name?clerkOrgId=org-by-name-status&appId=test-app")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -289,11 +298,20 @@ describe("Stats endpoints", () => {
 
     it("returns empty for unknown org", async () => {
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?clerkOrgId=nonexistent")
+        .get("/v1/stats/costs/by-cost-name?clerkOrgId=nonexistent&appId=test-app")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.costs).toEqual([]);
+    });
+
+    it("rejects missing appId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/costs/by-cost-name?clerkOrgId=org1")
+        .set(authHeaders);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("appId");
     });
   });
 
@@ -329,6 +347,7 @@ describe("Stats endpoints", () => {
         .set(authHeaders)
         .send({
           clerkOrgId: "org-budget",
+          appId: "test-app",
           campaignId: "campaign-1",
           windows: [
             { label: "all-time" },
@@ -349,6 +368,7 @@ describe("Stats endpoints", () => {
         .set(authHeaders)
         .send({
           clerkOrgId: "nonexistent",
+          appId: "test-app",
           windows: [{ label: "all-time" }],
         });
 
@@ -379,6 +399,7 @@ describe("Stats endpoints", () => {
         .set(authHeaders)
         .send({
           clerkOrgId: "org-budget-window",
+          appId: "test-app",
           windows: [
             { label: "all-time" },
             { label: "future-only", since: farFuture },
@@ -393,11 +414,14 @@ describe("Stats endpoints", () => {
       expect(res.body.windows[1].totalCostInUsdCents).toBe("0.0000000000");
     });
 
-    it("rejects invalid request body", async () => {
+    it("rejects missing appId", async () => {
       const res = await request(app)
         .post("/v1/stats/budget")
         .set(authHeaders)
-        .send({ windows: [] });
+        .send({
+          clerkOrgId: "org1",
+          windows: [{ label: "all-time" }],
+        });
 
       expect(res.status).toBe(400);
     });

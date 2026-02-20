@@ -418,12 +418,12 @@ registry.registerPath({
 
 export const StatsFiltersSchema = z.object({
   clerkOrgId: z.string().min(1),
+  appId: z.string().min(1),
   brandId: z.string().optional(),
   campaignId: z.string().optional(),
   workflowName: z.string().optional(),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
-  appId: z.string().optional(),
   startedAfter: z.string().datetime().optional(),
   startedBefore: z.string().datetime().optional(),
 });
@@ -470,10 +470,10 @@ export const BudgetWindowSchema = z.object({
 export const BudgetRequestSchema = z
   .object({
     clerkOrgId: z.string().min(1),
+    appId: z.string().min(1),
     campaignId: z.string().optional(),
     brandId: z.string().optional(),
     workflowName: z.string().optional(),
-    appId: z.string().optional(),
     windows: z.array(BudgetWindowSchema).min(1).max(10),
   })
   .openapi("BudgetRequest");
@@ -538,7 +538,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsResponseSchema } },
     },
     400: {
-      description: "Invalid groupBy value or missing clerkOrgId",
+      description: "Invalid groupBy value or missing required params (clerkOrgId, appId)",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
@@ -561,7 +561,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsByCostNameResponseSchema } },
     },
     400: {
-      description: "Missing clerkOrgId",
+      description: "Missing required params (clerkOrgId, appId)",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
