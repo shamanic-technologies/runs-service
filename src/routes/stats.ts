@@ -438,4 +438,60 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
   }
 });
 
+// GET /v1/stats/public/leaderboard — public cross-org leaderboard
+const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
+  brandId: "r.brand_id",
+  workflowName: "r.workflow_name",
+};
+
+router.get("/v1/stats/public/leaderboard", async (req, res) => {
+  try {
+    const { appId, groupBy } = req.query as Record<string, string | undefined>;
+
+    if (!appId) {
+      res.status(400).json({ error: "appId is required" });
+      return;
+    }
+    if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
+      res.status(400).json({
+        error: `Invalid groupBy value. Allowed: ${Object.keys(PUBLIC_GROUP_BY_COLUMNS).join(", ")}`,
+      });
+      return;
+    }
+
+    const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
+
+    const result = await db.execute(sql`
+      SELECT ${sql.raw(col)},
+        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
+        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
+        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
+        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+        COUNT(DISTINCT r.id) as run_count
+      FROM runs r
+      LEFT JOIN runs_costs rc ON rc.run_id = r.id
+      WHERE r.app_id = ${appId}
+      GROUP BY ${sql.raw(col)}
+      ORDER BY total_cost DESC
+    `);
+
+    const rows = result as any[];
+    const dbCol = col.replace("r.", "");
+
+    const groups = rows.map((row) => ({
+      dimensions: { [groupBy]: row[dbCol] ?? null },
+      totalCostInUsdCents: Number(row.total_cost).toFixed(10),
+      actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
+      provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
+      cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
+      runCount: Number(row.run_count),
+    }));
+
+    res.json({ groups });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /v1/stats/public/leaderboard:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 export default router;

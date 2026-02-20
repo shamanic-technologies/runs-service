@@ -1664,6 +1664,57 @@
           }
         }
       }
+    },
+    "/v1/stats/public/leaderboard": {
+      "get": {
+        "summary": "Public leaderboard (no auth)",
+        "description": "Returns aggregated costs across all organizations for a given appId, grouped by brandId or workflowName. No authentication required. Used for the public performance landing page.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "appId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "brandId",
+                "workflowName"
+              ]
+            },
+            "required": true,
+            "name": "groupBy",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated cost groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsCostsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing appId or invalid groupBy value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
