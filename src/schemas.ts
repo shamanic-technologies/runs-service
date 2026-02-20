@@ -520,6 +520,13 @@ export const ChildrenSummaryResponseSchema = z
   })
   .openapi("ChildrenSummaryResponse");
 
+export const PublicLeaderboardQuerySchema = z
+  .object({
+    appId: z.string().min(1),
+    groupBy: z.enum(["brandId", "workflowName"]),
+  })
+  .openapi("PublicLeaderboardQuery");
+
 // --- Stats path registrations ---
 
 registry.registerPath({
@@ -613,6 +620,27 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: {
       description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/public/leaderboard",
+  summary: "Public leaderboard (no auth)",
+  description:
+    "Returns aggregated costs across all organizations for a given appId, grouped by brandId or workflowName. No authentication required. Used for the public performance landing page.",
+  request: {
+    query: PublicLeaderboardQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Aggregated cost groups",
+      content: { "application/json": { schema: StatsCostsResponseSchema } },
+    },
+    400: {
+      description: "Missing appId or invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },

@@ -574,4 +574,127 @@ describe("Stats endpoints", () => {
       expect(res.status).toBe(404);
     });
   });
+
+  describe("GET /v1/stats/public/leaderboard", () => {
+    it("groups costs by brandId across all orgs", async () => {
+      const org1 = await insertTestOrg("org-public-1");
+      const org2 = await insertTestOrg("org-public-2");
+      const run1 = await insertTestRun({
+        organizationId: org1.id,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-shared",
+      });
+      const run2 = await insertTestRun({
+        organizationId: org2.id,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-shared",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "test-app", groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.brandId).toBe("brand-shared");
+      // 0.1 + 0.2 = 0.3 across both orgs
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("groups costs by workflowName across all orgs", async () => {
+      const org1 = await insertTestOrg("org-public-wf-1");
+      const org2 = await insertTestOrg("org-public-wf-2");
+      const run1 = await insertTestRun({
+        organizationId: org1.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "sales-cold-email-v1",
+      });
+      const run2 = await insertTestRun({
+        organizationId: org2.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "sales-cold-email-v1",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "300",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.3000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "test-app", groupBy: "workflowName" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.workflowName).toBe("sales-cold-email-v1");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.4000000000");
+    });
+
+    it("rejects missing appId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ groupBy: "brandId" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/appId/);
+    });
+
+    it("rejects invalid groupBy (campaignId)", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "test-app", groupBy: "campaignId" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/groupBy/i);
+    });
+
+    it("does not require auth", async () => {
+      // No authHeaders — should still succeed
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "test-app", groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toBeDefined();
+    });
+
+    it("returns empty groups for unknown appId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "nonexistent-app", groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toEqual([]);
+    });
+  });
 });
