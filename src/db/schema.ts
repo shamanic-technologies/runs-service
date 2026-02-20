@@ -41,6 +41,7 @@ export const runs = pgTable(
     appId: text("app_id").notNull(),
     brandId: text("brand_id"),
     campaignId: text("campaign_id"),
+    workflowName: text("workflow_name"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
     status: text("status").notNull().default("running"),
@@ -58,6 +59,7 @@ export const runs = pgTable(
     index("idx_runs_app").on(table.appId),
     index("idx_runs_brand").on(table.brandId),
     index("idx_runs_campaign").on(table.campaignId),
+    index("idx_runs_workflow_name").on(table.workflowName),
   ]
 );
 

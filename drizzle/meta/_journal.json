@@ -29,6 +29,13 @@
       "when": 1771638000000,
       "tag": "0003_status_enum_refactor",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1771724400000,
+      "tag": "0004_add_workflow_name",
+      "breakpoints": true
     }
   ]
 }
