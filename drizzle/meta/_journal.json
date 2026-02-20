@@ -22,6 +22,13 @@
       "when": 1771552097043,
       "tag": "0002_absent_sebastian_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1771638000000,
+      "tag": "0003_status_enum_refactor",
+      "breakpoints": true
     }
   ]
 }

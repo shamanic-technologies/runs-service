@@ -55,13 +55,13 @@ export async function insertTestRunCost(data: {
   quantity: string;
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
-  provisioned?: boolean;
+  status?: string;
 }) {
   const [cost] = await db
     .insert(runsCosts)
     .values({
       ...data,
-      provisioned: data.provisioned ?? false,
+      status: data.status ?? "actual",
     })
     .returning();
   return cost;
