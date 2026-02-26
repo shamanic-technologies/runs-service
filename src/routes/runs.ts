@@ -76,15 +76,15 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { clerkOrgId, clerkUserId, appId, brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
+    const { orgId, userId: externalUserId, appId, brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
 
     // Get-or-create org
-    const org = await getOrCreateOrg(clerkOrgId);
+    const org = await getOrCreateOrg(orgId);
 
     // Get-or-create user (optional)
     let userId: string | null = null;
-    if (clerkUserId) {
-      const user = await getOrCreateUser(clerkUserId, org.id);
+    if (externalUserId) {
+      const user = await getOrCreateUser(externalUserId, org.id);
       userId = user.id;
     }
 
@@ -391,8 +391,8 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      clerkOrgId,
-      clerkUserId,
+      orgId,
+      userId: externalUserId,
       appId,
       brandId,
       campaignId,
@@ -407,16 +407,16 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       offset: offsetStr,
     } = req.query;
 
-    if (!clerkOrgId) {
-      res.status(400).json({ error: "clerkOrgId query param is required" });
+    if (!orgId) {
+      res.status(400).json({ error: "orgId query param is required" });
       return;
     }
 
-    // Resolve clerkOrgId to internal org ID
+    // Resolve orgId to internal org ID
     const [org] = await db
       .select()
       .from(organizations)
-      .where(eq(organizations.externalId, clerkOrgId as string))
+      .where(eq(organizations.externalId, orgId as string))
       .limit(1);
 
     if (!org) {
@@ -427,12 +427,12 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
 
     const conditions = [eq(runs.organizationId, org.id)];
 
-    // Resolve clerkUserId to internal user ID
-    if (clerkUserId) {
+    // Resolve userId to internal user ID
+    if (externalUserId) {
       const [user] = await db
         .select()
         .from(users)
-        .where(eq(users.externalId, clerkUserId as string))
+        .where(eq(users.externalId, externalUserId as string))
         .limit(1);
       if (!user) {
         res.json({ runs: [], limit: Math.min(Number(limitStr) || 50, 200), offset: Number(offsetStr) || 0 });

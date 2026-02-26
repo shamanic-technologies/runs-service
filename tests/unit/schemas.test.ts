@@ -9,7 +9,7 @@ describe("schemas", () => {
   describe("CreateRunRequestSchema", () => {
     it("accepts valid input with required fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
+        orgId: "org_123",
         appId: "my-app",
         serviceName: "my-agent",
         taskName: "run-task",
@@ -19,8 +19,8 @@ describe("schemas", () => {
 
     it("accepts all optional fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
-        clerkUserId: "user_clerk_456",
+        orgId: "org_123",
+        userId: "user_456",
         appId: "my-app",
         brandId: "brand_1",
         campaignId: "campaign_1",
@@ -31,7 +31,7 @@ describe("schemas", () => {
       expect(result.success).toBe(true);
     });
 
-    it("rejects missing clerkOrgId", () => {
+    it("rejects missing orgId", () => {
       const result = CreateRunRequestSchema.safeParse({
         appId: "my-app",
         serviceName: "my-agent",
@@ -42,7 +42,7 @@ describe("schemas", () => {
 
     it("rejects missing appId", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
+        orgId: "org_123",
         serviceName: "my-agent",
         taskName: "run-task",
       });
@@ -51,7 +51,7 @@ describe("schemas", () => {
 
     it("rejects missing serviceName", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
+        orgId: "org_123",
         appId: "my-app",
       });
       expect(result.success).toBe(false);
@@ -59,7 +59,7 @@ describe("schemas", () => {
 
     it("rejects empty serviceName", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
+        orgId: "org_123",
         appId: "my-app",
         serviceName: "",
         taskName: "task",
@@ -69,7 +69,7 @@ describe("schemas", () => {
 
     it("rejects empty appId", () => {
       const result = CreateRunRequestSchema.safeParse({
-        clerkOrgId: "org_clerk_123",
+        orgId: "org_123",
         appId: "",
         serviceName: "svc",
         taskName: "task",
