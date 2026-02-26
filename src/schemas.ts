@@ -61,8 +61,8 @@ export const RunWithOwnCostSchema = RunSchema.extend({
 
 export const CreateRunRequestSchema = z
   .object({
-    clerkOrgId: z.string().min(1),
-    clerkUserId: z.string().min(1).optional(),
+    orgId: z.string().min(1),
+    userId: z.string().min(1).optional(),
     appId: z.string().min(1),
     brandId: z.string().min(1).optional(),
     campaignId: z.string().min(1).optional(),
@@ -230,7 +230,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organizations and users are resolved automatically from clerkOrgId/clerkUserId.",
+    "Creates a new execution run. Organizations and users are resolved automatically from orgId/userId.",
   security: [{ apiKey: [] }],
   request: {
     body: {
@@ -255,12 +255,12 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "List runs",
   description:
-    "Lists runs filtered by clerkOrgId and optional parameters. Each run includes ownCostInUsdCents.",
+    "Lists runs filtered by orgId and optional parameters. Each run includes ownCostInUsdCents.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      clerkOrgId: z.string(),
-      clerkUserId: z.string().optional(),
+      orgId: z.string(),
+      userId: z.string().optional(),
       appId: z.string().optional(),
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
@@ -281,7 +281,7 @@ registry.registerPath({
       content: { "application/json": { schema: ListRunsResponseSchema } },
     },
     400: {
-      description: "Missing clerkOrgId",
+      description: "Missing orgId",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
@@ -417,7 +417,7 @@ registry.registerPath({
 // --- Stats schemas ---
 
 export const StatsFiltersSchema = z.object({
-  clerkOrgId: z.string().min(1),
+  orgId: z.string().min(1),
   appId: z.string().min(1),
   brandId: z.string().optional(),
   campaignId: z.string().optional(),
@@ -469,7 +469,7 @@ export const BudgetWindowSchema = z.object({
 
 export const BudgetRequestSchema = z
   .object({
-    clerkOrgId: z.string().min(1),
+    orgId: z.string().min(1),
     appId: z.string().min(1),
     campaignId: z.string().optional(),
     brandId: z.string().optional(),
@@ -545,7 +545,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsResponseSchema } },
     },
     400: {
-      description: "Invalid groupBy value or missing required params (clerkOrgId, appId)",
+      description: "Invalid groupBy value or missing required params (orgId, appId)",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
@@ -568,7 +568,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsByCostNameResponseSchema } },
     },
     400: {
-      description: "Missing required params (clerkOrgId, appId)",
+      description: "Missing required params (orgId, appId)",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },

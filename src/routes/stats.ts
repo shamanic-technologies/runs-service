@@ -19,11 +19,11 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
 
 // --- Helpers ---
 
-async function resolveOrgId(clerkOrgId: string): Promise<string | null> {
+async function resolveOrgId(externalOrgId: string): Promise<string | null> {
   const [org] = await db
     .select({ id: organizations.id })
     .from(organizations)
-    .where(eq(organizations.externalId, clerkOrgId))
+    .where(eq(organizations.externalId, externalOrgId))
     .limit(1);
   return org?.id ?? null;
 }
@@ -58,7 +58,7 @@ function buildFilterSql(
 router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
   try {
     const {
-      clerkOrgId,
+      orgId: externalOrgId,
       groupBy,
       brandId,
       campaignId,
@@ -70,8 +70,8 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!clerkOrgId) {
-      res.status(400).json({ error: "clerkOrgId is required" });
+    if (!externalOrgId) {
+      res.status(400).json({ error: "orgId is required" });
       return;
     }
     if (!appId) {
@@ -93,7 +93,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const orgId = await resolveOrgId(clerkOrgId);
+    const orgId = await resolveOrgId(externalOrgId);
     if (!orgId) {
       res.json({ groups: [] });
       return;
@@ -165,7 +165,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 router.get("/v1/stats/costs/by-cost-name", requireApiKey, async (req, res) => {
   try {
     const {
-      clerkOrgId,
+      orgId: externalOrgId,
       brandId,
       campaignId,
       workflowName,
@@ -176,8 +176,8 @@ router.get("/v1/stats/costs/by-cost-name", requireApiKey, async (req, res) => {
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!clerkOrgId) {
-      res.status(400).json({ error: "clerkOrgId is required" });
+    if (!externalOrgId) {
+      res.status(400).json({ error: "orgId is required" });
       return;
     }
     if (!appId) {
@@ -185,7 +185,7 @@ router.get("/v1/stats/costs/by-cost-name", requireApiKey, async (req, res) => {
       return;
     }
 
-    const orgId = await resolveOrgId(clerkOrgId);
+    const orgId = await resolveOrgId(externalOrgId);
     if (!orgId) {
       res.json({ costs: [] });
       return;
@@ -241,9 +241,9 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { clerkOrgId, appId, campaignId, brandId, workflowName, windows } = parsed.data;
+    const { orgId: externalOrgId, appId, campaignId, brandId, workflowName, windows } = parsed.data;
 
-    const orgId = await resolveOrgId(clerkOrgId);
+    const orgId = await resolveOrgId(externalOrgId);
     if (!orgId) {
       // Return zeros for all windows
       res.json({

@@ -145,11 +145,11 @@
       "CreateRunRequest": {
         "type": "object",
         "properties": {
-          "clerkOrgId": {
+          "orgId": {
             "type": "string",
             "minLength": 1
           },
-          "clerkUserId": {
+          "userId": {
             "type": "string",
             "minLength": 1
           },
@@ -183,7 +183,7 @@
           }
         },
         "required": [
-          "clerkOrgId",
+          "orgId",
           "appId",
           "serviceName",
           "taskName"
@@ -690,7 +690,7 @@
       "BudgetRequest": {
         "type": "object",
         "properties": {
-          "clerkOrgId": {
+          "orgId": {
             "type": "string",
             "minLength": 1
           },
@@ -730,7 +730,7 @@
           }
         },
         "required": [
-          "clerkOrgId",
+          "orgId",
           "appId",
           "windows"
         ]
@@ -881,7 +881,7 @@
     "/v1/runs": {
       "post": {
         "summary": "Create a run",
-        "description": "Creates a new execution run. Organizations and users are resolved automatically from clerkOrgId/clerkUserId.",
+        "description": "Creates a new execution run. Organizations and users are resolved automatically from orgId/userId.",
         "security": [
           {
             "apiKey": []
@@ -924,7 +924,7 @@
       },
       "get": {
         "summary": "List runs",
-        "description": "Lists runs filtered by clerkOrgId and optional parameters. Each run includes ownCostInUsdCents.",
+        "description": "Lists runs filtered by orgId and optional parameters. Each run includes ownCostInUsdCents.",
         "security": [
           {
             "apiKey": []
@@ -936,7 +936,7 @@
               "type": "string"
             },
             "required": true,
-            "name": "clerkOrgId",
+            "name": "orgId",
             "in": "query"
           },
           {
@@ -944,7 +944,7 @@
               "type": "string"
             },
             "required": false,
-            "name": "clerkUserId",
+            "name": "userId",
             "in": "query"
           },
           {
@@ -1059,7 +1059,7 @@
             }
           },
           "400": {
-            "description": "Missing clerkOrgId",
+            "description": "Missing orgId",
             "content": {
               "application/json": {
                 "schema": {
@@ -1352,7 +1352,7 @@
               "minLength": 1
             },
             "required": true,
-            "name": "clerkOrgId",
+            "name": "orgId",
             "in": "query"
           },
           {
@@ -1444,7 +1444,7 @@
             }
           },
           "400": {
-            "description": "Invalid groupBy value or missing required params (clerkOrgId, appId)",
+            "description": "Invalid groupBy value or missing required params (orgId, appId)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1475,7 +1475,7 @@
               "minLength": 1
             },
             "required": true,
-            "name": "clerkOrgId",
+            "name": "orgId",
             "in": "query"
           },
           {
@@ -1558,7 +1558,7 @@
             }
           },
           "400": {
-            "description": "Missing required params (clerkOrgId, appId)",
+            "description": "Missing required params (orgId, appId)",
             "content": {
               "application/json": {
                 "schema": {

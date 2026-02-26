@@ -53,7 +53,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_clerk_1",
+          orgId: "org_1",
           appId: "my-app",
           serviceName: "chat-service",
           taskName: "agent-run",
@@ -67,12 +67,12 @@ describe("Runs CRUD", () => {
       expect(res.body.organizationId).toBeDefined();
     });
 
-    it("reuses existing org on duplicate clerkOrgId", async () => {
+    it("reuses existing org on duplicate orgId", async () => {
       const res1 = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_clerk_dup",
+          orgId: "org_dup",
           appId: "my-app",
           serviceName: "svc-a",
           taskName: "task-a",
@@ -82,7 +82,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_clerk_dup",
+          orgId: "org_dup",
           appId: "my-app",
           serviceName: "svc-b",
           taskName: "task-b",
@@ -93,13 +93,13 @@ describe("Runs CRUD", () => {
       expect(res1.body.organizationId).toBe(res2.body.organizationId);
     });
 
-    it("creates run with clerkUserId get-or-create", async () => {
+    it("creates run with userId get-or-create", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_clerk_user",
-          clerkUserId: "user_clerk_1",
+          orgId: "org_user",
+          userId: "user_1",
           appId: "my-app",
           serviceName: "svc",
           taskName: "task",
@@ -121,7 +121,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org-child",
+          orgId: "org-child",
           appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
@@ -139,7 +139,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_orphan",
+          orgId: "org_orphan",
           appId: "my-app",
           serviceName: "orphan-svc",
           taskName: "orphan-task",
@@ -163,7 +163,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_context",
+          orgId: "org_context",
           appId: "my-app",
           brandId: "brand_1",
           campaignId: "campaign_1",
@@ -181,7 +181,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_wf",
+          orgId: "org_wf",
           appId: "my-app",
           workflowName: "sales-cold-email-v1",
           serviceName: "svc",
@@ -197,7 +197,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org_wf_null",
+          orgId: "org_wf_null",
           appId: "my-app",
           serviceName: "svc",
           taskName: "task",
@@ -222,7 +222,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org-inherit",
+          orgId: "org-inherit",
           appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
@@ -250,7 +250,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org-override",
+          orgId: "org-override",
           appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
@@ -278,7 +278,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          clerkOrgId: "org-inherit-null",
+          orgId: "org-inherit-null",
           appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
@@ -784,7 +784,7 @@ describe("Runs CRUD", () => {
   });
 
   describe("GET /v1/runs", () => {
-    it("lists runs filtered by clerkOrgId", async () => {
+    it("lists runs filtered by orgId", async () => {
       const org = await insertTestOrg("org-list");
       await insertTestRun({
         organizationId: org.id,
@@ -798,23 +798,23 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=org-list")
+        .get("/v1/runs?orgId=org-list")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(2);
     });
 
-    it("requires clerkOrgId", async () => {
+    it("requires orgId", async () => {
       const res = await request(app)
         .get("/v1/runs")
         .set(authHeaders);
       expect(res.status).toBe(400);
     });
 
-    it("returns empty list for unknown clerkOrgId", async () => {
+    it("returns empty list for unknown orgId", async () => {
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=nonexistent")
+        .get("/v1/runs?orgId=nonexistent")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -838,7 +838,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=org-list-cost")
+        .get("/v1/runs?orgId=org-list-cost")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -872,7 +872,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get(`/v1/runs?clerkOrgId=org-parent-filter&parentRunId=${parent.id}`)
+        .get(`/v1/runs?orgId=org-parent-filter&parentRunId=${parent.id}`)
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -906,7 +906,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=org-list-prov")
+        .get("/v1/runs?orgId=org-list-prov")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -931,7 +931,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=org-wf-filter&workflowName=sales-cold-email-v1")
+        .get("/v1/runs?orgId=org-wf-filter&workflowName=sales-cold-email-v1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -955,7 +955,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?clerkOrgId=org-app-filter&appId=app-a")
+        .get("/v1/runs?orgId=org-app-filter&appId=app-a")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
