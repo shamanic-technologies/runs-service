@@ -520,6 +520,25 @@ export const ChildrenSummaryResponseSchema = z
   })
   .openapi("ChildrenSummaryResponse");
 
+export const RunIdsByWorkflowQuerySchema = z
+  .object({
+    orgId: z.string().min(1),
+    appId: z.string().min(1),
+    brandId: z.string().optional(),
+    campaignId: z.string().optional(),
+    serviceName: z.string().optional(),
+    taskName: z.string().optional(),
+    startedAfter: z.string().datetime().optional(),
+    startedBefore: z.string().datetime().optional(),
+  })
+  .openapi("RunIdsByWorkflowQuery");
+
+export const RunIdsByWorkflowResponseSchema = z
+  .object({
+    groups: z.record(z.string(), z.array(z.string().uuid())),
+  })
+  .openapi("RunIdsByWorkflowResponse");
+
 export const PublicLeaderboardQuerySchema = z
   .object({
     appId: z.string().min(1).optional(),
@@ -622,6 +641,29 @@ registry.registerPath({
       description: "Run not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/run-ids-by-workflow",
+  summary: "Run IDs grouped by workflow name",
+  description:
+    "Returns all run IDs grouped by workflow_name. Used to correlate runs with external services (e.g., instantly campaigns) that don't have a workflow concept.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: RunIdsByWorkflowQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Run IDs grouped by workflow name",
+      content: { "application/json": { schema: RunIdsByWorkflowResponseSchema } },
+    },
+    400: {
+      description: "Missing required params (orgId, appId)",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
   },
 });
 
