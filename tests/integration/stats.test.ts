@@ -733,5 +733,69 @@ describe("Stats endpoints", () => {
       expect(res.status).toBe(200);
       expect(res.body.groups).toEqual([]);
     });
+
+    it("returns identical results regardless of x-org-id/x-user-id headers", async () => {
+      const org1 = await insertTestOrg("org-header-test-1");
+      const org2 = await insertTestOrg("org-header-test-2");
+
+      const run1 = await insertTestRun({
+        organizationId: org1.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-header-test",
+      });
+      const run2 = await insertTestRun({
+        organizationId: org2.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-header-test",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      // Call without headers
+      const resNoHeaders = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ appId: "test-app", groupBy: "workflowName" });
+
+      // Call with x-org-id and x-user-id headers (as the dashboard does)
+      const resWithHeaders = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .set("x-org-id", "org-header-test-1")
+        .set("x-user-id", "some-user-id")
+        .query({ appId: "test-app", groupBy: "workflowName" });
+
+      expect(resNoHeaders.status).toBe(200);
+      expect(resWithHeaders.status).toBe(200);
+
+      // Results must be identical — headers must not filter data
+      const groupNoHeaders = resNoHeaders.body.groups.find(
+        (g: any) => g.dimensions.workflowName === "wf-header-test"
+      );
+      const groupWithHeaders = resWithHeaders.body.groups.find(
+        (g: any) => g.dimensions.workflowName === "wf-header-test"
+      );
+
+      expect(groupNoHeaders).toBeDefined();
+      expect(groupWithHeaders).toBeDefined();
+      expect(groupWithHeaders.totalCostInUsdCents).toBe(groupNoHeaders.totalCostInUsdCents);
+      expect(groupWithHeaders.runCount).toBe(groupNoHeaders.runCount);
+      // Both should aggregate across orgs: 0.1 + 0.2 = 0.3
+      expect(groupWithHeaders.totalCostInUsdCents).toBe("0.3000000000");
+      expect(groupWithHeaders.runCount).toBe(2);
+    });
   });
 });
