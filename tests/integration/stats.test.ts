@@ -660,13 +660,50 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].totalCostInUsdCents).toBe("0.4000000000");
     });
 
-    it("rejects missing appId", async () => {
+    it("returns stats across all apps when appId is omitted", async () => {
+      const org = await insertTestOrg("org-public-no-appid");
+      const run1 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-cross-app",
+        appId: "app-one",
+      });
+      const run2 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-cross-app",
+        appId: "app-two",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
       const res = await request(app)
         .get("/v1/stats/public/leaderboard")
         .query({ groupBy: "brandId" });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/appId/);
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find(
+        (g: any) => g.dimensions.brandId === "brand-cross-app"
+      );
+      expect(group).toBeDefined();
+      // 0.1 + 0.2 = 0.3 across both apps
+      expect(group.totalCostInUsdCents).toBe("0.3000000000");
+      expect(group.runCount).toBe(2);
     });
 
     it("rejects invalid groupBy (campaignId)", async () => {

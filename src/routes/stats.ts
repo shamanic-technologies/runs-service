@@ -448,10 +448,6 @@ router.get("/v1/stats/public/leaderboard", async (req, res) => {
   try {
     const { appId, groupBy } = req.query as Record<string, string | undefined>;
 
-    if (!appId) {
-      res.status(400).json({ error: "appId is required" });
-      return;
-    }
     if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
       res.status(400).json({
         error: `Invalid groupBy value. Allowed: ${Object.keys(PUBLIC_GROUP_BY_COLUMNS).join(", ")}`,
@@ -460,6 +456,7 @@ router.get("/v1/stats/public/leaderboard", async (req, res) => {
     }
 
     const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
+    const whereSql = appId ? sql`WHERE r.app_id = ${appId}` : sql``;
 
     const result = await db.execute(sql`
       SELECT ${sql.raw(col)},
@@ -470,7 +467,7 @@ router.get("/v1/stats/public/leaderboard", async (req, res) => {
         COUNT(DISTINCT r.id) as run_count
       FROM runs r
       LEFT JOIN runs_costs rc ON rc.run_id = r.id
-      WHERE r.app_id = ${appId}
+      ${whereSql}
       GROUP BY ${sql.raw(col)}
       ORDER BY total_cost DESC
     `);
