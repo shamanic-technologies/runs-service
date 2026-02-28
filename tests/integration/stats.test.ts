@@ -575,6 +575,127 @@ describe("Stats endpoints", () => {
     });
   });
 
+  describe("GET /v1/stats/run-ids-by-workflow", () => {
+    it("groups run IDs by workflow name", async () => {
+      const org = await insertTestOrg("org-runids-wf");
+      const run1 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-alpha",
+      });
+      const run3 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-beta",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-wf&appId=test-app")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body.groups)).toHaveLength(2);
+      expect(res.body.groups["wf-alpha"]).toHaveLength(2);
+      expect(res.body.groups["wf-alpha"]).toContain(run1.id);
+      expect(res.body.groups["wf-alpha"]).toContain(run2.id);
+      expect(res.body.groups["wf-beta"]).toHaveLength(1);
+      expect(res.body.groups["wf-beta"]).toContain(run3.id);
+    });
+
+    it("excludes runs with null workflow_name", async () => {
+      const org = await insertTestOrg("org-runids-null-wf");
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-only",
+      });
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        // no workflowName → null
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-null-wf&appId=test-app")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body.groups)).toHaveLength(1);
+      expect(res.body.groups["wf-only"]).toHaveLength(1);
+    });
+
+    it("returns empty groups for unknown org", async () => {
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=nonexistent&appId=test-app")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toEqual({});
+    });
+
+    it("rejects missing orgId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?appId=test-app")
+        .set(authHeaders);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("orgId");
+    });
+
+    it("rejects missing appId", async () => {
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org1")
+        .set(authHeaders);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("appId");
+    });
+
+    it("applies filters (brandId, startedAfter)", async () => {
+      const org = await insertTestOrg("org-runids-filter");
+      const run1 = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-filtered",
+        brandId: "brand-x",
+      });
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-filtered",
+        brandId: "brand-y",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-filter&appId=test-app&brandId=brand-x")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body.groups)).toHaveLength(1);
+      expect(res.body.groups["wf-filtered"]).toHaveLength(1);
+      expect(res.body.groups["wf-filtered"]).toContain(run1.id);
+    });
+
+    it("requires auth", async () => {
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org1&appId=test-app");
+
+      expect(res.status).toBe(401);
+    });
+  });
+
   describe("GET /v1/stats/public/leaderboard", () => {
     it("groups costs by brandId across all orgs", async () => {
       const org1 = await insertTestOrg("org-public-1");

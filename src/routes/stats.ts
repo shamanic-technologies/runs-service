@@ -438,6 +438,65 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
   }
 });
 
+// GET /v1/stats/run-ids-by-workflow — run IDs grouped by workflow_name
+router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
+  try {
+    const {
+      orgId: externalOrgId,
+      appId,
+      brandId,
+      campaignId,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    } = req.query as Record<string, string | undefined>;
+
+    if (!externalOrgId) {
+      res.status(400).json({ error: "orgId is required" });
+      return;
+    }
+    if (!appId) {
+      res.status(400).json({ error: "appId is required" });
+      return;
+    }
+
+    const orgId = await resolveOrgId(externalOrgId);
+    if (!orgId) {
+      res.json({ groups: {} });
+      return;
+    }
+
+    const whereSql = buildFilterSql(orgId, appId, {
+      brandId,
+      campaignId,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    });
+
+    const result = await db.execute(sql`
+      SELECT r.workflow_name, array_agg(r.id::text) as run_ids
+      FROM runs r
+      WHERE ${whereSql} AND r.workflow_name IS NOT NULL
+      GROUP BY r.workflow_name
+      ORDER BY r.workflow_name
+    `);
+
+    const rows = result as any[];
+    const groups: Record<string, string[]> = {};
+    for (const row of rows) {
+      groups[row.workflow_name] = row.run_ids;
+    }
+
+    res.json({ groups });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /v1/stats/run-ids-by-workflow:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // GET /v1/stats/public/leaderboard — public cross-org leaderboard
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
