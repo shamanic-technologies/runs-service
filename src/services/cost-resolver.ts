@@ -50,7 +50,7 @@ export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
 
     try {
       const res = await fetch(
-        `${COSTS_SERVICE_URL}/v1/costs/${encodeURIComponent(name)}`,
+        `${COSTS_SERVICE_URL}/v1/providers-costs/${encodeURIComponent(name)}`,
         { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
       );
 
