@@ -1675,7 +1675,7 @@
               "type": "string",
               "minLength": 1
             },
-            "required": true,
+            "required": false,
             "name": "appId",
             "in": "query"
           },
@@ -1704,7 +1704,7 @@
             }
           },
           "400": {
-            "description": "Missing appId or invalid groupBy value",
+            "description": "Invalid groupBy value",
             "content": {
               "application/json": {
                 "schema": {

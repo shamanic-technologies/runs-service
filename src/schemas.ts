@@ -522,7 +522,7 @@ export const ChildrenSummaryResponseSchema = z
 
 export const PublicLeaderboardQuerySchema = z
   .object({
-    appId: z.string().min(1),
+    appId: z.string().min(1).optional(),
     groupBy: z.enum(["brandId", "workflowName"]),
   })
   .openapi("PublicLeaderboardQuery");
@@ -640,7 +640,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsResponseSchema } },
     },
     400: {
-      description: "Missing appId or invalid groupBy value",
+      description: "Invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },
