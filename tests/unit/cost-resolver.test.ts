@@ -182,7 +182,7 @@ describe("cost-resolver", () => {
       await resolveUnitCost("test");
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/v1/costs/test"),
+        expect.stringContaining("/v1/providers-costs/test"),
         expect.objectContaining({
           headers: expect.objectContaining({ "X-API-Key": "test-costs-key" }),
         })
@@ -193,7 +193,7 @@ describe("cost-resolver", () => {
   describe("resolveMultipleUnitCosts", () => {
     it("resolves multiple costs in parallel with dedup", async () => {
       const mockFetch = vi.fn().mockImplementation((url: string) => {
-        const name = url.split("/v1/costs/")[1];
+        const name = url.split("/v1/providers-costs/")[1];
         return Promise.resolve(okResponse(name));
       });
       vi.stubGlobal("fetch", mockFetch);
