@@ -365,8 +365,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "cost_bearer": {
-          "name": "cost_bearer",
+        "cost_source": {
+          "name": "cost_source",
           "type": "text",
           "primaryKey": false,
           "notNull": true

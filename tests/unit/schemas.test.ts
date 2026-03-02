@@ -104,8 +104,8 @@ describe("schemas", () => {
     it("accepts valid cost items", () => {
       const result = AddCostsRequestSchema.safeParse({
         items: [
-          { costName: "gpt-4o-input-token", costBearer: "platform", quantity: 1000 },
-          { costName: "gpt-4o-output-token", costBearer: "org", quantity: 200 },
+          { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+          { costName: "gpt-4o-output-token", costSource: "org", quantity: 200 },
         ],
       });
       expect(result.success).toBe(true);
@@ -123,28 +123,28 @@ describe("schemas", () => {
 
     it("rejects non-positive quantity", () => {
       const result = AddCostsRequestSchema.safeParse({
-        items: [{ costName: "test", costBearer: "platform", quantity: 0 }],
+        items: [{ costName: "test", costSource: "platform", quantity: 0 }],
       });
       expect(result.success).toBe(false);
     });
 
     it("rejects empty costName", () => {
       const result = AddCostsRequestSchema.safeParse({
-        items: [{ costName: "", costBearer: "platform", quantity: 1 }],
+        items: [{ costName: "", costSource: "platform", quantity: 1 }],
       });
       expect(result.success).toBe(false);
     });
 
-    it("rejects missing costBearer", () => {
+    it("rejects missing costSource", () => {
       const result = AddCostsRequestSchema.safeParse({
         items: [{ costName: "test", quantity: 1 }],
       });
       expect(result.success).toBe(false);
     });
 
-    it("rejects invalid costBearer value", () => {
+    it("rejects invalid costSource value", () => {
       const result = AddCostsRequestSchema.safeParse({
-        items: [{ costName: "test", costBearer: "invalid", quantity: 1 }],
+        items: [{ costName: "test", costSource: "invalid", quantity: 1 }],
       });
       expect(result.success).toBe(false);
     });

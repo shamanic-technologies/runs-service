@@ -87,14 +87,14 @@ export type UpdateRunRequest = z.infer<typeof UpdateRunRequestSchema>;
 
 export const CostStatusEnum = z.enum(["actual", "provisioned", "cancelled"]).openapi("CostStatus");
 
-export const CostBearerEnum = z.enum(["platform", "org"]).openapi("CostBearer");
+export const CostSourceEnum = z.enum(["platform", "org"]).openapi("CostSource");
 
 export const CostSchema = z
   .object({
     id: z.string().uuid(),
     runId: z.string().uuid(),
     costName: z.string(),
-    costBearer: CostBearerEnum,
+    costSource: CostSourceEnum,
     quantity: z.string(),
     unitCostInUsdCents: z.string(),
     totalCostInUsdCents: z.string(),
@@ -106,7 +106,7 @@ export const CostSchema = z
 export const CostItemSchema = z
   .object({
     costName: z.string().min(1),
-    costBearer: CostBearerEnum,
+    costSource: CostSourceEnum,
     quantity: z.number().positive(),
     status: CostStatusEnum.default("actual"),
   })

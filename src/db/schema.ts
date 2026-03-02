@@ -74,7 +74,7 @@ export const runsCosts = pgTable(
       .notNull()
       .references(() => runs.id, { onDelete: "cascade" }),
     costName: text("cost_name").notNull(),
-    costBearer: text("cost_bearer").notNull(),
+    costSource: text("cost_source").notNull(),
     quantity: numeric("quantity", { precision: 20, scale: 6 }).notNull(),
     unitCostInUsdCents: numeric("unit_cost_in_usd_cents", { precision: 12, scale: 10 }).notNull(),
     totalCostInUsdCents: numeric("total_cost_in_usd_cents", { precision: 16, scale: 10 }).notNull(),
