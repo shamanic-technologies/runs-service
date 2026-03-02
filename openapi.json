@@ -393,8 +393,8 @@
           "costName": {
             "type": "string"
           },
-          "costBearer": {
-            "$ref": "#/components/schemas/CostBearer"
+          "costSource": {
+            "$ref": "#/components/schemas/CostSource"
           },
           "quantity": {
             "type": "string"
@@ -417,7 +417,7 @@
           "id",
           "runId",
           "costName",
-          "costBearer",
+          "costSource",
           "quantity",
           "unitCostInUsdCents",
           "totalCostInUsdCents",
@@ -425,7 +425,7 @@
           "createdAt"
         ]
       },
-      "CostBearer": {
+      "CostSource": {
         "type": "string",
         "enum": [
           "platform",
@@ -536,8 +536,8 @@
             "type": "string",
             "minLength": 1
           },
-          "costBearer": {
-            "$ref": "#/components/schemas/CostBearer"
+          "costSource": {
+            "$ref": "#/components/schemas/CostSource"
           },
           "quantity": {
             "type": "number",
@@ -550,7 +550,7 @@
         },
         "required": [
           "costName",
-          "costBearer",
+          "costSource",
           "quantity"
         ]
       },
