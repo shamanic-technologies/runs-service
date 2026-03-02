@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, inArray, or } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { runs, runsCosts, organizations, users } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -19,11 +19,17 @@ const router = Router();
 
 // --- Helpers ---
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function getOrCreateOrg(externalId: string) {
+  const condition = UUID_RE.test(externalId)
+    ? or(eq(organizations.externalId, externalId), eq(organizations.id, externalId))
+    : eq(organizations.externalId, externalId);
+
   const [existing] = await db
     .select()
     .from(organizations)
-    .where(eq(organizations.externalId, externalId))
+    .where(condition)
     .limit(1);
   if (existing) return existing;
 
@@ -412,11 +418,16 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    // Resolve orgId to internal org ID
+    // Resolve orgId to internal org ID (try external_id first, then internal id for UUID inputs)
+    const orgIdStr = orgId as string;
+    const orgCondition = UUID_RE.test(orgIdStr)
+      ? or(eq(organizations.externalId, orgIdStr), eq(organizations.id, orgIdStr))
+      : eq(organizations.externalId, orgIdStr);
+
     const [org] = await db
       .select()
       .from(organizations)
-      .where(eq(organizations.externalId, orgId as string))
+      .where(orgCondition)
       .limit(1);
 
     if (!org) {

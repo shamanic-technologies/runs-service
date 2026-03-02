@@ -67,6 +67,25 @@ describe("Runs CRUD", () => {
       expect(res.body.organizationId).toBeDefined();
     });
 
+    it("resolves existing org when orgId is the internal UUID", async () => {
+      const org = await insertTestOrg("org_clerk_format");
+
+      // Create a run using the internal UUID instead of external_id
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          orgId: org.id, // internal UUID, not "org_clerk_format"
+          appId: "my-app",
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      // Should resolve to the same org, not create a new one
+      expect(res.body.organizationId).toBe(org.id);
+    });
+
     it("reuses existing org on duplicate orgId", async () => {
       const res1 = await request(app)
         .post("/v1/runs")
@@ -810,6 +829,23 @@ describe("Runs CRUD", () => {
         .get("/v1/runs")
         .set(authHeaders);
       expect(res.status).toBe(400);
+    });
+
+    it("lists runs when orgId is the internal UUID", async () => {
+      const org = await insertTestOrg("org-list-by-uuid");
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // Query using internal UUID
+      const res = await request(app)
+        .get(`/v1/runs?orgId=${org.id}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.runs).toHaveLength(1);
     });
 
     it("returns empty list for unknown orgId", async () => {
