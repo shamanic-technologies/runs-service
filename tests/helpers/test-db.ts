@@ -54,6 +54,7 @@ export async function insertTestRun(data: {
 export async function insertTestRunCost(data: {
   runId: string;
   costName: string;
+  costBearer?: string;
   quantity: string;
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
@@ -63,6 +64,7 @@ export async function insertTestRunCost(data: {
     .insert(runsCosts)
     .values({
       ...data,
+      costBearer: data.costBearer ?? "platform",
       status: data.status ?? "actual",
     })
     .returning();
