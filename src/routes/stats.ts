@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, sql, inArray, or } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { runs, runsCosts, organizations } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -19,11 +19,17 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
 
 // --- Helpers ---
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function resolveOrgId(externalOrgId: string): Promise<string | null> {
+  const condition = UUID_RE.test(externalOrgId)
+    ? or(eq(organizations.externalId, externalOrgId), eq(organizations.id, externalOrgId))
+    : eq(organizations.externalId, externalOrgId);
+
   const [org] = await db
     .select({ id: organizations.id })
     .from(organizations)
-    .where(eq(organizations.externalId, externalOrgId))
+    .where(condition)
     .limit(1);
   return org?.id ?? null;
 }

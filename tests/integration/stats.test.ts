@@ -696,6 +696,124 @@ describe("Stats endpoints", () => {
     });
   });
 
+  describe("org resolution by internal UUID", () => {
+    it("resolves org by internal UUID in GET /v1/stats/costs", async () => {
+      const org = await insertTestOrg("org-clerk-id-for-uuid-test");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-uuid",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+
+      // Query using the internal UUID instead of external_id
+      const res = await request(app)
+        .get(`/v1/stats/costs?orgId=${org.id}&appId=test-app&groupBy=brandId`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.1000000000");
+    });
+
+    it("resolves org by internal UUID in GET /v1/stats/run-ids-by-workflow", async () => {
+      const org = await insertTestOrg("org-clerk-id-for-runids");
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-uuid-test",
+      });
+
+      // Query using the internal UUID instead of external_id
+      const res = await request(app)
+        .get(`/v1/stats/run-ids-by-workflow?orgId=${org.id}&appId=test-app`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body.groups)).toHaveLength(1);
+      expect(res.body.groups["wf-uuid-test"]).toHaveLength(1);
+    });
+
+    it("resolves org by internal UUID in POST /v1/stats/budget", async () => {
+      const org = await insertTestOrg("org-clerk-id-for-budget");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+        status: "actual",
+      });
+
+      // Query using the internal UUID
+      const res = await request(app)
+        .post("/v1/stats/budget")
+        .set(authHeaders)
+        .send({
+          orgId: org.id,
+          appId: "test-app",
+          windows: [{ label: "all-time" }],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.windows[0].totalCostInUsdCents).toBe("0.1000000000");
+    });
+
+    it("resolves org by internal UUID in GET /v1/stats/costs/by-cost-name", async () => {
+      const org = await insertTestOrg("org-clerk-id-for-bycostname");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "5",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "2.5000000000",
+      });
+
+      const res = await request(app)
+        .get(`/v1/stats/costs/by-cost-name?orgId=${org.id}&appId=test-app`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.costs).toHaveLength(1);
+      expect(res.body.costs[0].costName).toBe("email-send");
+    });
+
+    it("still resolves org by external_id (backward compatible)", async () => {
+      const org = await insertTestOrg("org-still-works-by-ext");
+      await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-compat",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/run-ids-by-workflow?orgId=org-still-works-by-ext&appId=test-app")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups["wf-compat"]).toHaveLength(1);
+    });
+  });
+
   describe("GET /v1/stats/public/leaderboard", () => {
     it("groups costs by brandId across all orgs", async () => {
       const org1 = await insertTestOrg("org-public-1");
