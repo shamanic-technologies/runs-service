@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders, TEST_ORG_ID } from "../helpers/test-app.js";
 import {
   cleanTestData,
-  insertTestOrg,
   insertTestRun,
   insertTestRunCost,
   closeDb,
@@ -24,15 +23,14 @@ describe("Stats endpoints", () => {
 
   describe("GET /v1/stats/costs", () => {
     it("groups costs by brandId", async () => {
-      const org = await insertTestOrg("org-stats-brand");
       const run1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandId: "brand-a",
       });
       const run2 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandId: "brand-b",
@@ -54,7 +52,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=org-stats-brand&appId=test-app&groupBy=brandId")
+        .get("/v1/stats/costs?groupBy=brandId")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -69,9 +67,8 @@ describe("Stats endpoints", () => {
     });
 
     it("groups by multiple dimensions", async () => {
-      const org = await insertTestOrg("org-stats-multi");
       const run1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
         brandId: "brand-x",
@@ -86,7 +83,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=org-stats-multi&appId=test-app&groupBy=brandId,serviceName")
+        .get("/v1/stats/costs?groupBy=brandId,serviceName")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -96,16 +93,15 @@ describe("Stats endpoints", () => {
     });
 
     it("applies filters", async () => {
-      const org = await insertTestOrg("org-stats-filter");
       const run1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
         brandId: "brand-f",
         workflowName: "wf-1",
       });
       const run2 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-b",
         taskName: "task",
         brandId: "brand-f",
@@ -128,7 +124,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=org-stats-filter&appId=test-app&groupBy=brandId&workflowName=wf-1")
+        .get("/v1/stats/costs?groupBy=brandId&workflowName=wf-1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -136,27 +132,21 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].totalCostInUsdCents).toBe("0.1000000000");
     });
 
-    it("returns empty for unknown org", async () => {
+    it("returns empty when org has no runs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const headers = getAuthHeaders({ orgId: otherOrgId });
+
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=nonexistent&appId=test-app&groupBy=brandId")
-        .set(authHeaders);
+        .get("/v1/stats/costs?groupBy=brandId")
+        .set(headers);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toEqual([]);
     });
 
-    it("rejects missing appId", async () => {
-      const res = await request(app)
-        .get("/v1/stats/costs?orgId=org1&groupBy=brandId")
-        .set(authHeaders);
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("appId");
-    });
-
     it("rejects invalid groupBy", async () => {
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=org1&appId=test-app&groupBy=invalidColumn")
+        .get("/v1/stats/costs?groupBy=invalidColumn")
         .set(authHeaders);
 
       expect(res.status).toBe(400);
@@ -164,9 +154,8 @@ describe("Stats endpoints", () => {
     });
 
     it("separates actual, provisioned, cancelled costs", async () => {
-      const org = await insertTestOrg("org-stats-status");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandId: "brand-s",
@@ -198,7 +187,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?orgId=org-stats-status&appId=test-app&groupBy=brandId")
+        .get("/v1/stats/costs?groupBy=brandId")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -206,15 +195,14 @@ describe("Stats endpoints", () => {
       expect(group.actualCostInUsdCents).toBe("0.1000000000");
       expect(group.provisionedCostInUsdCents).toBe("0.2000000000");
       expect(group.cancelledCostInUsdCents).toBe("0.0500000000");
-      expect(group.totalCostInUsdCents).toBe("0.3000000000"); // actual + provisioned, no cancelled
+      expect(group.totalCostInUsdCents).toBe("0.3000000000");
     });
   });
 
   describe("GET /v1/stats/costs/by-cost-name", () => {
     it("returns breakdown by cost name", async () => {
-      const org = await insertTestOrg("org-by-name");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -235,13 +223,12 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?orgId=org-by-name&appId=test-app")
+        .get("/v1/stats/costs/by-cost-name")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.costs).toHaveLength(2);
 
-      // Ordered by total_cost DESC
       expect(res.body.costs[0].costName).toBe("email-send");
       expect(res.body.costs[0].totalCostInUsdCents).toBe("2.5000000000");
       expect(res.body.costs[0].totalQuantity).toBe("5.000000");
@@ -249,9 +236,8 @@ describe("Stats endpoints", () => {
     });
 
     it("includes actual/provisioned/cancelled breakdown", async () => {
-      const org = await insertTestOrg("org-by-name-status");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -282,7 +268,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?orgId=org-by-name-status&appId=test-app")
+        .get("/v1/stats/costs/by-cost-name")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -292,34 +278,27 @@ describe("Stats endpoints", () => {
       expect(cost.actualCostInUsdCents).toBe("0.5000000000");
       expect(cost.provisionedCostInUsdCents).toBe("1.0000000000");
       expect(cost.cancelledCostInUsdCents).toBe("0.5000000000");
-      expect(cost.totalCostInUsdCents).toBe("1.5000000000"); // actual + provisioned
-      expect(cost.totalQuantity).toBe("4.000000"); // all statuses included in quantity
+      expect(cost.totalCostInUsdCents).toBe("1.5000000000");
+      expect(cost.totalQuantity).toBe("4.000000");
     });
 
-    it("returns empty for unknown org", async () => {
+    it("returns empty when org has no costs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const headers = getAuthHeaders({ orgId: otherOrgId });
+
       const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?orgId=nonexistent&appId=test-app")
-        .set(authHeaders);
+        .get("/v1/stats/costs/by-cost-name")
+        .set(headers);
 
       expect(res.status).toBe(200);
       expect(res.body.costs).toEqual([]);
-    });
-
-    it("rejects missing appId", async () => {
-      const res = await request(app)
-        .get("/v1/stats/costs/by-cost-name?orgId=org1")
-        .set(authHeaders);
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("appId");
     });
   });
 
   describe("POST /v1/stats/budget", () => {
     it("returns per-window budget totals", async () => {
-      const org = await insertTestOrg("org-budget");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         campaignId: "campaign-1",
@@ -346,8 +325,6 @@ describe("Stats endpoints", () => {
         .post("/v1/stats/budget")
         .set(authHeaders)
         .send({
-          orgId: "org-budget",
-          appId: "test-app",
           campaignId: "campaign-1",
           windows: [
             { label: "all-time" },
@@ -362,13 +339,14 @@ describe("Stats endpoints", () => {
       expect(res.body.windows[0].provisionedCostInUsdCents).toBe("0.5000000000");
     });
 
-    it("returns zeros for unknown org", async () => {
+    it("returns zeros when org has no costs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const headers = getAuthHeaders({ orgId: otherOrgId });
+
       const res = await request(app)
         .post("/v1/stats/budget")
-        .set(authHeaders)
+        .set(headers)
         .send({
-          orgId: "nonexistent",
-          appId: "test-app",
           windows: [{ label: "all-time" }],
         });
 
@@ -377,9 +355,8 @@ describe("Stats endpoints", () => {
     });
 
     it("handles temporal window with since", async () => {
-      const org = await insertTestOrg("org-budget-window");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -398,8 +375,6 @@ describe("Stats endpoints", () => {
         .post("/v1/stats/budget")
         .set(authHeaders)
         .send({
-          orgId: "org-budget-window",
-          appId: "test-app",
           windows: [
             { label: "all-time" },
             { label: "future-only", since: farFuture },
@@ -413,48 +388,34 @@ describe("Stats endpoints", () => {
       expect(res.body.windows[1].label).toBe("future-only");
       expect(res.body.windows[1].totalCostInUsdCents).toBe("0.0000000000");
     });
-
-    it("rejects missing appId", async () => {
-      const res = await request(app)
-        .post("/v1/stats/budget")
-        .set(authHeaders)
-        .send({
-          orgId: "org1",
-          windows: [{ label: "all-time" }],
-        });
-
-      expect(res.status).toBe(400);
-    });
   });
 
   describe("GET /v1/runs/:id/children-summary", () => {
     it("aggregates costs per child including grandchildren", async () => {
-      const org = await insertTestOrg("org-children-summary");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "campaign-svc",
         taskName: "run-campaign",
       });
       const child1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "lead-svc",
         taskName: "process-lead",
         parentRunId: parent.id,
       });
       const grandchild = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "email-svc",
         taskName: "send-email",
         parentRunId: child1.id,
       });
       const child2 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "lead-svc",
         taskName: "process-lead",
         parentRunId: parent.id,
       });
 
-      // child1's own cost
       await insertTestRunCost({
         runId: child1.id,
         costName: "gpt-4o-input-token",
@@ -462,7 +423,6 @@ describe("Stats endpoints", () => {
         unitCostInUsdCents: "0.0003000000",
         totalCostInUsdCents: "0.3000000000",
       });
-      // grandchild's cost (should roll up to child1)
       await insertTestRunCost({
         runId: grandchild.id,
         costName: "email-send",
@@ -470,7 +430,6 @@ describe("Stats endpoints", () => {
         unitCostInUsdCents: "0.5000000000",
         totalCostInUsdCents: "0.5000000000",
       });
-      // child2's cost
       await insertTestRunCost({
         runId: child2.id,
         costName: "gpt-4o-input-token",
@@ -490,24 +449,21 @@ describe("Stats endpoints", () => {
       const c1 = res.body.children.find((c: any) => c.id === child1.id);
       const c2 = res.body.children.find((c: any) => c.id === child2.id);
 
-      // child1 total = own (0.3) + grandchild (0.5) = 0.8
       expect(c1.totalCostInUsdCents).toBe("0.8000000000");
       expect(c1.costsByName).toHaveLength(2);
 
-      // child2 total = 0.15
       expect(c2.totalCostInUsdCents).toBe("0.1500000000");
       expect(c2.costsByName).toHaveLength(1);
     });
 
     it("includes costsByName breakdown", async () => {
-      const org = await insertTestOrg("org-by-name-drill");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       const child = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "child",
         parentRunId: parent.id,
@@ -550,9 +506,8 @@ describe("Stats endpoints", () => {
     });
 
     it("returns empty children for leaf run", async () => {
-      const org = await insertTestOrg("org-leaf");
       const leaf = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -577,28 +532,27 @@ describe("Stats endpoints", () => {
 
   describe("GET /v1/stats/run-ids-by-workflow", () => {
     it("groups run IDs by workflow name", async () => {
-      const org = await insertTestOrg("org-runids-wf");
       const run1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-alpha",
       });
       const run3 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-beta",
       });
 
       const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-wf&appId=test-app")
+        .get("/v1/stats/run-ids-by-workflow")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -611,22 +565,20 @@ describe("Stats endpoints", () => {
     });
 
     it("excludes runs with null workflow_name", async () => {
-      const org = await insertTestOrg("org-runids-null-wf");
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-only",
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        // no workflowName → null
       });
 
       const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-null-wf&appId=test-app")
+        .get("/v1/stats/run-ids-by-workflow")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -634,44 +586,35 @@ describe("Stats endpoints", () => {
       expect(res.body.groups["wf-only"]).toHaveLength(1);
     });
 
-    it("returns empty groups for unknown org", async () => {
+    it("returns empty groups when org has no workflow runs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const headers = getAuthHeaders({ orgId: otherOrgId });
+
       const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=nonexistent&appId=test-app")
-        .set(authHeaders);
+        .get("/v1/stats/run-ids-by-workflow")
+        .set(headers);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toEqual({});
     });
 
-    it("rejects missing orgId", async () => {
+    it("requires auth", async () => {
       const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?appId=test-app")
-        .set(authHeaders);
+        .get("/v1/stats/run-ids-by-workflow");
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("orgId");
+      expect(res.status).toBe(401);
     });
 
-    it("rejects missing appId", async () => {
-      const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org1")
-        .set(authHeaders);
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("appId");
-    });
-
-    it("applies filters (brandId, startedAfter)", async () => {
-      const org = await insertTestOrg("org-runids-filter");
+    it("applies filters (brandId)", async () => {
       const run1 = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-filtered",
         brandId: "brand-x",
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-filtered",
@@ -679,7 +622,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org-runids-filter&appId=test-app&brandId=brand-x")
+        .get("/v1/stats/run-ids-by-workflow?brandId=brand-x")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -687,233 +630,22 @@ describe("Stats endpoints", () => {
       expect(res.body.groups["wf-filtered"]).toHaveLength(1);
       expect(res.body.groups["wf-filtered"]).toContain(run1.id);
     });
-
-    it("requires auth", async () => {
-      const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org1&appId=test-app");
-
-      expect(res.status).toBe(401);
-    });
-  });
-
-  describe("org resolution by internal UUID", () => {
-    it("resolves org by internal UUID in GET /v1/stats/costs", async () => {
-      const org = await insertTestOrg("org-clerk-id-for-uuid-test");
-      const run = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        brandId: "brand-uuid",
-      });
-      await insertTestRunCost({
-        runId: run.id,
-        costName: "token",
-        quantity: "100",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.1000000000",
-      });
-
-      // Query using the internal UUID instead of external_id
-      const res = await request(app)
-        .get(`/v1/stats/costs?orgId=${org.id}&appId=test-app&groupBy=brandId`)
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.1000000000");
-    });
-
-    it("resolves org by internal UUID in GET /v1/stats/run-ids-by-workflow", async () => {
-      const org = await insertTestOrg("org-clerk-id-for-runids");
-      await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        workflowName: "wf-uuid-test",
-      });
-
-      // Query using the internal UUID instead of external_id
-      const res = await request(app)
-        .get(`/v1/stats/run-ids-by-workflow?orgId=${org.id}&appId=test-app`)
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(Object.keys(res.body.groups)).toHaveLength(1);
-      expect(res.body.groups["wf-uuid-test"]).toHaveLength(1);
-    });
-
-    it("resolves org by internal UUID in POST /v1/stats/budget", async () => {
-      const org = await insertTestOrg("org-clerk-id-for-budget");
-      const run = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-      });
-      await insertTestRunCost({
-        runId: run.id,
-        costName: "token",
-        quantity: "100",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.1000000000",
-        status: "actual",
-      });
-
-      // Query using the internal UUID
-      const res = await request(app)
-        .post("/v1/stats/budget")
-        .set(authHeaders)
-        .send({
-          orgId: org.id,
-          appId: "test-app",
-          windows: [{ label: "all-time" }],
-        });
-
-      expect(res.status).toBe(200);
-      expect(res.body.windows[0].totalCostInUsdCents).toBe("0.1000000000");
-    });
-
-    it("resolves org by internal UUID in GET /v1/stats/costs/by-cost-name", async () => {
-      const org = await insertTestOrg("org-clerk-id-for-bycostname");
-      const run = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-      });
-      await insertTestRunCost({
-        runId: run.id,
-        costName: "email-send",
-        quantity: "5",
-        unitCostInUsdCents: "0.5000000000",
-        totalCostInUsdCents: "2.5000000000",
-      });
-
-      const res = await request(app)
-        .get(`/v1/stats/costs/by-cost-name?orgId=${org.id}&appId=test-app`)
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.costs).toHaveLength(1);
-      expect(res.body.costs[0].costName).toBe("email-send");
-    });
-
-    it("still resolves org by external_id (backward compatible)", async () => {
-      const org = await insertTestOrg("org-still-works-by-ext");
-      await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        workflowName: "wf-compat",
-      });
-
-      const res = await request(app)
-        .get("/v1/stats/run-ids-by-workflow?orgId=org-still-works-by-ext&appId=test-app")
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups["wf-compat"]).toHaveLength(1);
-    });
   });
 
   describe("GET /v1/stats/public/leaderboard", () => {
     it("groups costs by brandId across all orgs", async () => {
-      const org1 = await insertTestOrg("org-public-1");
-      const org2 = await insertTestOrg("org-public-2");
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
       const run1 = await insertTestRun({
-        organizationId: org1.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandId: "brand-shared",
       });
       const run2 = await insertTestRun({
-        organizationId: org2.id,
+        organizationId: otherOrgId,
         serviceName: "svc",
         taskName: "task",
         brandId: "brand-shared",
-      });
-
-      await insertTestRunCost({
-        runId: run1.id,
-        costName: "token",
-        quantity: "100",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.1000000000",
-      });
-      await insertTestRunCost({
-        runId: run2.id,
-        costName: "token",
-        quantity: "200",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.2000000000",
-      });
-
-      const res = await request(app)
-        .get("/v1/stats/public/leaderboard")
-        .query({ appId: "test-app", groupBy: "brandId" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.brandId).toBe("brand-shared");
-      // 0.1 + 0.2 = 0.3 across both orgs
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
-      expect(res.body.groups[0].runCount).toBe(2);
-    });
-
-    it("groups costs by workflowName across all orgs", async () => {
-      const org1 = await insertTestOrg("org-public-wf-1");
-      const org2 = await insertTestOrg("org-public-wf-2");
-      const run1 = await insertTestRun({
-        organizationId: org1.id,
-        serviceName: "svc",
-        taskName: "task",
-        workflowName: "sales-cold-email-v1",
-      });
-      const run2 = await insertTestRun({
-        organizationId: org2.id,
-        serviceName: "svc",
-        taskName: "task",
-        workflowName: "sales-cold-email-v1",
-      });
-
-      await insertTestRunCost({
-        runId: run1.id,
-        costName: "token",
-        quantity: "100",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.1000000000",
-      });
-      await insertTestRunCost({
-        runId: run2.id,
-        costName: "token",
-        quantity: "300",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.3000000000",
-      });
-
-      const res = await request(app)
-        .get("/v1/stats/public/leaderboard")
-        .query({ appId: "test-app", groupBy: "workflowName" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.workflowName).toBe("sales-cold-email-v1");
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.4000000000");
-    });
-
-    it("returns stats across all apps when appId is omitted", async () => {
-      const org = await insertTestOrg("org-public-no-appid");
-      const run1 = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        brandId: "brand-cross-app",
-        appId: "app-one",
-      });
-      const run2 = await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        brandId: "brand-cross-app",
-        appId: "app-two",
       });
 
       await insertTestRunCost({
@@ -936,55 +668,81 @@ describe("Stats endpoints", () => {
         .query({ groupBy: "brandId" });
 
       expect(res.status).toBe(200);
-      const group = res.body.groups.find(
-        (g: any) => g.dimensions.brandId === "brand-cross-app"
-      );
-      expect(group).toBeDefined();
-      // 0.1 + 0.2 = 0.3 across both apps
-      expect(group.totalCostInUsdCents).toBe("0.3000000000");
-      expect(group.runCount).toBe(2);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.brandId).toBe("brand-shared");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("groups costs by workflowName across all orgs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "sales-cold-email-v1",
+      });
+      const run2 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "sales-cold-email-v1",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "300",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.3000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/leaderboard")
+        .query({ groupBy: "workflowName" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.workflowName).toBe("sales-cold-email-v1");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.4000000000");
     });
 
     it("rejects invalid groupBy (campaignId)", async () => {
       const res = await request(app)
         .get("/v1/stats/public/leaderboard")
-        .query({ appId: "test-app", groupBy: "campaignId" });
+        .query({ groupBy: "campaignId" });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/groupBy/i);
     });
 
     it("does not require auth", async () => {
-      // No authHeaders — should still succeed
       const res = await request(app)
         .get("/v1/stats/public/leaderboard")
-        .query({ appId: "test-app", groupBy: "brandId" });
+        .query({ groupBy: "brandId" });
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toBeDefined();
     });
 
-    it("returns empty groups for unknown appId", async () => {
-      const res = await request(app)
-        .get("/v1/stats/public/leaderboard")
-        .query({ appId: "nonexistent-app", groupBy: "brandId" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toEqual([]);
-    });
-
     it("returns identical results regardless of x-org-id/x-user-id headers", async () => {
-      const org1 = await insertTestOrg("org-header-test-1");
-      const org2 = await insertTestOrg("org-header-test-2");
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
 
       const run1 = await insertTestRun({
-        organizationId: org1.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-header-test",
       });
       const run2 = await insertTestRun({
-        organizationId: org2.id,
+        organizationId: otherOrgId,
         serviceName: "svc",
         taskName: "task",
         workflowName: "wf-header-test",
@@ -1005,22 +763,19 @@ describe("Stats endpoints", () => {
         totalCostInUsdCents: "0.2000000000",
       });
 
-      // Call without headers
       const resNoHeaders = await request(app)
         .get("/v1/stats/public/leaderboard")
-        .query({ appId: "test-app", groupBy: "workflowName" });
+        .query({ groupBy: "workflowName" });
 
-      // Call with x-org-id and x-user-id headers (as the dashboard does)
       const resWithHeaders = await request(app)
         .get("/v1/stats/public/leaderboard")
-        .set("x-org-id", "org-header-test-1")
+        .set("x-org-id", TEST_ORG_ID)
         .set("x-user-id", "some-user-id")
-        .query({ appId: "test-app", groupBy: "workflowName" });
+        .query({ groupBy: "workflowName" });
 
       expect(resNoHeaders.status).toBe(200);
       expect(resWithHeaders.status).toBe(200);
 
-      // Results must be identical — headers must not filter data
       const groupNoHeaders = resNoHeaders.body.groups.find(
         (g: any) => g.dimensions.workflowName === "wf-header-test"
       );
@@ -1032,7 +787,6 @@ describe("Stats endpoints", () => {
       expect(groupWithHeaders).toBeDefined();
       expect(groupWithHeaders.totalCostInUsdCents).toBe(groupNoHeaders.totalCostInUsdCents);
       expect(groupWithHeaders.runCount).toBe(groupNoHeaders.runCount);
-      // Both should aggregate across orgs: 0.1 + 0.2 = 0.3
       expect(groupWithHeaders.totalCostInUsdCents).toBe("0.3000000000");
       expect(groupWithHeaders.runCount).toBe(2);
     });

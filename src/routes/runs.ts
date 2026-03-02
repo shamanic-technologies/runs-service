@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { eq, and, gte, lte, desc, sql, inArray, or } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { runs, runsCosts, organizations, users } from "../db/schema.js";
+import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
   resolveMultipleUnitCosts,
@@ -16,44 +16,6 @@ import {
 } from "../schemas.js";
 
 const router = Router();
-
-// --- Helpers ---
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-async function getOrCreateOrg(externalId: string) {
-  const condition = UUID_RE.test(externalId)
-    ? or(eq(organizations.externalId, externalId), eq(organizations.id, externalId))
-    : eq(organizations.externalId, externalId);
-
-  const [existing] = await db
-    .select()
-    .from(organizations)
-    .where(condition)
-    .limit(1);
-  if (existing) return existing;
-
-  const [created] = await db
-    .insert(organizations)
-    .values({ externalId })
-    .returning();
-  return created;
-}
-
-async function getOrCreateUser(externalId: string, organizationId: string) {
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.externalId, externalId))
-    .limit(1);
-  if (existing) return existing;
-
-  const [created] = await db
-    .insert(users)
-    .values({ externalId, organizationId })
-    .returning();
-  return created;
-}
 
 // --- Cost breakdown helper ---
 
@@ -82,17 +44,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { orgId, userId: externalUserId, appId, brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
-
-    // Get-or-create org
-    const org = await getOrCreateOrg(orgId);
-
-    // Get-or-create user (optional)
-    let userId: string | null = null;
-    if (externalUserId) {
-      const user = await getOrCreateUser(externalUserId, org.id);
-      userId = user.id;
-    }
+    const { brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
 
     // Auto-inherit context fields from parent run
     let inheritedBrandId = brandId || null;
@@ -118,9 +70,8 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     }
 
     const values = {
-      organizationId: org.id,
-      userId,
-      appId,
+      organizationId: req.orgId,
+      userId: req.userId || null,
       brandId: inheritedBrandId,
       campaignId: inheritedCampaignId,
       workflowName: inheritedWorkflowName,
@@ -398,9 +349,7 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      orgId,
-      userId: externalUserId,
-      appId,
+      userId,
       brandId,
       campaignId,
       workflowName,
@@ -414,46 +363,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       offset: offsetStr,
     } = req.query;
 
-    if (!orgId) {
-      res.status(400).json({ error: "orgId query param is required" });
-      return;
-    }
+    const conditions = [eq(runs.organizationId, req.orgId)];
 
-    // Resolve orgId to internal org ID (try external_id first, then internal id for UUID inputs)
-    const orgIdStr = orgId as string;
-    const orgCondition = UUID_RE.test(orgIdStr)
-      ? or(eq(organizations.externalId, orgIdStr), eq(organizations.id, orgIdStr))
-      : eq(organizations.externalId, orgIdStr);
-
-    const [org] = await db
-      .select()
-      .from(organizations)
-      .where(orgCondition)
-      .limit(1);
-
-    if (!org) {
-      // Org doesn't exist — no runs possible
-      res.json({ runs: [], limit: Math.min(Number(limitStr) || 50, 200), offset: Number(offsetStr) || 0 });
-      return;
-    }
-
-    const conditions = [eq(runs.organizationId, org.id)];
-
-    // Resolve userId to internal user ID
-    if (externalUserId) {
-      const [user] = await db
-        .select()
-        .from(users)
-        .where(eq(users.externalId, externalUserId as string))
-        .limit(1);
-      if (!user) {
-        res.json({ runs: [], limit: Math.min(Number(limitStr) || 50, 200), offset: Number(offsetStr) || 0 });
-        return;
-      }
-      conditions.push(eq(runs.userId, user.id));
-    }
-
-    if (appId) conditions.push(eq(runs.appId, appId as string));
+    if (userId) conditions.push(eq(runs.userId, userId as string));
     if (brandId) conditions.push(eq(runs.brandId, brandId as string));
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
     if (workflowName) conditions.push(eq(runs.workflowName, workflowName as string));
@@ -477,7 +389,6 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         parentRunId: runs.parentRunId,
         organizationId: runs.organizationId,
         userId: runs.userId,
-        appId: runs.appId,
         brandId: runs.brandId,
         campaignId: runs.campaignId,
         workflowName: runs.workflowName,
@@ -500,7 +411,6 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         runs.parentRunId,
         runs.organizationId,
         runs.userId,
-        runs.appId,
         runs.brandId,
         runs.campaignId,
         runs.workflowName,

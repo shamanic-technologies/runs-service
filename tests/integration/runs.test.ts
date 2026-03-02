@@ -1,10 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders, TEST_ORG_ID, TEST_USER_ID } from "../helpers/test-app.js";
 import {
   cleanTestData,
-  insertTestOrg,
-  insertTestUser,
   insertTestRun,
   insertTestRunCost,
   closeDb,
@@ -48,13 +46,11 @@ describe("Runs CRUD", () => {
   });
 
   describe("POST /v1/runs", () => {
-    it("creates a new run with get-or-create org", async () => {
+    it("creates a new run using x-org-id and x-user-id headers", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org_1",
-          appId: "my-app",
           serviceName: "chat-service",
           taskName: "agent-run",
         });
@@ -63,75 +59,65 @@ describe("Runs CRUD", () => {
       expect(res.body.status).toBe("running");
       expect(res.body.serviceName).toBe("chat-service");
       expect(res.body.taskName).toBe("agent-run");
-      expect(res.body.appId).toBe("my-app");
-      expect(res.body.organizationId).toBeDefined();
+      expect(res.body.organizationId).toBe(TEST_ORG_ID);
+      expect(res.body.userId).toBe(TEST_USER_ID);
     });
 
-    it("resolves existing org when orgId is the internal UUID", async () => {
-      const org = await insertTestOrg("org_clerk_format");
+    it("creates run without x-user-id (optional)", async () => {
+      const headers = {
+        "X-API-Key": "test-api-key",
+        "Content-Type": "application/json",
+        "x-org-id": TEST_ORG_ID,
+      };
 
-      // Create a run using the internal UUID instead of external_id
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set(headers)
         .send({
-          orgId: org.id, // internal UUID, not "org_clerk_format"
-          appId: "my-app",
           serviceName: "svc",
           taskName: "task",
         });
 
       expect(res.status).toBe(201);
-      // Should resolve to the same org, not create a new one
-      expect(res.body.organizationId).toBe(org.id);
+      expect(res.body.userId).toBeNull();
     });
 
-    it("reuses existing org on duplicate orgId", async () => {
-      const res1 = await request(app)
-        .post("/v1/runs")
-        .set(authHeaders)
-        .send({
-          orgId: "org_dup",
-          appId: "my-app",
-          serviceName: "svc-a",
-          taskName: "task-a",
-        });
-
-      const res2 = await request(app)
-        .post("/v1/runs")
-        .set(authHeaders)
-        .send({
-          orgId: "org_dup",
-          appId: "my-app",
-          serviceName: "svc-b",
-          taskName: "task-b",
-        });
-
-      expect(res1.status).toBe(201);
-      expect(res2.status).toBe(201);
-      expect(res1.body.organizationId).toBe(res2.body.organizationId);
-    });
-
-    it("creates run with userId get-or-create", async () => {
+    it("returns 400 when x-org-id is missing", async () => {
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({
+          "X-API-Key": "test-api-key",
+          "Content-Type": "application/json",
+        })
         .send({
-          orgId: "org_user",
-          userId: "user_1",
-          appId: "my-app",
           serviceName: "svc",
           taskName: "task",
         });
 
-      expect(res.status).toBe(201);
-      expect(res.body.userId).toBeDefined();
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("x-org-id");
+    });
+
+    it("returns 400 when x-org-id is not a valid UUID", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          "X-API-Key": "test-api-key",
+          "Content-Type": "application/json",
+          "x-org-id": "not-a-uuid",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("x-org-id");
     });
 
     it("creates a child run", async () => {
-      const org = await insertTestOrg("org-child");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
       });
@@ -140,8 +126,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org-child",
-          appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
           parentRunId: parent.id,
@@ -158,8 +142,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org_orphan",
-          appId: "my-app",
           serviceName: "orphan-svc",
           taskName: "orphan-task",
           parentRunId: fakeParentId,
@@ -182,8 +164,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org_context",
-          appId: "my-app",
           brandId: "brand_1",
           campaignId: "campaign_1",
           serviceName: "svc",
@@ -200,8 +180,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org_wf",
-          appId: "my-app",
           workflowName: "sales-cold-email-v1",
           serviceName: "svc",
           taskName: "task",
@@ -216,8 +194,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org_wf_null",
-          appId: "my-app",
           serviceName: "svc",
           taskName: "task",
         });
@@ -227,9 +203,8 @@ describe("Runs CRUD", () => {
     });
 
     it("inherits workflowName, brandId, campaignId from parent", async () => {
-      const org = await insertTestOrg("org-inherit");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
         brandId: "inherited-brand",
@@ -241,8 +216,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org-inherit",
-          appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
           parentRunId: parent.id,
@@ -255,9 +228,8 @@ describe("Runs CRUD", () => {
     });
 
     it("child values take precedence over parent", async () => {
-      const org = await insertTestOrg("org-override");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
         brandId: "parent-brand",
@@ -269,8 +241,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org-override",
-          appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
           parentRunId: parent.id,
@@ -286,9 +256,8 @@ describe("Runs CRUD", () => {
     });
 
     it("no inheritance when parent has null values", async () => {
-      const org = await insertTestOrg("org-inherit-null");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
       });
@@ -297,8 +266,6 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          orgId: "org-inherit-null",
-          appId: "my-app",
           serviceName: "child-svc",
           taskName: "child-task",
           parentRunId: parent.id,
@@ -313,9 +280,8 @@ describe("Runs CRUD", () => {
 
   describe("POST /v1/runs/:id/costs", () => {
     it("adds cost line items to a run", async () => {
-      const org = await insertTestOrg("org-costs");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -337,9 +303,8 @@ describe("Runs CRUD", () => {
     });
 
     it("returns 400 when costSource is missing", async () => {
-      const org = await insertTestOrg("org-no-bearer");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -355,9 +320,8 @@ describe("Runs CRUD", () => {
     });
 
     it("returns 400 when costSource has invalid value", async () => {
-      const org = await insertTestOrg("org-bad-bearer");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -386,9 +350,8 @@ describe("Runs CRUD", () => {
       const { UpstreamError } = await import("../../src/services/cost-resolver.js");
       const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
 
-      const org = await insertTestOrg("org-upstream");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -407,9 +370,8 @@ describe("Runs CRUD", () => {
 
   describe("PATCH /v1/runs/:id", () => {
     it("completes a run", async () => {
-      const org = await insertTestOrg("org-patch");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -425,9 +387,8 @@ describe("Runs CRUD", () => {
     });
 
     it("rejects invalid status", async () => {
-      const org = await insertTestOrg("org-patch-bad");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -443,14 +404,13 @@ describe("Runs CRUD", () => {
 
   describe("GET /v1/runs/:id", () => {
     it("returns run with costs and computes total including children", async () => {
-      const org = await insertTestOrg("org-get");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       const child = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "child",
         parentRunId: parent.id,
@@ -483,14 +443,13 @@ describe("Runs CRUD", () => {
     });
 
     it("returns descendantRuns with costs", async () => {
-      const org = await insertTestOrg("org-descendants");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "lead-service",
         taskName: "enrich-lead",
       });
       const child = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "apollo-service",
         taskName: "search-people",
         parentRunId: parent.id,
@@ -518,20 +477,19 @@ describe("Runs CRUD", () => {
     });
 
     it("returns multi-level descendants (grandchildren)", async () => {
-      const org = await insertTestOrg("org-grandchild");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task-a",
       });
       const child = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-b",
         taskName: "task-b",
         parentRunId: parent.id,
       });
       const grandchild = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-c",
         taskName: "task-c",
         parentRunId: child.id,
@@ -559,9 +517,8 @@ describe("Runs CRUD", () => {
     });
 
     it("returns empty descendantRuns when no children", async () => {
-      const org = await insertTestOrg("org-no-children");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -577,9 +534,8 @@ describe("Runs CRUD", () => {
 
   describe("POST /v1/runs/:id/costs (cost status)", () => {
     it("creates provisioned cost items", async () => {
-      const org = await insertTestOrg("org-prov");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "email-svc",
         taskName: "send-sequence",
       });
@@ -598,9 +554,8 @@ describe("Runs CRUD", () => {
     });
 
     it("defaults status to actual when omitted", async () => {
-      const org = await insertTestOrg("org-prov-default");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -619,9 +574,8 @@ describe("Runs CRUD", () => {
 
   describe("PATCH /v1/runs/:id/costs/:costId", () => {
     it("realizes a provisioned cost", async () => {
-      const org = await insertTestOrg("org-realize");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -645,9 +599,8 @@ describe("Runs CRUD", () => {
     });
 
     it("cancels a provisioned cost", async () => {
-      const org = await insertTestOrg("org-cancel");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -670,9 +623,8 @@ describe("Runs CRUD", () => {
     });
 
     it("cancelled costs are excluded from totals", async () => {
-      const org = await insertTestOrg("org-cancel-totals");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -706,9 +658,8 @@ describe("Runs CRUD", () => {
     });
 
     it("returns 404 for non-existent cost", async () => {
-      const org = await insertTestOrg("org-realize-404");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -722,9 +673,8 @@ describe("Runs CRUD", () => {
     });
 
     it("returns 404 for cost belonging to different run", async () => {
-      const org = await insertTestOrg("org-realize-wrong");
-      const run1 = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "t1" });
-      const run2 = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "t2" });
+      const run1 = await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t1" });
+      const run2 = await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t2" });
       const cost = await insertTestRunCost({
         runId: run1.id,
         costName: "token",
@@ -743,8 +693,7 @@ describe("Runs CRUD", () => {
     });
 
     it("rejects invalid status value", async () => {
-      const org = await insertTestOrg("org-realize-bad");
-      const run = await insertTestRun({ organizationId: org.id, serviceName: "svc", taskName: "task" });
+      const run = await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "task" });
 
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/00000000-0000-0000-0000-000000000000`)
@@ -757,14 +706,12 @@ describe("Runs CRUD", () => {
 
   describe("GET /v1/runs/:id (cost status breakdown)", () => {
     it("returns actual vs provisioned cost breakdown", async () => {
-      const org = await insertTestOrg("org-breakdown");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "email-svc",
         taskName: "send-sequence",
       });
 
-      // Actual cost (email 1 sent)
       await insertTestRunCost({
         runId: run.id,
         costName: "email-send",
@@ -773,8 +720,6 @@ describe("Runs CRUD", () => {
         totalCostInUsdCents: "0.5000000000",
         status: "actual",
       });
-
-      // Provisioned costs (emails 2 and 3 scheduled)
       await insertTestRunCost({
         runId: run.id,
         costName: "email-send",
@@ -806,14 +751,13 @@ describe("Runs CRUD", () => {
     });
 
     it("includes provisioned breakdown for descendant runs", async () => {
-      const org = await insertTestOrg("org-desc-prov");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       const child = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "child",
         parentRunId: parent.id,
@@ -841,64 +785,51 @@ describe("Runs CRUD", () => {
   });
 
   describe("GET /v1/runs", () => {
-    it("lists runs filtered by orgId", async () => {
-      const org = await insertTestOrg("org-list");
+    it("lists runs for the org from x-org-id header", async () => {
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task-1",
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc-b",
         taskName: "task-2",
       });
 
       const res = await request(app)
-        .get("/v1/runs?orgId=org-list")
+        .get("/v1/runs")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(2);
     });
 
-    it("requires orgId", async () => {
-      const res = await request(app)
-        .get("/v1/runs")
-        .set(authHeaders);
-      expect(res.status).toBe(400);
-    });
-
-    it("lists runs when orgId is the internal UUID", async () => {
-      const org = await insertTestOrg("org-list-by-uuid");
+    it("does not return runs from other orgs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
-        taskName: "task",
+        taskName: "mine",
+      });
+      await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "theirs",
       });
 
-      // Query using internal UUID
       const res = await request(app)
-        .get(`/v1/runs?orgId=${org.id}`)
+        .get("/v1/runs")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(1);
-    });
-
-    it("returns empty list for unknown orgId", async () => {
-      const res = await request(app)
-        .get("/v1/runs?orgId=nonexistent")
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.runs).toEqual([]);
+      expect(res.body.runs[0].taskName).toBe("mine");
     });
 
     it("includes ownCostInUsdCents per run", async () => {
-      const org = await insertTestOrg("org-list-cost");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -912,7 +843,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?orgId=org-list-cost")
+        .get("/v1/runs")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -921,32 +852,31 @@ describe("Runs CRUD", () => {
     });
 
     it("filters by parentRunId", async () => {
-      const org = await insertTestOrg("org-parent-filter");
       const parent = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "child-1",
         parentRunId: parent.id,
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "child-2",
         parentRunId: parent.id,
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "unrelated",
       });
 
       const res = await request(app)
-        .get(`/v1/runs?orgId=org-parent-filter&parentRunId=${parent.id}`)
+        .get(`/v1/runs?parentRunId=${parent.id}`)
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -955,9 +885,8 @@ describe("Runs CRUD", () => {
     });
 
     it("includes own actual and provisioned cost per run", async () => {
-      const org = await insertTestOrg("org-list-prov");
       const run = await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -980,7 +909,7 @@ describe("Runs CRUD", () => {
       });
 
       const res = await request(app)
-        .get("/v1/runs?orgId=org-list-prov")
+        .get("/v1/runs")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -990,51 +919,26 @@ describe("Runs CRUD", () => {
     });
 
     it("filters by workflowName", async () => {
-      const org = await insertTestOrg("org-wf-filter");
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "sales-cold-email-v1",
       });
       await insertTestRun({
-        organizationId: org.id,
+        organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowName: "journalist-outreach-v2",
       });
 
       const res = await request(app)
-        .get("/v1/runs?orgId=org-wf-filter&workflowName=sales-cold-email-v1")
+        .get("/v1/runs?workflowName=sales-cold-email-v1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(1);
       expect(res.body.runs[0].workflowName).toBe("sales-cold-email-v1");
-    });
-
-    it("filters by appId", async () => {
-      const org = await insertTestOrg("org-app-filter");
-      await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        appId: "app-a",
-      });
-      await insertTestRun({
-        organizationId: org.id,
-        serviceName: "svc",
-        taskName: "task",
-        appId: "app-b",
-      });
-
-      const res = await request(app)
-        .get("/v1/runs?orgId=org-app-filter&appId=app-a")
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.runs).toHaveLength(1);
-      expect(res.body.runs[0].appId).toBe("app-a");
     });
   });
 });

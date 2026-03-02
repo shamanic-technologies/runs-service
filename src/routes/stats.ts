@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { eq, and, gte, lte, sql, inArray, or } from "drizzle-orm";
+import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { runs, runsCosts, organizations } from "../db/schema.js";
+import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { BudgetRequestSchema } from "../schemas.js";
 
@@ -14,29 +14,12 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   workflowName: "r.workflow_name",
   campaignId: "r.campaign_id",
   serviceName: "r.service_name",
-  appId: "r.app_id",
 };
 
 // --- Helpers ---
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-async function resolveOrgId(externalOrgId: string): Promise<string | null> {
-  const condition = UUID_RE.test(externalOrgId)
-    ? or(eq(organizations.externalId, externalOrgId), eq(organizations.id, externalOrgId))
-    : eq(organizations.externalId, externalOrgId);
-
-  const [org] = await db
-    .select({ id: organizations.id })
-    .from(organizations)
-    .where(condition)
-    .limit(1);
-  return org?.id ?? null;
-}
-
 function buildFilterSql(
   orgId: string,
-  appId: string,
   filters: {
     brandId?: string;
     campaignId?: string;
@@ -47,7 +30,7 @@ function buildFilterSql(
     startedBefore?: string;
   }
 ) {
-  const parts = [sql`r.organization_id = ${orgId}`, sql`r.app_id = ${appId}`];
+  const parts = [sql`r.organization_id = ${orgId}`];
 
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
@@ -64,26 +47,16 @@ function buildFilterSql(
 router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
   try {
     const {
-      orgId: externalOrgId,
       groupBy,
       brandId,
       campaignId,
       workflowName,
       serviceName,
       taskName,
-      appId,
       startedAfter,
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!externalOrgId) {
-      res.status(400).json({ error: "orgId is required" });
-      return;
-    }
-    if (!appId) {
-      res.status(400).json({ error: "appId is required" });
-      return;
-    }
     if (!groupBy) {
       res.status(400).json({ error: "groupBy is required" });
       return;
@@ -99,17 +72,11 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const orgId = await resolveOrgId(externalOrgId);
-    if (!orgId) {
-      res.json({ groups: [] });
-      return;
-    }
-
     const groupByCols = groupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
     const selectCols = groupByCols.map((col) => sql.raw(col));
     const groupByClause = sql.raw(groupByCols.join(", "));
 
-    const whereSql = buildFilterSql(orgId, appId, {
+    const whereSql = buildFilterSql(req.orgId, {
       brandId,
       campaignId,
       workflowName,
@@ -134,15 +101,6 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     `);
 
     const rows = result as any[];
-
-    // Map DB column names back to camelCase keys
-    const colToCamel: Record<string, string> = {
-      brand_id: "brandId",
-      workflow_name: "workflowName",
-      campaign_id: "campaignId",
-      service_name: "serviceName",
-      app_id: "appId",
-    };
 
     const groups = rows.map((row) => {
       const dimensions: Record<string, string | null> = {};
@@ -171,33 +129,16 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 router.get("/v1/stats/costs/by-cost-name", requireApiKey, async (req, res) => {
   try {
     const {
-      orgId: externalOrgId,
       brandId,
       campaignId,
       workflowName,
       serviceName,
       taskName,
-      appId,
       startedAfter,
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!externalOrgId) {
-      res.status(400).json({ error: "orgId is required" });
-      return;
-    }
-    if (!appId) {
-      res.status(400).json({ error: "appId is required" });
-      return;
-    }
-
-    const orgId = await resolveOrgId(externalOrgId);
-    if (!orgId) {
-      res.json({ costs: [] });
-      return;
-    }
-
-    const whereSql = buildFilterSql(orgId, appId, {
+    const whereSql = buildFilterSql(req.orgId, {
       brandId,
       campaignId,
       workflowName,
@@ -247,24 +188,10 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { orgId: externalOrgId, appId, campaignId, brandId, workflowName, windows } = parsed.data;
-
-    const orgId = await resolveOrgId(externalOrgId);
-    if (!orgId) {
-      // Return zeros for all windows
-      res.json({
-        windows: windows.map((w) => ({
-          label: w.label,
-          totalCostInUsdCents: "0.0000000000",
-          actualCostInUsdCents: "0.0000000000",
-          provisionedCostInUsdCents: "0.0000000000",
-        })),
-      });
-      return;
-    }
+    const { campaignId, brandId, workflowName, windows } = parsed.data;
 
     // Build base WHERE conditions
-    const filterParts = [sql`r.organization_id = ${orgId}`, sql`r.app_id = ${appId}`];
+    const filterParts = [sql`r.organization_id = ${req.orgId}`];
     if (campaignId) filterParts.push(sql`r.campaign_id = ${campaignId}`);
     if (brandId) filterParts.push(sql`r.brand_id = ${brandId}`);
     if (workflowName) filterParts.push(sql`r.workflow_name = ${workflowName}`);
@@ -448,8 +375,6 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
 router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
   try {
     const {
-      orgId: externalOrgId,
-      appId,
       brandId,
       campaignId,
       serviceName,
@@ -458,22 +383,7 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!externalOrgId) {
-      res.status(400).json({ error: "orgId is required" });
-      return;
-    }
-    if (!appId) {
-      res.status(400).json({ error: "appId is required" });
-      return;
-    }
-
-    const orgId = await resolveOrgId(externalOrgId);
-    if (!orgId) {
-      res.json({ groups: {} });
-      return;
-    }
-
-    const whereSql = buildFilterSql(orgId, appId, {
+    const whereSql = buildFilterSql(req.orgId, {
       brandId,
       campaignId,
       serviceName,
@@ -511,7 +421,7 @@ const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
 
 router.get("/v1/stats/public/leaderboard", async (req, res) => {
   try {
-    const { appId, groupBy } = req.query as Record<string, string | undefined>;
+    const { groupBy } = req.query as Record<string, string | undefined>;
 
     if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
       res.status(400).json({
@@ -521,7 +431,6 @@ router.get("/v1/stats/public/leaderboard", async (req, res) => {
     }
 
     const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
-    const whereSql = appId ? sql`WHERE r.app_id = ${appId}` : sql``;
 
     const result = await db.execute(sql`
       SELECT ${sql.raw(col)},
@@ -532,7 +441,6 @@ router.get("/v1/stats/public/leaderboard", async (req, res) => {
         COUNT(DISTINCT r.id) as run_count
       FROM runs r
       LEFT JOIN runs_costs rc ON rc.run_id = r.id
-      ${whereSql}
       GROUP BY ${sql.raw(col)}
       ORDER BY total_cost DESC
     `);

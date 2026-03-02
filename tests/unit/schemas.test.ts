@@ -9,8 +9,6 @@ describe("schemas", () => {
   describe("CreateRunRequestSchema", () => {
     it("accepts valid input with required fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        appId: "my-app",
         serviceName: "my-agent",
         taskName: "run-task",
       });
@@ -19,11 +17,9 @@ describe("schemas", () => {
 
     it("accepts all optional fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        userId: "user_456",
-        appId: "my-app",
         brandId: "brand_1",
         campaignId: "campaign_1",
+        workflowName: "wf-1",
         serviceName: "my-agent",
         taskName: "run-task",
         parentRunId: "770e8400-e29b-41d4-a716-446655440000",
@@ -31,47 +27,23 @@ describe("schemas", () => {
       expect(result.success).toBe(true);
     });
 
-    it("rejects missing orgId", () => {
-      const result = CreateRunRequestSchema.safeParse({
-        appId: "my-app",
-        serviceName: "my-agent",
-        taskName: "run-task",
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects missing appId", () => {
-      const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        serviceName: "my-agent",
-        taskName: "run-task",
-      });
-      expect(result.success).toBe(false);
-    });
-
     it("rejects missing serviceName", () => {
       const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        appId: "my-app",
+        taskName: "run-task",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects missing taskName", () => {
+      const result = CreateRunRequestSchema.safeParse({
+        serviceName: "my-agent",
       });
       expect(result.success).toBe(false);
     });
 
     it("rejects empty serviceName", () => {
       const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        appId: "my-app",
         serviceName: "",
-        taskName: "task",
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects empty appId", () => {
-      const result = CreateRunRequestSchema.safeParse({
-        orgId: "org_123",
-        appId: "",
-        serviceName: "svc",
         taskName: "task",
       });
       expect(result.success).toBe(false);
