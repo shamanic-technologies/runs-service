@@ -37,9 +37,16 @@ export function createTestApp() {
   return app;
 }
 
-export function getAuthHeaders() {
+const TEST_ORG_ID = "11111111-1111-1111-1111-111111111111";
+const TEST_USER_ID = "22222222-2222-2222-2222-222222222222";
+
+export function getAuthHeaders(overrides?: { orgId?: string; userId?: string }) {
   return {
     "X-API-Key": "test-api-key",
     "Content-Type": "application/json",
+    "x-org-id": overrides?.orgId || TEST_ORG_ID,
+    "x-user-id": overrides?.userId || TEST_USER_ID,
   };
 }
+
+export { TEST_ORG_ID, TEST_USER_ID };

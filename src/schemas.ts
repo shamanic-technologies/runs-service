@@ -38,7 +38,6 @@ export const RunSchema = z
     id: z.string().uuid(),
     organizationId: z.string().uuid(),
     userId: z.string().uuid().nullable(),
-    appId: z.string(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
     workflowName: z.string().nullable(),
@@ -61,9 +60,6 @@ export const RunWithOwnCostSchema = RunSchema.extend({
 
 export const CreateRunRequestSchema = z
   .object({
-    orgId: z.string().min(1),
-    userId: z.string().min(1).optional(),
-    appId: z.string().min(1),
     brandId: z.string().min(1).optional(),
     campaignId: z.string().min(1).optional(),
     workflowName: z.string().min(1).optional(),
@@ -155,7 +151,6 @@ export const RunWithCostsSchema = z
     id: z.string().uuid(),
     organizationId: z.string().uuid(),
     userId: z.string().uuid().nullable(),
-    appId: z.string(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
     workflowName: z.string().nullable(),
@@ -234,7 +229,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organizations and users are resolved automatically from orgId/userId.",
+    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers.",
   security: [{ apiKey: [] }],
   request: {
     body: {
@@ -259,13 +254,11 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "List runs",
   description:
-    "Lists runs filtered by orgId and optional parameters. Each run includes ownCostInUsdCents.",
+    "Lists runs for the organization identified by x-org-id header. Each run includes ownCostInUsdCents.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      orgId: z.string(),
-      userId: z.string().optional(),
-      appId: z.string().optional(),
+      userId: z.string().uuid().optional(),
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
       workflowName: z.string().optional(),
@@ -283,10 +276,6 @@ registry.registerPath({
     200: {
       description: "List of runs with cost totals",
       content: { "application/json": { schema: ListRunsResponseSchema } },
-    },
-    400: {
-      description: "Missing orgId",
-      content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
   },
@@ -421,8 +410,6 @@ registry.registerPath({
 // --- Stats schemas ---
 
 export const StatsFiltersSchema = z.object({
-  orgId: z.string().min(1),
-  appId: z.string().min(1),
   brandId: z.string().optional(),
   campaignId: z.string().optional(),
   workflowName: z.string().optional(),
@@ -473,8 +460,6 @@ export const BudgetWindowSchema = z.object({
 
 export const BudgetRequestSchema = z
   .object({
-    orgId: z.string().min(1),
-    appId: z.string().min(1),
     campaignId: z.string().optional(),
     brandId: z.string().optional(),
     workflowName: z.string().optional(),
@@ -526,8 +511,6 @@ export const ChildrenSummaryResponseSchema = z
 
 export const RunIdsByWorkflowQuerySchema = z
   .object({
-    orgId: z.string().min(1),
-    appId: z.string().min(1),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     serviceName: z.string().optional(),
@@ -545,7 +528,6 @@ export const RunIdsByWorkflowResponseSchema = z
 
 export const PublicLeaderboardQuerySchema = z
   .object({
-    appId: z.string().min(1).optional(),
     groupBy: z.enum(["brandId", "workflowName"]),
   })
   .openapi("PublicLeaderboardQuery");
@@ -557,7 +539,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Aggregate costs with GROUP BY",
   description:
-    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName, appId). All standard filters apply.",
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName). Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsCostsQuerySchema,
@@ -568,7 +550,7 @@ registry.registerPath({
       content: { "application/json": { schema: StatsCostsResponseSchema } },
     },
     400: {
-      description: "Invalid groupBy value or missing required params (orgId, appId)",
+      description: "Invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
@@ -580,7 +562,7 @@ registry.registerPath({
   path: "/v1/stats/costs/by-cost-name",
   summary: "Cost breakdown by cost name",
   description:
-    "Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Includes actual/provisioned/cancelled breakdown and total quantity.",
+    "Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsFiltersSchema,
@@ -589,10 +571,6 @@ registry.registerPath({
     200: {
       description: "Cost breakdown by name",
       content: { "application/json": { schema: StatsCostsByCostNameResponseSchema } },
-    },
-    400: {
-      description: "Missing required params (orgId, appId)",
-      content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
   },
@@ -603,7 +581,7 @@ registry.registerPath({
   path: "/v1/stats/budget",
   summary: "Budget check with temporal windows",
   description:
-    "Returns aggregated actual + provisioned costs across temporal windows (e.g., today, 7d, month, all). Used by the DAG budget gatekeeper before each step.",
+    "Returns aggregated actual + provisioned costs across temporal windows. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     body: {
@@ -628,7 +606,7 @@ registry.registerPath({
   path: "/v1/runs/{id}/children-summary",
   summary: "Per-child cost summary",
   description:
-    "Returns aggregated costs per direct child run, including all descendant costs. Each child includes a costsByName breakdown. Used for per-lead drill-down in a campaign.",
+    "Returns aggregated costs per direct child run, including all descendant costs. Each child includes a costsByName breakdown.",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -653,7 +631,7 @@ registry.registerPath({
   path: "/v1/stats/run-ids-by-workflow",
   summary: "Run IDs grouped by workflow name",
   description:
-    "Returns all run IDs grouped by workflow_name. Used to correlate runs with external services (e.g., instantly campaigns) that don't have a workflow concept.",
+    "Returns all run IDs grouped by workflow_name. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: RunIdsByWorkflowQuerySchema,
@@ -662,10 +640,6 @@ registry.registerPath({
     200: {
       description: "Run IDs grouped by workflow name",
       content: { "application/json": { schema: RunIdsByWorkflowResponseSchema } },
-    },
-    400: {
-      description: "Missing required params (orgId, appId)",
-      content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
   },
@@ -676,7 +650,7 @@ registry.registerPath({
   path: "/v1/stats/public/leaderboard",
   summary: "Public leaderboard (no auth)",
   description:
-    "Returns aggregated costs across all organizations for a given appId, grouped by brandId or workflowName. No authentication required. Used for the public performance landing page.",
+    "Returns aggregated costs across all organizations, grouped by brandId or workflowName. No authentication required.",
   request: {
     query: PublicLeaderboardQuerySchema,
   },
