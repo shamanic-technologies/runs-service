@@ -10,7 +10,7 @@ describe("cost-resolver", () => {
   const okResponse = (name: string, cost = "0.0003000000") => ({
     ok: true,
     status: 200,
-    json: () => Promise.resolve({ name, costPerUnitInUsdCents: cost }),
+    json: () => Promise.resolve({ name, pricePerUnitInUsdCents: cost }),
   });
 
   describe("resolveUnitCost", () => {
@@ -20,7 +20,7 @@ describe("cost-resolver", () => {
       const promise = resolveUnitCost("gpt-4o-input-token");
       const result = await promise;
       expect(result.name).toBe("gpt-4o-input-token");
-      expect(result.costPerUnitInUsdCents).toBe("0.0003000000");
+      expect(result.pricePerUnitInUsdCents).toBe("0.0003000000");
     });
 
     it("throws CostNotFoundError on 404 without retrying", async () => {
@@ -182,7 +182,7 @@ describe("cost-resolver", () => {
       await resolveUnitCost("test");
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/v1/providers-costs/test"),
+        expect.stringContaining("/v1/platform-prices/test"),
         expect.objectContaining({
           headers: expect.objectContaining({ "X-API-Key": "test-costs-key" }),
         })
@@ -193,7 +193,7 @@ describe("cost-resolver", () => {
   describe("resolveMultipleUnitCosts", () => {
     it("resolves multiple costs in parallel with dedup", async () => {
       const mockFetch = vi.fn().mockImplementation((url: string) => {
-        const name = url.split("/v1/providers-costs/")[1];
+        const name = url.split("/v1/platform-prices/")[1];
         return Promise.resolve(okResponse(name));
       });
       vi.stubGlobal("fetch", mockFetch);

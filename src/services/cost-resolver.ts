@@ -19,7 +19,7 @@ export class UpstreamError extends Error {
 
 export interface ResolvedCost {
   name: string;
-  costPerUnitInUsdCents: string;
+  pricePerUnitInUsdCents: string;
 }
 
 function isRetryable(err: unknown): boolean {
@@ -50,7 +50,7 @@ export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
 
     try {
       const res = await fetch(
-        `${COSTS_SERVICE_URL}/v1/providers-costs/${encodeURIComponent(name)}`,
+        `${COSTS_SERVICE_URL}/v1/platform-prices/${encodeURIComponent(name)}`,
         { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
       );
 
@@ -62,7 +62,7 @@ export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
       }
 
       const data = await res.json();
-      return { name: data.name, costPerUnitInUsdCents: data.costPerUnitInUsdCents };
+      return { name: data.name, pricePerUnitInUsdCents: data.pricePerUnitInUsdCents };
     } catch (err) {
       lastError = err;
       if (!isRetryable(err)) throw err;
@@ -79,7 +79,7 @@ export async function resolveMultipleUnitCosts(
   const results = await Promise.all(unique.map(resolveUnitCost));
   const map = new Map<string, string>();
   for (const r of results) {
-    map.set(r.name, r.costPerUnitInUsdCents);
+    map.set(r.name, r.pricePerUnitInUsdCents);
   }
   return map;
 }

@@ -325,20 +325,58 @@ describe("Runs CRUD", () => {
         .set(authHeaders)
         .send({
           items: [
-            { costName: "gpt-4o-input-token", quantity: 1000 },
-            { costName: "gpt-4o-output-token", quantity: 200 },
+            { costName: "gpt-4o-input-token", costBearer: "platform", quantity: 1000 },
+            { costName: "gpt-4o-output-token", costBearer: "org", quantity: 200 },
           ],
         });
 
       expect(res.status).toBe(201);
       expect(res.body.costs).toHaveLength(2);
+      expect(res.body.costs[0].costBearer).toBe("platform");
+      expect(res.body.costs[1].costBearer).toBe("org");
+    });
+
+    it("returns 400 when costBearer is missing", async () => {
+      const org = await insertTestOrg("org-no-bearer");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [{ costName: "gpt-4o-input-token", quantity: 1000 }],
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 when costBearer has invalid value", async () => {
+      const org = await insertTestOrg("org-bad-bearer");
+      const run = await insertTestRun({
+        organizationId: org.id,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [{ costName: "gpt-4o-input-token", costBearer: "invalid", quantity: 1000 }],
+        });
+
+      expect(res.status).toBe(400);
     });
 
     it("returns 404 for unknown run", async () => {
       const res = await request(app)
         .post("/v1/runs/00000000-0000-0000-0000-000000000000/costs")
         .set(authHeaders)
-        .send({ items: [{ costName: "test", quantity: 1 }] });
+        .send({ items: [{ costName: "test", costBearer: "platform", quantity: 1 }] });
 
       expect(res.status).toBe(404);
     });
@@ -360,7 +398,7 @@ describe("Runs CRUD", () => {
       const res = await request(app)
         .post(`/v1/runs/${run.id}/costs`)
         .set(authHeaders)
-        .send({ items: [{ costName: "gpt-4o-input-token", quantity: 1000 }] });
+        .send({ items: [{ costName: "gpt-4o-input-token", costBearer: "platform", quantity: 1000 }] });
 
       expect(res.status).toBe(502);
       expect(res.body.error).toContain("costs-service");
@@ -551,7 +589,7 @@ describe("Runs CRUD", () => {
         .set(authHeaders)
         .send({
           items: [
-            { costName: "gpt-4o-input-token", quantity: 1000, status: "provisioned" },
+            { costName: "gpt-4o-input-token", costBearer: "platform", quantity: 1000, status: "provisioned" },
           ],
         });
 
@@ -571,7 +609,7 @@ describe("Runs CRUD", () => {
         .post(`/v1/runs/${run.id}/costs`)
         .set(authHeaders)
         .send({
-          items: [{ costName: "gpt-4o-input-token", quantity: 1000 }],
+          items: [{ costName: "gpt-4o-input-token", costBearer: "platform", quantity: 1000 }],
         });
 
       expect(res.status).toBe(201);

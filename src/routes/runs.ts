@@ -298,6 +298,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       return {
         runId: id,
         costName: item.costName,
+        costBearer: item.costBearer,
         quantity: String(item.quantity),
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
