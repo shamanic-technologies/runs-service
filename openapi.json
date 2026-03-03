@@ -160,10 +160,6 @@
           "taskName": {
             "type": "string",
             "minLength": 1
-          },
-          "parentRunId": {
-            "type": "string",
-            "format": "uuid"
           }
         },
         "required": [
@@ -882,7 +878,7 @@
     "/v1/runs": {
       "post": {
         "summary": "Create a run",
-        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers.",
+        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId).",
         "security": [
           {
             "apiKey": []

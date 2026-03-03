@@ -44,7 +44,8 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { brandId, campaignId, workflowName, serviceName, taskName, parentRunId } = parsed.data;
+    const { brandId, campaignId, workflowName, serviceName, taskName } = parsed.data;
+    const parentRunId = req.runId || null;
 
     // Auto-inherit context fields from parent run
     let inheritedBrandId = brandId || null;
@@ -77,7 +78,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       workflowName: inheritedWorkflowName,
       serviceName,
       taskName,
-      parentRunId: parentRunId || null,
+      parentRunId,
     };
 
     let created;

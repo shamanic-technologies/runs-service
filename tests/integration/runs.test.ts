@@ -115,7 +115,7 @@ describe("Runs CRUD", () => {
       expect(res.body.error).toContain("x-org-id");
     });
 
-    it("creates a child run", async () => {
+    it("creates a child run via x-run-id header", async () => {
       const parent = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
@@ -124,31 +124,42 @@ describe("Runs CRUD", () => {
 
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({ ...authHeaders, "x-run-id": parent.id })
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          parentRunId: parent.id,
         });
 
       expect(res.status).toBe(201);
       expect(res.body.parentRunId).toBe(parent.id);
     });
 
-    it("returns 400 when parentRunId does not exist", async () => {
+    it("returns 400 when x-run-id does not exist in runs table", async () => {
       const fakeParentId = "00000000-0000-0000-0000-000000000000";
 
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({ ...authHeaders, "x-run-id": fakeParentId })
         .send({
           serviceName: "orphan-svc",
           taskName: "orphan-task",
-          parentRunId: fakeParentId,
         });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toContain(fakeParentId);
+    });
+
+    it("returns 400 when x-run-id is not a valid UUID", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": "not-a-uuid" })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("x-run-id");
     });
 
     it("rejects without required fields", async () => {
@@ -214,11 +225,10 @@ describe("Runs CRUD", () => {
 
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({ ...authHeaders, "x-run-id": parent.id })
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          parentRunId: parent.id,
         });
 
       expect(res.status).toBe(201);
@@ -239,11 +249,10 @@ describe("Runs CRUD", () => {
 
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({ ...authHeaders, "x-run-id": parent.id })
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          parentRunId: parent.id,
           brandId: "child-brand",
           campaignId: "child-campaign",
           workflowName: "child-workflow",
@@ -264,11 +273,10 @@ describe("Runs CRUD", () => {
 
       const res = await request(app)
         .post("/v1/runs")
-        .set(authHeaders)
+        .set({ ...authHeaders, "x-run-id": parent.id })
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          parentRunId: parent.id,
         });
 
       expect(res.status).toBe(201);

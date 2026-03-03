@@ -65,7 +65,6 @@ export const CreateRunRequestSchema = z
     workflowName: z.string().min(1).optional(),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
-    parentRunId: z.string().uuid().optional(),
   })
   .openapi("CreateRunRequest");
 
@@ -229,7 +228,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers.",
+    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId).",
   security: [{ apiKey: [] }],
   request: {
     body: {
