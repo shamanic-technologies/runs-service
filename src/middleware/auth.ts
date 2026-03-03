@@ -7,6 +7,7 @@ declare global {
     interface Request {
       orgId: string;
       userId?: string;
+      runId?: string;
     }
   }
 }
@@ -33,6 +34,15 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction) {
       return;
     }
     req.userId = userId;
+  }
+
+  const runId = req.headers["x-run-id"] as string | undefined;
+  if (runId) {
+    if (!UUID_RE.test(runId)) {
+      res.status(400).json({ error: "x-run-id header must be a valid UUID" });
+      return;
+    }
+    req.runId = runId;
   }
 
   next();
