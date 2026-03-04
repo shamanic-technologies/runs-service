@@ -35,8 +35,18 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
-  const headers: Record<string, string> = {};
+export interface CostResolverContext {
+  orgId: string;
+  userId?: string;
+  runId?: string;
+}
+
+export async function resolveUnitCost(name: string, ctx: CostResolverContext): Promise<ResolvedCost> {
+  const headers: Record<string, string> = {
+    "x-org-id": ctx.orgId,
+  };
+  if (ctx.userId) headers["x-user-id"] = ctx.userId;
+  if (ctx.runId) headers["x-run-id"] = ctx.runId;
   if (COSTS_SERVICE_API_KEY) {
     headers["X-API-Key"] = COSTS_SERVICE_API_KEY;
   }
@@ -73,10 +83,11 @@ export async function resolveUnitCost(name: string): Promise<ResolvedCost> {
 }
 
 export async function resolveMultipleUnitCosts(
-  names: string[]
+  names: string[],
+  ctx: CostResolverContext
 ): Promise<Map<string, string>> {
   const unique = [...new Set(names)];
-  const results = await Promise.all(unique.map(resolveUnitCost));
+  const results = await Promise.all(unique.map((n) => resolveUnitCost(n, ctx)));
   const map = new Map<string, string>();
   for (const r of results) {
     map.set(r.name, r.pricePerUnitInUsdCents);
