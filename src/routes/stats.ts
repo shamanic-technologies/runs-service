@@ -413,6 +413,54 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
   }
 });
 
+// GET /v1/stats/public/run-ids-by-workflow — same as run-ids-by-workflow but without identity headers
+router.get("/v1/stats/public/run-ids-by-workflow", async (req, res) => {
+  try {
+    const {
+      orgId,
+      brandId,
+      campaignId,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    } = req.query as Record<string, string | undefined>;
+
+    if (!orgId) {
+      res.status(400).json({ error: "orgId query parameter is required" });
+      return;
+    }
+
+    const whereSql = buildFilterSql(orgId, {
+      brandId,
+      campaignId,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    });
+
+    const result = await db.execute(sql`
+      SELECT r.workflow_name, array_agg(r.id::text) as run_ids
+      FROM runs r
+      WHERE ${whereSql} AND r.workflow_name IS NOT NULL
+      GROUP BY r.workflow_name
+      ORDER BY r.workflow_name
+    `);
+
+    const rows = result as any[];
+    const groups: Record<string, string[]> = {};
+    for (const row of rows) {
+      groups[row.workflow_name] = row.run_ids;
+    }
+
+    res.json({ groups });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /v1/stats/public/run-ids-by-workflow:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // GET /v1/stats/public/leaderboard — public cross-org leaderboard
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
