@@ -231,7 +231,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     const names = items.map((i) => i.costName);
     let costMap: Map<string, string>;
     try {
-      costMap = await resolveMultipleUnitCosts(names);
+      costMap = await resolveMultipleUnitCosts(names, {
+        orgId: req.orgId,
+        userId: req.userId,
+        runId: req.runId,
+      });
     } catch (err) {
       if (err instanceof CostNotFoundError) {
         res

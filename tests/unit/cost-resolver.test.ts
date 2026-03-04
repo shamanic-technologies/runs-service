@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveUnitCost, resolveMultipleUnitCosts, CostNotFoundError, UpstreamError } from "../../src/services/cost-resolver.js";
+import { resolveUnitCost, resolveMultipleUnitCosts, CostNotFoundError, UpstreamError, CostResolverContext } from "../../src/services/cost-resolver.js";
+
+const TEST_CTX: CostResolverContext = {
+  orgId: "11111111-1111-1111-1111-111111111111",
+  userId: "22222222-2222-2222-2222-222222222222",
+  runId: "33333333-3333-3333-3333-333333333333",
+};
 
 describe("cost-resolver", () => {
   beforeEach(() => {
@@ -17,7 +23,7 @@ describe("cost-resolver", () => {
     it("resolves a cost unit from costs-service", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse("gpt-4o-input-token")));
 
-      const promise = resolveUnitCost("gpt-4o-input-token");
+      const promise = resolveUnitCost("gpt-4o-input-token", TEST_CTX);
       const result = await promise;
       expect(result.name).toBe("gpt-4o-input-token");
       expect(result.pricePerUnitInUsdCents).toBe("0.0003000000");
@@ -27,15 +33,15 @@ describe("cost-resolver", () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
       vi.stubGlobal("fetch", mockFetch);
 
-      await expect(resolveUnitCost("unknown")).rejects.toThrow(CostNotFoundError);
+      await expect(resolveUnitCost("unknown", TEST_CTX)).rejects.toThrow(CostNotFoundError);
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
     it("throws UpstreamError on non-retryable non-ok response", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 400 }));
 
-      await expect(resolveUnitCost("test")).rejects.toThrow(UpstreamError);
-      await expect(resolveUnitCost("test")).rejects.toThrow("costs-service returned 400");
+      await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow(UpstreamError);
+      await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow("costs-service returned 400");
     });
 
     it("retries on 502 and succeeds", async () => {
@@ -45,7 +51,7 @@ describe("cost-resolver", () => {
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
 
       // Advance past the 1s backoff for retry #1
       await vi.advanceTimersByTimeAsync(1_000);
@@ -62,7 +68,7 @@ describe("cost-resolver", () => {
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
       await vi.advanceTimersByTimeAsync(1_000);
 
       const result = await promise;
@@ -77,7 +83,7 @@ describe("cost-resolver", () => {
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
       await vi.advanceTimersByTimeAsync(1_000);
 
       const result = await promise;
@@ -92,7 +98,7 @@ describe("cost-resolver", () => {
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
       await vi.advanceTimersByTimeAsync(1_000);
 
       const result = await promise;
@@ -104,7 +110,7 @@ describe("cost-resolver", () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502 });
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
       // Prevent unhandled rejection while timers advance
       promise.catch(() => {});
 
@@ -127,7 +133,7 @@ describe("cost-resolver", () => {
         .mockResolvedValueOnce(okResponse("test", "0.01")); // attempt 3 (after 4s)
       vi.stubGlobal("fetch", mockFetch);
 
-      const promise = resolveUnitCost("test");
+      const promise = resolveUnitCost("test", TEST_CTX);
 
       // After 999ms, only 1 call (the initial attempt)
       await vi.advanceTimersByTimeAsync(999);
@@ -157,7 +163,7 @@ describe("cost-resolver", () => {
       const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 400 });
       vi.stubGlobal("fetch", mockFetch);
 
-      await expect(resolveUnitCost("test")).rejects.toThrow(UpstreamError);
+      await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow(UpstreamError);
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
@@ -165,7 +171,7 @@ describe("cost-resolver", () => {
       const mockFetch = vi.fn().mockResolvedValue(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      await resolveUnitCost("test");
+      await resolveUnitCost("test", TEST_CTX);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
@@ -175,18 +181,35 @@ describe("cost-resolver", () => {
       );
     });
 
-    it("sends API key header when configured", async () => {
+    it("sends API key and identity headers", async () => {
       const mockFetch = vi.fn().mockResolvedValue(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
-      await resolveUnitCost("test");
+      await resolveUnitCost("test", TEST_CTX);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining("/v1/platform-prices/test"),
         expect.objectContaining({
-          headers: expect.objectContaining({ "X-API-Key": "test-costs-key" }),
+          headers: expect.objectContaining({
+            "X-API-Key": "test-costs-key",
+            "x-org-id": TEST_CTX.orgId,
+            "x-user-id": TEST_CTX.userId,
+            "x-run-id": TEST_CTX.runId,
+          }),
         })
       );
+    });
+
+    it("omits x-user-id and x-run-id when not provided", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(okResponse("test", "0.01"));
+      vi.stubGlobal("fetch", mockFetch);
+
+      await resolveUnitCost("test", { orgId: TEST_CTX.orgId });
+
+      const callHeaders = mockFetch.mock.calls[0][1].headers;
+      expect(callHeaders["x-org-id"]).toBe(TEST_CTX.orgId);
+      expect(callHeaders).not.toHaveProperty("x-user-id");
+      expect(callHeaders).not.toHaveProperty("x-run-id");
     });
   });
 
@@ -202,7 +225,7 @@ describe("cost-resolver", () => {
         "cost-a",
         "cost-b",
         "cost-a",
-      ]);
+      ], TEST_CTX);
 
       expect(result.size).toBe(2);
       expect(result.get("cost-a")).toBe("0.0003000000");
@@ -215,7 +238,7 @@ describe("cost-resolver", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
 
       await expect(
-        resolveMultipleUnitCosts(["missing"])
+        resolveMultipleUnitCosts(["missing"], TEST_CTX)
       ).rejects.toThrow(CostNotFoundError);
     });
   });
