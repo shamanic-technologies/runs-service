@@ -50,6 +50,13 @@
       "when": 1772614800000,
       "tag": "0006_remove_appid_orgs_users",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1772701200000,
+      "tag": "0007_rename_cost_bearer_to_cost_source",
+      "breakpoints": true
     }
   ]
 }
