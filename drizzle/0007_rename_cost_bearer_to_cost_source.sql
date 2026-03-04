@@ -1,0 +1,1 @@
+ALTER TABLE "runs_costs" RENAME COLUMN "cost_bearer" TO "cost_source";
