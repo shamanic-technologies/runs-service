@@ -646,7 +646,7 @@ registry.registerPath({
 
 export const PublicRunIdsByWorkflowQuerySchema = z
   .object({
-    orgId: z.string().uuid(),
+    orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     serviceName: z.string().optional(),
@@ -661,7 +661,7 @@ registry.registerPath({
   path: "/v1/stats/public/run-ids-by-workflow",
   summary: "Run IDs grouped by workflow name (no identity headers)",
   description:
-    "Returns all run IDs grouped by workflow_name for a given orgId. Service auth (X-API-Key) only, no identity headers required.",
+    "Returns all run IDs grouped by workflow_name. When orgId is provided, scopes to that org; when omitted, returns cross-org results. Service auth (X-API-Key) only, no identity headers required.",
   security: [{ apiKey: [] }],
   request: {
     query: PublicRunIdsByWorkflowQuerySchema,
@@ -670,10 +670,6 @@ registry.registerPath({
     200: {
       description: "Run IDs grouped by workflow name",
       content: { "application/json": { schema: RunIdsByWorkflowResponseSchema } },
-    },
-    400: {
-      description: "Missing orgId",
-      content: { "application/json": { schema: ErrorSchema } },
     },
   },
 });
