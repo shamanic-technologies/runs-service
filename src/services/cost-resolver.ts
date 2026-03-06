@@ -36,15 +36,14 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export interface CostResolverContext {
-  orgId: string;
+  orgId?: string;
   userId?: string;
   runId?: string;
 }
 
 export async function resolveUnitCost(name: string, ctx: CostResolverContext): Promise<ResolvedCost> {
-  const headers: Record<string, string> = {
-    "x-org-id": ctx.orgId,
-  };
+  const headers: Record<string, string> = {};
+  if (ctx.orgId) headers["x-org-id"] = ctx.orgId;
   if (ctx.userId) headers["x-user-id"] = ctx.userId;
   if (ctx.runId) headers["x-run-id"] = ctx.runId;
   if (COSTS_SERVICE_API_KEY) {

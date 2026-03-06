@@ -8,6 +8,7 @@ declare global {
       orgId: string;
       userId?: string;
       runId?: string;
+      platformServiceName?: string;
     }
   }
 }
@@ -44,6 +45,23 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction) {
     }
     req.runId = runId;
   }
+
+  next();
+}
+
+export function requirePlatformAuth(req: Request, res: Response, next: NextFunction) {
+  const apiKey = req.headers["x-api-key"] as string;
+  if (!apiKey || apiKey !== process.env.RUNS_SERVICE_API_KEY) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const serviceName = req.headers["x-service-name"] as string | undefined;
+  if (!serviceName || serviceName.trim().length === 0) {
+    res.status(400).json({ error: "x-service-name header is required" });
+    return;
+  }
+  req.platformServiceName = serviceName;
 
   next();
 }

@@ -36,7 +36,7 @@ export const ValidationErrorSchema = z
 export const RunSchema = z
   .object({
     id: z.string().uuid(),
-    organizationId: z.string().uuid(),
+    organizationId: z.string().uuid().nullable(),
     userId: z.string().uuid().nullable(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
@@ -148,7 +148,7 @@ export const DescendantRunSchema = z
 export const RunWithCostsSchema = z
   .object({
     id: z.string().uuid(),
-    organizationId: z.string().uuid(),
+    organizationId: z.string().uuid().nullable(),
     userId: z.string().uuid().nullable(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
@@ -660,6 +660,101 @@ registry.registerPath({
     },
     400: {
       description: "Invalid groupBy value",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+// --- Platform runs paths ---
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/platform-runs",
+  summary: "Create a platform-level run",
+  description:
+    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: CreateRunRequestSchema } },
+    },
+  },
+  responses: {
+    201: {
+      description: "Platform run created",
+      content: { "application/json": { schema: RunSchema } },
+    },
+    400: {
+      description: "Invalid request or missing x-service-name",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/platform-runs/{id}/costs",
+  summary: "Add costs to a platform run",
+  description:
+    "Adds cost line items to a platform-level run. Unit costs are resolved automatically from the costs-service.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({
+      id: z.string().uuid(),
+    }),
+    body: {
+      content: { "application/json": { schema: AddCostsRequestSchema } },
+    },
+  },
+  responses: {
+    201: {
+      description: "Costs added",
+      content: { "application/json": { schema: AddCostsResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    422: {
+      description: "Unknown cost name",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/v1/platform-runs/{id}",
+  summary: "Update platform run status",
+  description:
+    "Updates a platform-level run status to completed or failed. Sets completedAt automatically.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({
+      id: z.string().uuid(),
+    }),
+    body: {
+      content: { "application/json": { schema: UpdateRunRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Run updated",
+      content: { "application/json": { schema: RunSchema } },
+    },
+    400: {
+      description: "Invalid status value",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },
