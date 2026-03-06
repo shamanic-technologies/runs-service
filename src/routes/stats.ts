@@ -413,54 +413,6 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
   }
 });
 
-// GET /v1/stats/public/run-ids-by-workflow — same as run-ids-by-workflow but without identity headers
-// orgId is optional: when provided, scopes to that org; when omitted, returns cross-org results
-router.get("/v1/stats/public/run-ids-by-workflow", async (req, res) => {
-  try {
-    const {
-      orgId,
-      brandId,
-      campaignId,
-      serviceName,
-      taskName,
-      startedAfter,
-      startedBefore,
-    } = req.query as Record<string, string | undefined>;
-
-    const filterParts = [];
-    if (orgId) filterParts.push(sql`r.organization_id = ${orgId}`);
-    if (brandId) filterParts.push(sql`r.brand_id = ${brandId}`);
-    if (campaignId) filterParts.push(sql`r.campaign_id = ${campaignId}`);
-    if (serviceName) filterParts.push(sql`r.service_name = ${serviceName}`);
-    if (taskName) filterParts.push(sql`r.task_name = ${taskName}`);
-    if (startedAfter) filterParts.push(sql`r.started_at >= ${startedAfter}::timestamptz`);
-    if (startedBefore) filterParts.push(sql`r.started_at <= ${startedBefore}::timestamptz`);
-
-    const whereSql = filterParts.length > 0
-      ? sql`${filterParts.reduce((acc, part) => sql`${acc} AND ${part}`)} AND r.workflow_name IS NOT NULL`
-      : sql`r.workflow_name IS NOT NULL`;
-
-    const result = await db.execute(sql`
-      SELECT r.workflow_name, array_agg(r.id::text) as run_ids
-      FROM runs r
-      WHERE ${whereSql}
-      GROUP BY r.workflow_name
-      ORDER BY r.workflow_name
-    `);
-
-    const rows = result as any[];
-    const groups: Record<string, string[]> = {};
-    for (const row of rows) {
-      groups[row.workflow_name] = row.run_ids;
-    }
-
-    res.json({ groups });
-  } catch (err) {
-    console.error("[Runs Service] Error in GET /v1/stats/public/run-ids-by-workflow:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 // GET /v1/stats/public/leaderboard — public cross-org leaderboard
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
