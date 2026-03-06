@@ -665,12 +665,36 @@ describe("Stats endpoints", () => {
       expect(res.body.groups["wf-pub-beta"]).toContain(run3.id);
     });
 
-    it("returns 400 when orgId is missing", async () => {
+    it("returns cross-org results when orgId is omitted", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-cross-org",
+      });
+      const run2 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-cross-org",
+      });
+      const run3 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-other-only",
+      });
+
       const res = await request(app)
         .get("/v1/stats/public/run-ids-by-workflow");
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("orgId");
+      expect(res.status).toBe(200);
+      expect(res.body.groups["wf-cross-org"]).toHaveLength(2);
+      expect(res.body.groups["wf-cross-org"]).toContain(run1.id);
+      expect(res.body.groups["wf-cross-org"]).toContain(run2.id);
+      expect(res.body.groups["wf-other-only"]).toHaveLength(1);
+      expect(res.body.groups["wf-other-only"]).toContain(run3.id);
     });
 
     it("does not require identity headers", async () => {

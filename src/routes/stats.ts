@@ -414,6 +414,7 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
 });
 
 // GET /v1/stats/public/run-ids-by-workflow — same as run-ids-by-workflow but without identity headers
+// orgId is optional: when provided, scopes to that org; when omitted, returns cross-org results
 router.get("/v1/stats/public/run-ids-by-workflow", async (req, res) => {
   try {
     const {
@@ -426,24 +427,23 @@ router.get("/v1/stats/public/run-ids-by-workflow", async (req, res) => {
       startedBefore,
     } = req.query as Record<string, string | undefined>;
 
-    if (!orgId) {
-      res.status(400).json({ error: "orgId query parameter is required" });
-      return;
-    }
+    const filterParts = [];
+    if (orgId) filterParts.push(sql`r.organization_id = ${orgId}`);
+    if (brandId) filterParts.push(sql`r.brand_id = ${brandId}`);
+    if (campaignId) filterParts.push(sql`r.campaign_id = ${campaignId}`);
+    if (serviceName) filterParts.push(sql`r.service_name = ${serviceName}`);
+    if (taskName) filterParts.push(sql`r.task_name = ${taskName}`);
+    if (startedAfter) filterParts.push(sql`r.started_at >= ${startedAfter}::timestamptz`);
+    if (startedBefore) filterParts.push(sql`r.started_at <= ${startedBefore}::timestamptz`);
 
-    const whereSql = buildFilterSql(orgId, {
-      brandId,
-      campaignId,
-      serviceName,
-      taskName,
-      startedAfter,
-      startedBefore,
-    });
+    const whereSql = filterParts.length > 0
+      ? sql`${filterParts.reduce((acc, part) => sql`${acc} AND ${part}`)} AND r.workflow_name IS NOT NULL`
+      : sql`r.workflow_name IS NOT NULL`;
 
     const result = await db.execute(sql`
       SELECT r.workflow_name, array_agg(r.id::text) as run_ids
       FROM runs r
-      WHERE ${whereSql} AND r.workflow_name IS NOT NULL
+      WHERE ${whereSql}
       GROUP BY r.workflow_name
       ORDER BY r.workflow_name
     `);

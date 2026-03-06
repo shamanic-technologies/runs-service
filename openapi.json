@@ -1672,7 +1672,7 @@
     "/v1/stats/public/run-ids-by-workflow": {
       "get": {
         "summary": "Run IDs grouped by workflow name (no identity headers)",
-        "description": "Returns all run IDs grouped by workflow_name for a given orgId. Service auth (X-API-Key) only, no identity headers required.",
+        "description": "Returns all run IDs grouped by workflow_name. When orgId is provided, scopes to that org; when omitted, returns cross-org results. Service auth (X-API-Key) only, no identity headers required.",
         "security": [
           {
             "apiKey": []
@@ -1684,7 +1684,7 @@
               "type": "string",
               "format": "uuid"
             },
-            "required": true,
+            "required": false,
             "name": "orgId",
             "in": "query"
           },
@@ -1746,16 +1746,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunIdsByWorkflowResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Missing orgId",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
