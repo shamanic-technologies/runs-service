@@ -5,7 +5,7 @@ export const runs = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     parentRunId: uuid("parent_run_id").references((): any => runs.id),
-    organizationId: uuid("organization_id").notNull(),
+    organizationId: uuid("organization_id"),
     userId: uuid("user_id"),
     brandId: text("brand_id"),
     campaignId: text("campaign_id"),

@@ -211,6 +211,18 @@ describe("cost-resolver", () => {
       expect(callHeaders).not.toHaveProperty("x-user-id");
       expect(callHeaders).not.toHaveProperty("x-run-id");
     });
+
+    it("omits x-org-id when orgId not provided (platform context)", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(okResponse("test", "0.01"));
+      vi.stubGlobal("fetch", mockFetch);
+
+      await resolveUnitCost("test", {});
+
+      const callHeaders = mockFetch.mock.calls[0][1].headers;
+      expect(callHeaders).not.toHaveProperty("x-org-id");
+      expect(callHeaders).not.toHaveProperty("x-user-id");
+      expect(callHeaders).not.toHaveProperty("x-run-id");
+    });
   });
 
   describe("resolveMultipleUnitCosts", () => {
