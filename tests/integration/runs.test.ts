@@ -264,6 +264,85 @@ describe("Runs CRUD", () => {
       expect(res.body.workflowName).toBe("child-workflow");
     });
 
+    it("uses x-brand-id, x-campaign-id, x-workflow-name headers as fallback", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "header-brand",
+          "x-campaign-id": "header-campaign",
+          "x-workflow-name": "header-workflow",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.campaignId).toBe("header-campaign");
+      expect(res.body.workflowName).toBe("header-workflow");
+    });
+
+    it("body values take precedence over header values", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "header-brand",
+          "x-campaign-id": "header-campaign",
+          "x-workflow-name": "header-workflow",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+          brandId: "body-brand",
+          campaignId: "body-campaign",
+          workflowName: "body-workflow",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("body-brand");
+      expect(res.body.campaignId).toBe("body-campaign");
+      expect(res.body.workflowName).toBe("body-workflow");
+    });
+
+    it("header values fill in gaps when body has partial values", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "header-brand",
+          "x-campaign-id": "header-campaign",
+          "x-workflow-name": "header-workflow",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+          brandId: "body-brand",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("body-brand");
+      expect(res.body.campaignId).toBe("header-campaign");
+      expect(res.body.workflowName).toBe("header-workflow");
+    });
+
+    it("headers do not break existing behavior when absent", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBeNull();
+      expect(res.body.campaignId).toBeNull();
+      expect(res.body.workflowName).toBeNull();
+    });
+
     it("no inheritance when parent has null values", async () => {
       const parent = await insertTestRun({
         organizationId: TEST_ORG_ID,

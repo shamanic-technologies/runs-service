@@ -47,10 +47,10 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     const { brandId, campaignId, workflowName, serviceName, taskName } = parsed.data;
     const parentRunId = req.runId || null;
 
-    // Auto-inherit context fields from parent run
-    let inheritedBrandId = brandId || null;
-    let inheritedCampaignId = campaignId || null;
-    let inheritedWorkflowName = workflowName || null;
+    // Priority: body > header > parent inheritance
+    let inheritedBrandId = brandId || req.headerBrandId || null;
+    let inheritedCampaignId = campaignId || req.headerCampaignId || null;
+    let inheritedWorkflowName = workflowName || req.headerWorkflowName || null;
 
     if (parentRunId) {
       const [parentRun] = await db
@@ -235,6 +235,9 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         orgId: req.orgId,
         userId: req.userId,
         runId: req.runId,
+        brandId: req.headerBrandId,
+        campaignId: req.headerCampaignId,
+        workflowName: req.headerWorkflowName,
       });
     } catch (err) {
       if (err instanceof CostNotFoundError) {

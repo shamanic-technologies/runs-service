@@ -191,6 +191,14 @@ export const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
+// --- Workflow tracking headers (optional, injected by workflow-service) ---
+
+const WorkflowTrackingHeadersSchema = z.object({
+  "x-brand-id": z.string().optional().openapi({ description: "Brand identifier, injected by workflow-service" }),
+  "x-campaign-id": z.string().optional().openapi({ description: "Campaign identifier, injected by workflow-service" }),
+  "x-workflow-name": z.string().optional().openapi({ description: "Workflow name, injected by workflow-service" }),
+});
+
 // --- Register paths ---
 
 registry.registerPath({
@@ -228,9 +236,10 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId).",
+    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
   security: [{ apiKey: [] }],
   request: {
+    headers: WorkflowTrackingHeadersSchema,
     body: {
       content: { "application/json": { schema: CreateRunRequestSchema } },
     },
@@ -310,9 +319,10 @@ registry.registerPath({
   path: "/v1/runs/{id}/costs",
   summary: "Add costs to a run",
   description:
-    "Adds cost line items. Unit costs are resolved automatically from the costs-service.",
+    "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are forwarded to downstream services.",
   security: [{ apiKey: [] }],
   request: {
+    headers: WorkflowTrackingHeadersSchema,
     params: z.object({
       id: z.string().uuid(),
     }),
@@ -672,9 +682,10 @@ registry.registerPath({
   path: "/v1/platform-runs",
   summary: "Create a platform-level run",
   description:
-    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service.",
+    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
   security: [{ apiKey: [] }],
   request: {
+    headers: WorkflowTrackingHeadersSchema,
     body: {
       content: { "application/json": { schema: CreateRunRequestSchema } },
     },
