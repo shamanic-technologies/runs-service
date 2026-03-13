@@ -1375,7 +1375,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName). Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -1479,8 +1479,9 @@
     },
     "/v1/stats/costs/by-cost-name": {
       "get": {
-        "summary": "Cost breakdown by cost name",
-        "description": "Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Organization identified via x-org-id header.",
+        "summary": "Cost breakdown by cost name (deprecated)",
+        "description": "DEPRECATED: Use GET /v1/stats/costs?groupBy=costName instead. Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Organization identified via x-org-id header.",
+        "deprecated": true,
         "security": [
           {
             "apiKey": []
@@ -1733,10 +1734,89 @@
         }
       }
     },
+    "/v1/stats/public/costs": {
+      "get": {
+        "summary": "Public cost aggregation (no auth)",
+        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowName, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "brandId",
+                "workflowName",
+                "campaignId",
+                "serviceName",
+                "costName"
+              ]
+            },
+            "required": true,
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated cost groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsCostsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid groupBy value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/stats/public/leaderboard": {
       "get": {
-        "summary": "Public leaderboard (no auth)",
-        "description": "Returns aggregated costs across all organizations, grouped by brandId or workflowName. No authentication required.",
+        "summary": "Public leaderboard (deprecated)",
+        "description": "DEPRECATED: Use GET /v1/stats/public/costs instead. Returns aggregated costs across all organizations, grouped by brandId or workflowName. No authentication required.",
+        "deprecated": true,
         "parameters": [
           {
             "schema": {

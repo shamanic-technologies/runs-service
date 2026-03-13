@@ -153,6 +153,86 @@ describe("Stats endpoints", () => {
       expect(res.body.error).toContain("Invalid groupBy");
     });
 
+    it("groups by costName with totalQuantity", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "gpt-4o-input-token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0003000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "actual",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "5",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "2.5000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=costName")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+
+      const emailGroup = res.body.groups.find((g: any) => g.dimensions.costName === "email-send");
+      const tokenGroup = res.body.groups.find((g: any) => g.dimensions.costName === "gpt-4o-input-token");
+
+      expect(emailGroup.totalCostInUsdCents).toBe("2.5000000000");
+      expect(emailGroup.totalQuantity).toBe("5.000000");
+      expect(emailGroup.runCount).toBe(1);
+
+      expect(tokenGroup.totalCostInUsdCents).toBe("0.3000000000");
+      expect(tokenGroup.totalQuantity).toBe("1000.000000");
+    });
+
+    it("groups by costName combined with other dimensions", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc-a",
+        taskName: "task",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc-b",
+        taskName: "task",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=serviceName,costName")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+      expect(res.body.groups[0].dimensions.serviceName).toBeDefined();
+      expect(res.body.groups[0].dimensions.costName).toBe("token");
+      expect(res.body.groups[0].totalQuantity).toBeDefined();
+    });
+
     it("separates actual, provisioned, cancelled costs", async () => {
       const run = await insertTestRun({
         organizationId: TEST_ORG_ID,
@@ -632,7 +712,160 @@ describe("Stats endpoints", () => {
     });
   });
 
-  describe("GET /v1/stats/public/leaderboard", () => {
+  describe("GET /v1/stats/public/costs", () => {
+    it("groups costs by brandId across all orgs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-pub",
+      });
+      const run2 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-pub",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.brandId).toBe("brand-pub");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("supports groupBy=campaignId", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        campaignId: "camp-1",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "campaignId" });
+
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find((g: any) => g.dimensions.campaignId === "camp-1");
+      expect(group).toBeDefined();
+      expect(group.totalCostInUsdCents).toBe("0.1000000000");
+    });
+
+    it("supports groupBy=costName with totalQuantity", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "email-send",
+        quantity: "5",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "2.5000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "costName" });
+
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find((g: any) => g.dimensions.costName === "email-send");
+      expect(group).toBeDefined();
+      expect(group.totalQuantity).toBe("5.000000");
+    });
+
+    it("applies orgId filter", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-filter",
+      });
+      const run2 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-filter",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId", orgId: TEST_ORG_ID });
+
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-filter");
+      expect(group).toBeDefined();
+      expect(group.totalCostInUsdCents).toBe("0.1000000000");
+      expect(group.runCount).toBe(1);
+    });
+
+    it("rejects invalid groupBy", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "invalidColumn" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/groupBy/i);
+    });
+
+    it("does not require auth", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toBeDefined();
+    });
+  });
+
+  describe("GET /v1/stats/public/leaderboard (deprecated)", () => {
     it("groups costs by brandId across all orgs", async () => {
       const otherOrgId = "99999999-9999-9999-9999-999999999999";
       const run1 = await insertTestRun({
@@ -714,10 +947,10 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].totalCostInUsdCents).toBe("0.4000000000");
     });
 
-    it("rejects invalid groupBy (campaignId)", async () => {
+    it("rejects invalid groupBy", async () => {
       const res = await request(app)
         .get("/v1/stats/public/leaderboard")
-        .query({ groupBy: "campaignId" });
+        .query({ groupBy: "invalidColumn" });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/groupBy/i);
