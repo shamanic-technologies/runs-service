@@ -31,9 +31,9 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
     const values = {
       organizationId: null,
       userId: null,
-      brandId: brandId || null,
-      campaignId: campaignId || null,
-      workflowName: workflowName || null,
+      brandId: brandId || req.headerBrandId || null,
+      campaignId: campaignId || req.headerCampaignId || null,
+      workflowName: workflowName || req.headerWorkflowName || null,
       serviceName,
       taskName,
       parentRunId: null,

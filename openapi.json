@@ -880,10 +880,42 @@
     "/v1/runs": {
       "post": {
         "summary": "Create a run",
-        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId).",
+        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
         "security": [
           {
             "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Brand identifier, injected by workflow-service",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Campaign identifier, injected by workflow-service",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Workflow name, injected by workflow-service",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -1162,7 +1194,7 @@
     "/v1/runs/{id}/costs": {
       "post": {
         "summary": "Add costs to a run",
-        "description": "Adds cost line items. Unit costs are resolved automatically from the costs-service.",
+        "description": "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are forwarded to downstream services.",
         "security": [
           {
             "apiKey": []
@@ -1177,6 +1209,36 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Brand identifier, injected by workflow-service",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Campaign identifier, injected by workflow-service",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Workflow name, injected by workflow-service",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -1716,10 +1778,42 @@
     "/v1/platform-runs": {
       "post": {
         "summary": "Create a platform-level run",
-        "description": "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service.",
+        "description": "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
         "security": [
           {
             "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Brand identifier, injected by workflow-service",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign identifier, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Campaign identifier, injected by workflow-service",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name, injected by workflow-service"
+            },
+            "required": false,
+            "description": "Workflow name, injected by workflow-service",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "requestBody": {

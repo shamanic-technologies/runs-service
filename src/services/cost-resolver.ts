@@ -39,6 +39,9 @@ export interface CostResolverContext {
   orgId?: string;
   userId?: string;
   runId?: string;
+  brandId?: string;
+  campaignId?: string;
+  workflowName?: string;
 }
 
 export async function resolveUnitCost(name: string, ctx: CostResolverContext): Promise<ResolvedCost> {
@@ -46,6 +49,9 @@ export async function resolveUnitCost(name: string, ctx: CostResolverContext): P
   if (ctx.orgId) headers["x-org-id"] = ctx.orgId;
   if (ctx.userId) headers["x-user-id"] = ctx.userId;
   if (ctx.runId) headers["x-run-id"] = ctx.runId;
+  if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
+  if (ctx.campaignId) headers["x-campaign-id"] = ctx.campaignId;
+  if (ctx.workflowName) headers["x-workflow-name"] = ctx.workflowName;
   if (COSTS_SERVICE_API_KEY) {
     headers["X-API-Key"] = COSTS_SERVICE_API_KEY;
   }

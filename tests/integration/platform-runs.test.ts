@@ -104,6 +104,49 @@ describe("Platform Runs", () => {
       expect(res.status).toBe(401);
     });
 
+    it("uses workflow tracking headers as fallback", async () => {
+      const res = await request(app)
+        .post("/v1/platform-runs")
+        .set({
+          ...platformHeaders,
+          "x-brand-id": "header-brand",
+          "x-campaign-id": "header-campaign",
+          "x-workflow-name": "header-workflow",
+        })
+        .send({
+          serviceName: "workflow-service",
+          taskName: "upgrade-workflows",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.campaignId).toBe("header-campaign");
+      expect(res.body.workflowName).toBe("header-workflow");
+    });
+
+    it("body values take precedence over headers for platform runs", async () => {
+      const res = await request(app)
+        .post("/v1/platform-runs")
+        .set({
+          ...platformHeaders,
+          "x-brand-id": "header-brand",
+          "x-campaign-id": "header-campaign",
+          "x-workflow-name": "header-workflow",
+        })
+        .send({
+          serviceName: "workflow-service",
+          taskName: "upgrade-workflows",
+          brandId: "body-brand",
+          campaignId: "body-campaign",
+          workflowName: "body-workflow",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandId).toBe("body-brand");
+      expect(res.body.campaignId).toBe("body-campaign");
+      expect(res.body.workflowName).toBe("body-workflow");
+    });
+
     it("rejects invalid body", async () => {
       const res = await request(app)
         .post("/v1/platform-runs")

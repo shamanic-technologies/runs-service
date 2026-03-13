@@ -9,8 +9,22 @@ declare global {
       userId?: string;
       runId?: string;
       platformServiceName?: string;
+      headerBrandId?: string;
+      headerCampaignId?: string;
+      headerWorkflowName?: string;
     }
   }
+}
+
+function extractWorkflowHeaders(req: Request) {
+  const brandId = req.headers["x-brand-id"] as string | undefined;
+  if (brandId) req.headerBrandId = brandId;
+
+  const campaignId = req.headers["x-campaign-id"] as string | undefined;
+  if (campaignId) req.headerCampaignId = campaignId;
+
+  const workflowName = req.headers["x-workflow-name"] as string | undefined;
+  if (workflowName) req.headerWorkflowName = workflowName;
 }
 
 export function requireApiKey(req: Request, res: Response, next: NextFunction) {
@@ -46,6 +60,8 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction) {
     req.runId = runId;
   }
 
+  extractWorkflowHeaders(req);
+
   next();
 }
 
@@ -62,6 +78,8 @@ export function requirePlatformAuth(req: Request, res: Response, next: NextFunct
     return;
   }
   req.platformServiceName = serviceName;
+
+  extractWorkflowHeaders(req);
 
   next();
 }
