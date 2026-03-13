@@ -14,6 +14,7 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   workflowName: "r.workflow_name",
   campaignId: "r.campaign_id",
   serviceName: "r.service_name",
+  costName: "rc.cost_name",
 };
 
 // --- Helpers ---
@@ -75,6 +76,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     const groupByCols = groupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
     const selectCols = groupByCols.map((col) => sql.raw(col));
     const groupByClause = sql.raw(groupByCols.join(", "));
+    const hasCostName = groupByKeys.includes("costName");
 
     const whereSql = buildFilterSql(req.orgId, {
       brandId,
@@ -86,6 +88,11 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       startedBefore,
     });
 
+    const joinType = hasCostName ? sql`INNER JOIN` : sql`LEFT JOIN`;
+    const quantitySelect = hasCostName
+      ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
+      : sql``;
+
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
         COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
@@ -93,8 +100,9 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
         COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
         COUNT(DISTINCT r.id) as run_count
+        ${quantitySelect}
       FROM runs r
-      LEFT JOIN runs_costs rc ON rc.run_id = r.id
+      ${joinType} runs_costs rc ON rc.run_id = r.id
       WHERE ${whereSql}
       GROUP BY ${groupByClause}
       ORDER BY total_cost DESC
@@ -105,10 +113,10 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     const groups = rows.map((row) => {
       const dimensions: Record<string, string | null> = {};
       for (const key of groupByKeys) {
-        const dbCol = GROUP_BY_COLUMNS[key].replace("r.", "");
+        const dbCol = GROUP_BY_COLUMNS[key].replace(/^r\.|^rc\./, "");
         dimensions[key] = row[dbCol] ?? null;
       }
-      return {
+      const group: any = {
         dimensions,
         totalCostInUsdCents: Number(row.total_cost).toFixed(10),
         actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
@@ -116,6 +124,10 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
         runCount: Number(row.run_count),
       };
+      if (hasCostName) {
+        group.totalQuantity = Number(row.total_quantity).toFixed(6);
+      }
+      return group;
     });
 
     res.json({ groups });
@@ -413,55 +425,99 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
   }
 });
 
-// GET /v1/stats/public/leaderboard — public cross-org leaderboard
+// --- Public costs endpoint (replaces leaderboard) ---
+
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
   workflowName: "r.workflow_name",
+  campaignId: "r.campaign_id",
+  serviceName: "r.service_name",
+  costName: "rc.cost_name",
 };
 
-router.get("/v1/stats/public/leaderboard", async (req, res) => {
-  try {
-    const { groupBy } = req.query as Record<string, string | undefined>;
+function buildPublicFilterSql(filters: {
+  orgId?: string;
+  brandId?: string;
+  campaignId?: string;
+  taskName?: string;
+}) {
+  const parts: ReturnType<typeof sql>[] = [];
+  if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
+  if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
+  if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
+  if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
+  return parts.length > 0
+    ? parts.reduce((acc, part) => sql`${acc} AND ${part}`)
+    : null;
+}
 
-    if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
-      res.status(400).json({
-        error: `Invalid groupBy value. Allowed: ${Object.keys(PUBLIC_GROUP_BY_COLUMNS).join(", ")}`,
+function handlePublicCosts(req: any, res: any) {
+  (async () => {
+    try {
+      const { groupBy, orgId, brandId, campaignId, taskName } = req.query as Record<string, string | undefined>;
+
+      if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
+        res.status(400).json({
+          error: `Invalid groupBy value. Allowed: ${Object.keys(PUBLIC_GROUP_BY_COLUMNS).join(", ")}`,
+        });
+        return;
+      }
+
+      const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
+      const hasCostName = groupBy === "costName";
+      const joinType = hasCostName ? sql`INNER JOIN` : sql`LEFT JOIN`;
+      const quantitySelect = hasCostName
+        ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
+        : sql``;
+
+      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, taskName });
+      const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
+
+      const result = await db.execute(sql`
+        SELECT ${sql.raw(col)},
+          COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
+          COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
+          COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
+          COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+          COUNT(DISTINCT r.id) as run_count
+          ${quantitySelect}
+        FROM runs r
+        ${joinType} runs_costs rc ON rc.run_id = r.id
+        ${whereSql}
+        GROUP BY ${sql.raw(col)}
+        ORDER BY total_cost DESC
+      `);
+
+      const rows = result as any[];
+      const dbCol = col.replace(/^r\.|^rc\./, "");
+
+      const groups = rows.map((row) => {
+        const group: any = {
+          dimensions: { [groupBy]: row[dbCol] ?? null },
+          totalCostInUsdCents: Number(row.total_cost).toFixed(10),
+          actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
+          provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
+          cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
+          runCount: Number(row.run_count),
+        };
+        if (hasCostName) {
+          group.totalQuantity = Number(row.total_quantity).toFixed(6);
+        }
+        return group;
       });
-      return;
+
+      res.json({ groups });
+    } catch (err) {
+      console.error("[Runs Service] Error in GET /v1/stats/public/costs:", err);
+      res.status(500).json({ error: "Internal server error" });
     }
+  })();
+}
 
-    const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
+// GET /v1/stats/public/costs — new canonical path
+router.get("/v1/stats/public/costs", handlePublicCosts);
 
-    const result = await db.execute(sql`
-      SELECT ${sql.raw(col)},
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
-        COUNT(DISTINCT r.id) as run_count
-      FROM runs r
-      LEFT JOIN runs_costs rc ON rc.run_id = r.id
-      GROUP BY ${sql.raw(col)}
-      ORDER BY total_cost DESC
-    `);
-
-    const rows = result as any[];
-    const dbCol = col.replace("r.", "");
-
-    const groups = rows.map((row) => ({
-      dimensions: { [groupBy]: row[dbCol] ?? null },
-      totalCostInUsdCents: Number(row.total_cost).toFixed(10),
-      actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
-      provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
-      cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
-      runCount: Number(row.run_count),
-    }));
-
-    res.json({ groups });
-  } catch (err) {
-    console.error("[Runs Service] Error in GET /v1/stats/public/leaderboard:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+// GET /v1/stats/public/leaderboard — deprecated, use /v1/stats/public/costs
+router.get("/v1/stats/public/leaderboard", handlePublicCosts);
 
 export default router;
