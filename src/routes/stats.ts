@@ -137,60 +137,6 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
   }
 });
 
-// GET /v1/stats/costs/by-cost-name — breakdown by costName
-router.get("/v1/stats/costs/by-cost-name", requireApiKey, async (req, res) => {
-  try {
-    const {
-      brandId,
-      campaignId,
-      workflowName,
-      serviceName,
-      taskName,
-      startedAfter,
-      startedBefore,
-    } = req.query as Record<string, string | undefined>;
-
-    const whereSql = buildFilterSql(req.orgId, {
-      brandId,
-      campaignId,
-      workflowName,
-      serviceName,
-      taskName,
-      startedAfter,
-      startedBefore,
-    });
-
-    const result = await db.execute(sql`
-      SELECT rc.cost_name,
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
-        COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity
-      FROM runs r
-      INNER JOIN runs_costs rc ON rc.run_id = r.id
-      WHERE ${whereSql}
-      GROUP BY rc.cost_name
-      ORDER BY total_cost DESC
-    `);
-
-    const rows = result as any[];
-    const costs = rows.map((row) => ({
-      costName: row.cost_name,
-      totalCostInUsdCents: Number(row.total_cost).toFixed(10),
-      actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
-      provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
-      cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
-      totalQuantity: Number(row.total_quantity).toFixed(6),
-    }));
-
-    res.json({ costs });
-  } catch (err) {
-    console.error("[Runs Service] Error in GET /v1/stats/costs/by-cost-name:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 // POST /v1/stats/budget — temporal windows
 router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
   try {
@@ -514,10 +460,7 @@ function handlePublicCosts(req: any, res: any) {
   })();
 }
 
-// GET /v1/stats/public/costs — new canonical path
+// GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
-
-// GET /v1/stats/public/leaderboard — deprecated, use /v1/stats/public/costs
-router.get("/v1/stats/public/leaderboard", handlePublicCosts);
 
 export default router;

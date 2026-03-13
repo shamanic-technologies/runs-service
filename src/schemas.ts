@@ -447,21 +447,6 @@ export const StatsCostsResponseSchema = z
   })
   .openapi("StatsCostsResponse");
 
-export const StatsCostsByCostNameResponseSchema = z
-  .object({
-    costs: z.array(
-      z.object({
-        costName: z.string(),
-        totalCostInUsdCents: z.string(),
-        actualCostInUsdCents: z.string(),
-        provisionedCostInUsdCents: z.string(),
-        cancelledCostInUsdCents: z.string(),
-        totalQuantity: z.string(),
-      })
-    ),
-  })
-  .openapi("StatsCostsByCostNameResponse");
-
 export const BudgetWindowSchema = z.object({
   label: z.string().min(1),
   since: z.string().datetime().optional(),
@@ -535,12 +520,6 @@ export const RunIdsByWorkflowResponseSchema = z
   })
   .openapi("RunIdsByWorkflowResponse");
 
-export const PublicLeaderboardQuerySchema = z
-  .object({
-    groupBy: z.enum(["brandId", "workflowName"]),
-  })
-  .openapi("PublicLeaderboardQuery");
-
 export const PublicCostsQuerySchema = z
   .object({
     groupBy: z.enum(["brandId", "workflowName", "campaignId", "serviceName", "costName"]),
@@ -571,26 +550,6 @@ registry.registerPath({
     400: {
       description: "Invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "get",
-  path: "/v1/stats/costs/by-cost-name",
-  summary: "Cost breakdown by cost name (deprecated)",
-  description:
-    "DEPRECATED: Use GET /v1/stats/costs?groupBy=costName instead. Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Organization identified via x-org-id header.",
-  deprecated: true,
-  security: [{ apiKey: [] }],
-  request: {
-    query: StatsFiltersSchema,
-  },
-  responses: {
-    200: {
-      description: "Cost breakdown by name",
-      content: { "application/json": { schema: StatsCostsByCostNameResponseSchema } },
     },
     401: { description: "Unauthorized" },
   },
@@ -673,28 +632,6 @@ registry.registerPath({
     "Returns aggregated costs across all organizations, grouped by brandId, workflowName, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
-  },
-  responses: {
-    200: {
-      description: "Aggregated cost groups",
-      content: { "application/json": { schema: StatsCostsResponseSchema } },
-    },
-    400: {
-      description: "Invalid groupBy value",
-      content: { "application/json": { schema: ErrorSchema } },
-    },
-  },
-});
-
-registry.registerPath({
-  method: "get",
-  path: "/v1/stats/public/leaderboard",
-  summary: "Public leaderboard (deprecated)",
-  description:
-    "DEPRECATED: Use GET /v1/stats/public/costs instead. Returns aggregated costs across all organizations, grouped by brandId or workflowName. No authentication required.",
-  deprecated: true,
-  request: {
-    query: PublicLeaderboardQuerySchema,
   },
   responses: {
     200: {

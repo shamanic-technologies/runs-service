@@ -602,48 +602,6 @@
           "groups"
         ]
       },
-      "StatsCostsByCostNameResponse": {
-        "type": "object",
-        "properties": {
-          "costs": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "costName": {
-                  "type": "string"
-                },
-                "totalCostInUsdCents": {
-                  "type": "string"
-                },
-                "actualCostInUsdCents": {
-                  "type": "string"
-                },
-                "provisionedCostInUsdCents": {
-                  "type": "string"
-                },
-                "cancelledCostInUsdCents": {
-                  "type": "string"
-                },
-                "totalQuantity": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "costName",
-                "totalCostInUsdCents",
-                "actualCostInUsdCents",
-                "provisionedCostInUsdCents",
-                "cancelledCostInUsdCents",
-                "totalQuantity"
-              ]
-            }
-          }
-        },
-        "required": [
-          "costs"
-        ]
-      },
       "BudgetResponse": {
         "type": "object",
         "properties": {
@@ -1477,93 +1435,6 @@
         }
       }
     },
-    "/v1/stats/costs/by-cost-name": {
-      "get": {
-        "summary": "Cost breakdown by cost name (deprecated)",
-        "description": "DEPRECATED: Use GET /v1/stats/costs?groupBy=costName instead. Returns total costs broken down by costName (e.g., gpt-4o-input-token, email-send). Organization identified via x-org-id header.",
-        "deprecated": true,
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "brandId",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "campaignId",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "workflowName",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "serviceName",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": false,
-            "name": "taskName",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            },
-            "required": false,
-            "name": "startedAfter",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "date-time"
-            },
-            "required": false,
-            "name": "startedBefore",
-            "in": "query"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Cost breakdown by name",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StatsCostsByCostNameResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
-        }
-      }
-    },
     "/v1/stats/budget": {
       "post": {
         "summary": "Budget check with temporal windows",
@@ -1785,49 +1656,6 @@
             },
             "required": false,
             "name": "taskName",
-            "in": "query"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Aggregated cost groups",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StatsCostsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid groupBy value",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/stats/public/leaderboard": {
-      "get": {
-        "summary": "Public leaderboard (deprecated)",
-        "description": "DEPRECATED: Use GET /v1/stats/public/costs instead. Returns aggregated costs across all organizations, grouped by brandId or workflowName. No authentication required.",
-        "deprecated": true,
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "enum": [
-                "brandId",
-                "workflowName"
-              ]
-            },
-            "required": true,
-            "name": "groupBy",
             "in": "query"
           }
         ],
