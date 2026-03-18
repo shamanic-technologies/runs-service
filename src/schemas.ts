@@ -530,6 +530,25 @@ export const PublicCostsQuerySchema = z
   })
   .openapi("PublicCostsQuery");
 
+// --- Public runs costs schemas ---
+
+export const PublicRunsCostsRequestSchema = z
+  .object({
+    runIds: z.array(z.string().uuid()).min(1).max(100),
+  })
+  .openapi("PublicRunsCostsRequest");
+
+export const PublicRunsCostsResponseSchema = z
+  .object({
+    costs: z.array(
+      z.object({
+        runId: z.string().uuid(),
+        totalCostInUsdCents: z.string(),
+      })
+    ),
+  })
+  .openapi("PublicRunsCostsResponse");
+
 // --- Stats path registrations ---
 
 registry.registerPath({
@@ -640,6 +659,29 @@ registry.registerPath({
     },
     400: {
       description: "Invalid groupBy value",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/public/runs/costs",
+  summary: "Batch cost lookup by run IDs (no auth)",
+  description:
+    "Returns the total cost (own + all descendants) for each run ID. Accepts up to 100 run IDs. No authentication required. Runs that don't exist return 0 cost.",
+  request: {
+    body: {
+      content: { "application/json": { schema: PublicRunsCostsRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Costs per run",
+      content: { "application/json": { schema: PublicRunsCostsResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },

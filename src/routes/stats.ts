@@ -463,4 +463,73 @@ function handlePublicCosts(req: any, res: any) {
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
 
+// POST /v1/public/runs/costs — batch cost lookup by run IDs (no auth)
+function handlePublicRunsCosts(req: any, res: any) {
+  (async () => {
+    try {
+      const { runIds } = req.body ?? {};
+
+      if (!Array.isArray(runIds) || runIds.length === 0) {
+        res.status(400).json({ error: "runIds must be a non-empty array of UUIDs" });
+        return;
+      }
+
+      if (runIds.length > 100) {
+        res.status(400).json({ error: "runIds must contain at most 100 items" });
+        return;
+      }
+
+      // Validate UUIDs
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const invalidIds = runIds.filter((id: unknown) => typeof id !== "string" || !uuidRegex.test(id));
+      if (invalidIds.length > 0) {
+        res.status(400).json({ error: "All runIds must be valid UUIDs" });
+        return;
+      }
+
+      // Use a single SQL query with recursive CTE to compute total cost
+      // (own + all descendants) for each requested run
+      const result = await db.execute(sql`
+        WITH RECURSIVE descendants AS (
+          SELECT id, id as root_run_id
+          FROM runs
+          WHERE id IN ${sql`(${sql.join(runIds.map((id: string) => sql`${id}::uuid`), sql`, `)})`}
+          UNION ALL
+          SELECT r.id, d.root_run_id
+          FROM runs r
+          INNER JOIN descendants d ON r.parent_run_id = d.id
+        ),
+        run_costs AS (
+          SELECT
+            d.root_run_id,
+            COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost
+          FROM descendants d
+          LEFT JOIN runs_costs rc ON rc.run_id = d.id
+          GROUP BY d.root_run_id
+        )
+        SELECT root_run_id as run_id, total_cost
+        FROM run_costs
+      `);
+
+      const rows = result as any[];
+      const costMap = new Map<string, string>();
+      for (const row of rows) {
+        costMap.set(row.run_id, Number(row.total_cost).toFixed(10));
+      }
+
+      const costs = runIds.map((id: string) => ({
+        runId: id,
+        totalCostInUsdCents: costMap.get(id) ?? "0.0000000000",
+      }));
+
+      res.json({ costs });
+    } catch (err) {
+      console.error("[Runs Service] Error in POST /v1/public/runs/costs:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  })();
+}
+
+router.post("/v1/public/runs/costs", handlePublicRunsCosts);
+
 export default router;
