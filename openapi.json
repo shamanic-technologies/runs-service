@@ -784,50 +784,6 @@
         "required": [
           "groups"
         ]
-      },
-      "PublicRunsCostsResponse": {
-        "type": "object",
-        "properties": {
-          "costs": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "runId": {
-                  "type": "string",
-                  "format": "uuid"
-                },
-                "totalCostInUsdCents": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "runId",
-                "totalCostInUsdCents"
-              ]
-            }
-          }
-        },
-        "required": [
-          "costs"
-        ]
-      },
-      "PublicRunsCostsRequest": {
-        "type": "object",
-        "properties": {
-          "runIds": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "minItems": 1,
-            "maxItems": 100
-          }
-        },
-        "required": [
-          "runIds"
-        ]
       }
     },
     "parameters": {}
@@ -1716,43 +1672,6 @@
           },
           "400": {
             "description": "Invalid groupBy value",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/public/runs/costs": {
-      "post": {
-        "summary": "Batch cost lookup by run IDs (no auth)",
-        "description": "Returns the total cost (own + all descendants) for each run ID. Accepts up to 100 run IDs. No authentication required. Runs that don't exist return 0 cost.",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PublicRunsCostsRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Costs per run",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PublicRunsCostsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
             "content": {
               "application/json": {
                 "schema": {
