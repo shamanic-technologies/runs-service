@@ -237,9 +237,10 @@ describe("Runs CRUD", () => {
       expect(res.body.workflowName).toBe("inherited-workflow");
     });
 
-    it("child values take precedence over parent", async () => {
+    it("returns 409 when body values conflict with parent", async () => {
       const parent = await insertTestRun({
         organizationId: TEST_ORG_ID,
+        userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
         brandId: "parent-brand",
@@ -258,10 +259,87 @@ describe("Runs CRUD", () => {
           workflowName: "child-workflow",
         });
 
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("Parent-child field conflict");
+      expect(res.body.conflicts).toHaveLength(3);
+    });
+
+    it("returns 409 when header values conflict with parent", async () => {
+      const parent = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        userId: TEST_USER_ID,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        workflowName: "parent-workflow",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-workflow-name": "different-workflow",
+        })
+        .send({
+          serviceName: "child-svc",
+          taskName: "child-task",
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.conflicts).toEqual(
+        expect.arrayContaining([expect.stringContaining("workflowName")])
+      );
+    });
+
+    it("returns 409 when orgId conflicts with parent", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      const parent = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": parent.id })
+        .send({
+          serviceName: "child-svc",
+          taskName: "child-task",
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.conflicts).toEqual(
+        expect.arrayContaining([expect.stringContaining("orgId")])
+      );
+    });
+
+    it("allows same values as parent (no conflict)", async () => {
+      const parent = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        userId: TEST_USER_ID,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        brandId: "same-brand",
+        campaignId: "same-campaign",
+        workflowName: "same-workflow",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-brand-id": "same-brand",
+          "x-campaign-id": "same-campaign",
+          "x-workflow-name": "same-workflow",
+        })
+        .send({
+          serviceName: "child-svc",
+          taskName: "child-task",
+        });
+
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("child-brand");
-      expect(res.body.campaignId).toBe("child-campaign");
-      expect(res.body.workflowName).toBe("child-workflow");
+      expect(res.body.brandId).toBe("same-brand");
     });
 
     it("uses x-brand-id, x-campaign-id, x-workflow-name headers as fallback", async () => {
@@ -284,7 +362,7 @@ describe("Runs CRUD", () => {
       expect(res.body.workflowName).toBe("header-workflow");
     });
 
-    it("body values take precedence over header values", async () => {
+    it("header values take precedence over body values", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set({
@@ -302,30 +380,30 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("body-brand");
-      expect(res.body.campaignId).toBe("body-campaign");
-      expect(res.body.workflowName).toBe("body-workflow");
+      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.campaignId).toBe("header-campaign");
+      expect(res.body.workflowName).toBe("header-workflow");
     });
 
-    it("header values fill in gaps when body has partial values", async () => {
+    it("body values fill in gaps when header has partial values", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set({
           ...authHeaders,
           "x-brand-id": "header-brand",
-          "x-campaign-id": "header-campaign",
-          "x-workflow-name": "header-workflow",
         })
         .send({
           serviceName: "svc",
           taskName: "task",
           brandId: "body-brand",
+          campaignId: "body-campaign",
+          workflowName: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("body-brand");
-      expect(res.body.campaignId).toBe("header-campaign");
-      expect(res.body.workflowName).toBe("header-workflow");
+      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.campaignId).toBe("body-campaign");
+      expect(res.body.workflowName).toBe("body-workflow");
     });
 
     it("headers do not break existing behavior when absent", async () => {

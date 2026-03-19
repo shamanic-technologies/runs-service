@@ -60,9 +60,9 @@ export const RunWithOwnCostSchema = RunSchema.extend({
 
 export const CreateRunRequestSchema = z
   .object({
-    brandId: z.string().min(1).optional(),
-    campaignId: z.string().min(1).optional(),
-    workflowName: z.string().min(1).optional(),
+    brandId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header instead. Kept for backwards compatibility; header takes precedence." }),
+    campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
+    workflowName: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-name header instead. Kept for backwards compatibility; header takes precedence." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
   })
@@ -236,7 +236,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
+    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowName differ from the parent run.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -254,6 +254,10 @@ registry.registerPath({
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
     401: { description: "Unauthorized" },
+    409: {
+      description: "Parent-child field conflict — request values differ from parent run",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
   },
 });
 
@@ -652,7 +656,7 @@ registry.registerPath({
   path: "/v1/platform-runs",
   summary: "Create a platform-level run",
   description:
-    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are used as fallback when not provided in the body.",
+    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service. Field resolution priority: header > body (deprecated).",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,

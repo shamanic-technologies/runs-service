@@ -124,7 +124,7 @@ describe("Platform Runs", () => {
       expect(res.body.workflowName).toBe("header-workflow");
     });
 
-    it("body values take precedence over headers for platform runs", async () => {
+    it("header values take precedence over body values for platform runs", async () => {
       const res = await request(app)
         .post("/v1/platform-runs")
         .set({
@@ -142,9 +142,9 @@ describe("Platform Runs", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("body-brand");
-      expect(res.body.campaignId).toBe("body-campaign");
-      expect(res.body.workflowName).toBe("body-workflow");
+      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.campaignId).toBe("header-campaign");
+      expect(res.body.workflowName).toBe("header-workflow");
     });
 
     it("rejects invalid body", async () => {
