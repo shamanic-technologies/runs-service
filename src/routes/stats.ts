@@ -25,6 +25,7 @@ function buildFilterSql(
     brandId?: string;
     campaignId?: string;
     workflowName?: string;
+    workflowNames?: string;
     serviceName?: string;
     taskName?: string;
     startedAfter?: string;
@@ -35,7 +36,14 @@ function buildFilterSql(
 
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
-  if (filters.workflowName) parts.push(sql`r.workflow_name = ${filters.workflowName}`);
+  if (filters.workflowNames) {
+    const names = filters.workflowNames.split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length > 0) {
+      parts.push(sql`r.workflow_name IN (${sql.join(names.map((n) => sql`${n}`), sql`, `)})`);
+    }
+  } else if (filters.workflowName) {
+    parts.push(sql`r.workflow_name = ${filters.workflowName}`);
+  }
   if (filters.serviceName) parts.push(sql`r.service_name = ${filters.serviceName}`);
   if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
   if (filters.startedAfter) parts.push(sql`r.started_at >= ${filters.startedAfter}::timestamptz`);
@@ -52,6 +60,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       brandId,
       campaignId,
       workflowName,
+      workflowNames,
       serviceName,
       taskName,
       startedAfter,
@@ -82,6 +91,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       brandId,
       campaignId,
       workflowName,
+      workflowNames,
       serviceName,
       taskName,
       startedAfter,
@@ -335,6 +345,7 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
     const {
       brandId,
       campaignId,
+      workflowNames,
       serviceName,
       taskName,
       startedAfter,
@@ -344,6 +355,7 @@ router.get("/v1/stats/run-ids-by-workflow", requireApiKey, async (req, res) => {
     const whereSql = buildFilterSql(req.orgId, {
       brandId,
       campaignId,
+      workflowNames,
       serviceName,
       taskName,
       startedAfter,
