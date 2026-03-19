@@ -508,24 +508,6 @@ export const ChildrenSummaryResponseSchema = z
   })
   .openapi("ChildrenSummaryResponse");
 
-export const RunIdsByWorkflowQuerySchema = z
-  .object({
-    brandId: z.string().optional(),
-    campaignId: z.string().optional(),
-    workflowNames: z.string().optional().openapi({ description: "Filter by multiple workflow names (comma-separated)" }),
-    serviceName: z.string().optional(),
-    taskName: z.string().optional(),
-    startedAfter: z.string().datetime().optional(),
-    startedBefore: z.string().datetime().optional(),
-  })
-  .openapi("RunIdsByWorkflowQuery");
-
-export const RunIdsByWorkflowResponseSchema = z
-  .object({
-    groups: z.record(z.string(), z.array(z.string().uuid())),
-  })
-  .openapi("RunIdsByWorkflowResponse");
-
 export const PublicCostsQuerySchema = z
   .object({
     groupBy: z.enum(["brandId", "workflowName", "campaignId", "serviceName", "costName"]),
@@ -608,25 +590,6 @@ registry.registerPath({
       description: "Run not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
-  },
-});
-
-registry.registerPath({
-  method: "get",
-  path: "/v1/stats/run-ids-by-workflow",
-  summary: "Run IDs grouped by workflow name",
-  description:
-    "Returns all run IDs grouped by workflow_name. Organization identified via x-org-id header.",
-  security: [{ apiKey: [] }],
-  request: {
-    query: RunIdsByWorkflowQuerySchema,
-  },
-  responses: {
-    200: {
-      description: "Run IDs grouped by workflow name",
-      content: { "application/json": { schema: RunIdsByWorkflowResponseSchema } },
-    },
-    401: { description: "Unauthorized" },
   },
 });
 
