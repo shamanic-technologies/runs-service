@@ -47,10 +47,13 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     const { brandId, campaignId, workflowName, serviceName, taskName } = parsed.data;
     const parentRunId = req.runId || null;
 
-    // Priority: body > header > parent inheritance
-    let inheritedBrandId = brandId || req.headerBrandId || null;
-    let inheritedCampaignId = campaignId || req.headerCampaignId || null;
-    let inheritedWorkflowName = workflowName || req.headerWorkflowName || null;
+    // Priority: header > body (deprecated) > parent inheritance
+    // If parent has a different non-null value than the resolved one, reject with 409
+    let resolvedBrandId = req.headerBrandId || brandId || null;
+    let resolvedCampaignId = req.headerCampaignId || campaignId || null;
+    let resolvedWorkflowName = req.headerWorkflowName || workflowName || null;
+    let resolvedOrgId = req.orgId;
+    let resolvedUserId = req.userId || null;
 
     if (parentRunId) {
       const [parentRun] = await db
@@ -58,24 +61,55 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           brandId: runs.brandId,
           campaignId: runs.campaignId,
           workflowName: runs.workflowName,
+          organizationId: runs.organizationId,
+          userId: runs.userId,
         })
         .from(runs)
         .where(eq(runs.id, parentRunId))
         .limit(1);
 
       if (parentRun) {
-        if (!inheritedBrandId) inheritedBrandId = parentRun.brandId;
-        if (!inheritedCampaignId) inheritedCampaignId = parentRun.campaignId;
-        if (!inheritedWorkflowName) inheritedWorkflowName = parentRun.workflowName;
+        // Conflict detection: if both parent and resolved value are non-null and differ, reject
+        const conflicts: string[] = [];
+        if (resolvedBrandId && parentRun.brandId && resolvedBrandId !== parentRun.brandId) {
+          conflicts.push(`brandId: request="${resolvedBrandId}" vs parent="${parentRun.brandId}"`);
+        }
+        if (resolvedCampaignId && parentRun.campaignId && resolvedCampaignId !== parentRun.campaignId) {
+          conflicts.push(`campaignId: request="${resolvedCampaignId}" vs parent="${parentRun.campaignId}"`);
+        }
+        if (resolvedWorkflowName && parentRun.workflowName && resolvedWorkflowName !== parentRun.workflowName) {
+          conflicts.push(`workflowName: request="${resolvedWorkflowName}" vs parent="${parentRun.workflowName}"`);
+        }
+        if (parentRun.organizationId && resolvedOrgId !== parentRun.organizationId) {
+          conflicts.push(`orgId: request="${resolvedOrgId}" vs parent="${parentRun.organizationId}"`);
+        }
+        if (resolvedUserId && parentRun.userId && resolvedUserId !== parentRun.userId) {
+          conflicts.push(`userId: request="${resolvedUserId}" vs parent="${parentRun.userId}"`);
+        }
+
+        if (conflicts.length > 0) {
+          console.error(`[Runs Service] Parent-child conflict on run ${parentRunId}: ${conflicts.join(", ")}`);
+          res.status(409).json({
+            error: "Parent-child field conflict",
+            conflicts,
+          });
+          return;
+        }
+
+        // Inherit from parent when resolved value is absent
+        if (!resolvedBrandId) resolvedBrandId = parentRun.brandId;
+        if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
+        if (!resolvedWorkflowName) resolvedWorkflowName = parentRun.workflowName;
+        if (!resolvedUserId) resolvedUserId = parentRun.userId;
       }
     }
 
     const values = {
-      organizationId: req.orgId,
-      userId: req.userId || null,
-      brandId: inheritedBrandId,
-      campaignId: inheritedCampaignId,
-      workflowName: inheritedWorkflowName,
+      organizationId: resolvedOrgId,
+      userId: resolvedUserId,
+      brandId: resolvedBrandId,
+      campaignId: resolvedCampaignId,
+      workflowName: resolvedWorkflowName,
       serviceName,
       taskName,
       parentRunId,
