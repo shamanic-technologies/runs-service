@@ -132,6 +132,97 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].totalCostInUsdCents).toBe("0.1000000000");
     });
 
+    it("filters by workflowNames (comma-separated)", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-beta",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-gamma",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+      await insertTestRunCost({
+        runId: run3.id,
+        costName: "token",
+        quantity: "300",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.3000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowName&workflowNames=wf-alpha,wf-beta")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+      const names = res.body.groups.map((g: any) => g.dimensions.workflowName).sort();
+      expect(names).toEqual(["wf-alpha", "wf-beta"]);
+    });
+
+    it("workflowNames takes precedence over workflowName", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowName: "wf-beta",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      // Both workflowName and workflowNames provided — workflowNames wins
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowName&workflowName=wf-alpha&workflowNames=wf-beta")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.workflowName).toBe("wf-beta");
+    });
+
     it("returns empty when org has no runs", async () => {
       const otherOrgId = "99999999-9999-9999-9999-999999999999";
       const headers = getAuthHeaders({ orgId: otherOrgId });

@@ -1374,10 +1374,22 @@
           },
           {
             "schema": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter by a single workflow name"
             },
             "required": false,
+            "description": "Filter by a single workflow name",
             "name": "workflowName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided."
+            },
+            "required": false,
+            "description": "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided.",
+            "name": "workflowNames",
             "in": "query"
           },
           {
@@ -1567,6 +1579,16 @@
             },
             "required": false,
             "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by multiple workflow names (comma-separated)"
+            },
+            "required": false,
+            "description": "Filter by multiple workflow names (comma-separated)",
+            "name": "workflowNames",
             "in": "query"
           },
           {

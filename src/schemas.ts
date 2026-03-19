@@ -425,7 +425,8 @@ registry.registerPath({
 export const StatsFiltersSchema = z.object({
   brandId: z.string().optional(),
   campaignId: z.string().optional(),
-  workflowName: z.string().optional(),
+  workflowName: z.string().optional().openapi({ description: "Filter by a single workflow name" }),
+  workflowNames: z.string().optional().openapi({ description: "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided." }),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
   startedAfter: z.string().datetime().optional(),
@@ -511,6 +512,7 @@ export const RunIdsByWorkflowQuerySchema = z
   .object({
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
+    workflowNames: z.string().optional().openapi({ description: "Filter by multiple workflow names (comma-separated)" }),
     serviceName: z.string().optional(),
     taskName: z.string().optional(),
     startedAfter: z.string().datetime().optional(),
