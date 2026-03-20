@@ -5,6 +5,8 @@ process.env.RUNS_SERVICE_DATABASE_URL =
 process.env.RUNS_SERVICE_API_KEY = "test-api-key";
 process.env.COSTS_SERVICE_URL = "http://localhost:9999";
 process.env.COSTS_SERVICE_API_KEY = "test-costs-key";
+process.env.BILLING_SERVICE_URL = "http://localhost:9998";
+process.env.BILLING_SERVICE_API_KEY = "test-billing-key";
 process.env.NODE_ENV = "test";
 
 beforeAll(() => console.log("Test suite starting..."));

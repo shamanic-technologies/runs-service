@@ -32,6 +32,35 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
   },
 }));
 
+// Mock billing client for integration tests
+vi.mock("../../src/services/billing.js", () => ({
+  deductCredits: vi.fn().mockResolvedValue({
+    success: true,
+    balance_cents: 5000,
+    billing_mode: "payg",
+    depleted: false,
+  }),
+  provisionCredits: vi.fn().mockResolvedValue({
+    provision_id: "prov_test_123",
+    balance_cents: 4500,
+  }),
+  confirmProvision: vi.fn().mockResolvedValue({
+    success: true,
+    balance_cents: 4500,
+  }),
+  cancelProvision: vi.fn().mockResolvedValue({
+    success: true,
+    balance_cents: 5500,
+  }),
+  BillingError: class BillingError extends Error {
+    statusCode: number;
+    constructor(statusCode: number, message: string) {
+      super(message);
+      this.statusCode = statusCode;
+    }
+  },
+}));
+
 describe("Runs CRUD", () => {
   const app = createTestApp();
   const authHeaders = getAuthHeaders();
@@ -1104,6 +1133,246 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(1);
       expect(res.body.runs[0].workflowName).toBe("sales-cold-email-v1");
+    });
+  });
+
+  describe("Billing integration", () => {
+    it("calls deductCredits for actual + platform cost items", async () => {
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedDeduct = vi.mocked(deductCredits);
+      mockedDeduct.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+            { costName: "gpt-4o-output-token", costSource: "platform", quantity: 200 },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedDeduct).toHaveBeenCalledTimes(1);
+      expect(mockedDeduct).toHaveBeenCalledWith(
+        expect.any(Number),
+        expect.stringContaining(`run:${run.id}`),
+        expect.objectContaining({ orgId: TEST_ORG_ID }),
+      );
+    });
+
+    it("does NOT call deductCredits for org (BYOK) cost items", async () => {
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedDeduct = vi.mocked(deductCredits);
+      mockedDeduct.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", costSource: "org", quantity: 1000 },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedDeduct).not.toHaveBeenCalled();
+    });
+
+    it("calls provisionCredits for provisioned + platform items and stores provision_id", async () => {
+      const { provisionCredits } = await import("../../src/services/billing.js");
+      const mockedProvision = vi.mocked(provisionCredits);
+      mockedProvision.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000, status: "provisioned" },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedProvision).toHaveBeenCalledTimes(1);
+      expect(res.body.costs[0].billingProvisionId).toBe("prov_test_123");
+    });
+
+    it("returns 402 when deduction fails (success: false)", async () => {
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedDeduct = vi.mocked(deductCredits);
+      mockedDeduct.mockResolvedValueOnce({
+        success: false,
+        balance_cents: 0,
+        billing_mode: "payg",
+        depleted: true,
+      });
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+          ],
+        });
+
+      expect(res.status).toBe(402);
+      expect(res.body.error).toContain("Credit deduction failed");
+      // Costs should still be in the response (persisted in DB)
+      expect(res.body.costs).toHaveLength(1);
+    });
+
+    it("returns 502 when billing-service is down", async () => {
+      const { deductCredits, BillingError } = await import("../../src/services/billing.js");
+      const mockedDeduct = vi.mocked(deductCredits);
+      mockedDeduct.mockRejectedValueOnce(new BillingError(502, "billing-service returned 502"));
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+          ],
+        });
+
+      expect(res.status).toBe(502);
+      expect(res.body.error).toContain("billing-service");
+    });
+
+    it("calls confirmProvision when PATCH changes provisioned → actual", async () => {
+      const { confirmProvision } = await import("../../src/services/billing.js");
+      const mockedConfirm = vi.mocked(confirmProvision);
+      mockedConfirm.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "gpt-4o-input-token",
+        costSource: "platform",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0003000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "provisioned",
+        billingProvisionId: "prov_xyz",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ status: "actual" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("actual");
+      expect(mockedConfirm).toHaveBeenCalledTimes(1);
+      expect(mockedConfirm).toHaveBeenCalledWith(
+        "prov_xyz",
+        expect.any(Number),
+        expect.objectContaining({ orgId: TEST_ORG_ID }),
+      );
+    });
+
+    it("calls cancelProvision when PATCH changes provisioned → cancelled", async () => {
+      const { cancelProvision } = await import("../../src/services/billing.js");
+      const mockedCancel = vi.mocked(cancelProvision);
+      mockedCancel.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "gpt-4o-input-token",
+        costSource: "platform",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0003000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "provisioned",
+        billingProvisionId: "prov_xyz",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ status: "cancelled" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("cancelled");
+      expect(mockedCancel).toHaveBeenCalledTimes(1);
+      expect(mockedCancel).toHaveBeenCalledWith(
+        "prov_xyz",
+        expect.objectContaining({ orgId: TEST_ORG_ID }),
+      );
+    });
+
+    it("does NOT call billing when PATCH updates a non-platform cost", async () => {
+      const { confirmProvision, cancelProvision } = await import("../../src/services/billing.js");
+      vi.mocked(confirmProvision).mockClear();
+      vi.mocked(cancelProvision).mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "gpt-4o-input-token",
+        costSource: "org",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0003000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "provisioned",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ status: "actual" });
+
+      expect(res.status).toBe(200);
+      expect(vi.mocked(confirmProvision)).not.toHaveBeenCalled();
+      expect(vi.mocked(cancelProvision)).not.toHaveBeenCalled();
     });
   });
 });
