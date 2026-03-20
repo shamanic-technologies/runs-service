@@ -64,6 +64,13 @@
       "when": 1772781281457,
       "tag": "0008_last_morph",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1774015498034,
+      "tag": "0009_amazing_energizer",
+      "breakpoints": true
     }
   ]
 }

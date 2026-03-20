@@ -9,6 +9,14 @@ import {
   UpstreamError,
 } from "../services/cost-resolver.js";
 import {
+  deductCredits,
+  provisionCredits,
+  confirmProvision,
+  cancelProvision,
+  BillingError,
+} from "../services/billing.js";
+import type { BillingContext } from "../services/billing.js";
+import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
@@ -302,8 +310,80 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     // Insert costs
     const inserted = await db.insert(runsCosts).values(costRows).returning();
 
+    // --- Billing integration ---
+    const billingCtx: BillingContext = {
+      orgId: req.orgId,
+      userId: req.userId,
+      runId: req.runId,
+      brandId: req.headerBrandId,
+      campaignId: req.headerCampaignId,
+      workflowName: req.headerWorkflowName,
+    };
+
+    // Deduct: sum actual + platform costs
+    const actualPlatformCents = costRows
+      .filter((r) => r.status === "actual" && r.costSource === "platform")
+      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+
+    if (actualPlatformCents > 0) {
+      const deductResult = await deductCredits(
+        actualPlatformCents,
+        `run:${id} — ${costRows.filter((r) => r.status === "actual" && r.costSource === "platform").length} cost items`,
+        billingCtx,
+      );
+      if (!deductResult.success) {
+        console.error(`[Runs Service] Billing deduction failed for run ${id}: depleted=${deductResult.depleted}`);
+        res.status(402).json({
+          error: "Credit deduction failed",
+          costs: inserted,
+          billing: deductResult,
+        });
+        return;
+      }
+    }
+
+    // Provision: sum provisioned + platform costs
+    const provisionedPlatformItems = costRows
+      .filter((r) => r.status === "provisioned" && r.costSource === "platform");
+    const provisionedPlatformCents = provisionedPlatformItems
+      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+
+    if (provisionedPlatformCents > 0) {
+      const provisionResult = await provisionCredits(
+        provisionedPlatformCents,
+        `run:${id} — ${provisionedPlatformItems.length} provisioned items`,
+        billingCtx,
+      );
+
+      // Store billing_provision_id on all provisioned platform cost rows
+      const provisionedInsertedIds = inserted
+        .filter((c) => c.status === "provisioned" && c.costSource === "platform")
+        .map((c) => c.id);
+
+      if (provisionedInsertedIds.length > 0) {
+        await db
+          .update(runsCosts)
+          .set({ billingProvisionId: provisionResult.provision_id })
+          .where(inArray(runsCosts.id, provisionedInsertedIds));
+      }
+
+      // Re-read to return updated rows with billing_provision_id
+      const updatedCosts = await db
+        .select()
+        .from(runsCosts)
+        .where(inArray(runsCosts.id, inserted.map((c) => c.id)));
+
+      res.status(201).json({ costs: updatedCosts });
+      return;
+    }
+
     res.status(201).json({ costs: inserted });
   } catch (err) {
+    if (err instanceof BillingError) {
+      console.error(`[Runs Service] billing-service unavailable (${err.statusCode}):`, err.message);
+      res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
+      return;
+    }
     if (err instanceof UpstreamError) {
       console.error(`[Runs Service] costs-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
@@ -332,20 +412,58 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
       return;
     }
 
-    // Update the cost row (must belong to this run)
-    const [updated] = await db
-      .update(runsCosts)
-      .set({ status: parsed.data.status })
+    // Read the existing cost item before updating
+    const [existing] = await db
+      .select()
+      .from(runsCosts)
       .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
-      .returning();
+      .limit(1);
 
-    if (!updated) {
+    if (!existing) {
       res.status(404).json({ error: "Cost not found" });
       return;
     }
 
+    const newStatus = parsed.data.status;
+
+    // Billing integration for platform costs with a provision
+    if (existing.costSource === "platform" && existing.billingProvisionId) {
+      const billingCtx: BillingContext = {
+        orgId: req.orgId,
+        userId: req.userId,
+        runId: req.runId,
+        brandId: req.headerBrandId,
+        campaignId: req.headerCampaignId,
+        workflowName: req.headerWorkflowName,
+      };
+
+      if (existing.status === "provisioned" && newStatus === "actual") {
+        // Confirm provision with the actual cost
+        await confirmProvision(
+          existing.billingProvisionId,
+          Number(existing.totalCostInUsdCents),
+          billingCtx,
+        );
+      } else if (existing.status === "provisioned" && newStatus === "cancelled") {
+        // Cancel provision — re-credits the org
+        await cancelProvision(existing.billingProvisionId, billingCtx);
+      }
+    }
+
+    // Update the cost row
+    const [updated] = await db
+      .update(runsCosts)
+      .set({ status: newStatus })
+      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
+      .returning();
+
     res.json(updated);
   } catch (err) {
+    if (err instanceof BillingError) {
+      console.error(`[Runs Service] billing-service error (${err.statusCode}):`, err.message);
+      res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
+      return;
+    }
     console.error("[Runs Service] Error updating cost:", err);
     res.status(500).json({ error: "Internal server error" });
   }
