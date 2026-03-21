@@ -311,9 +311,16 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     const inserted = await db.insert(runsCosts).values(costRows).returning();
 
     // --- Billing integration ---
+    const billingUserId = req.userId || run.userId;
+    if (!billingUserId && costRows.some((r) => r.costSource === "platform")) {
+      console.error(`[Runs Service] Cannot bill for run ${id}: no userId available from request or run record`);
+      res.status(400).json({ error: "x-user-id header is required when adding platform cost items" });
+      return;
+    }
+
     const billingCtx: BillingContext = {
       orgId: req.orgId,
-      userId: req.userId || run.userId || "",
+      userId: billingUserId!,
       runId: id,
       brandId: req.headerBrandId,
       campaignId: req.headerCampaignId,
@@ -428,9 +435,16 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
 
     // Billing integration for platform costs with a provision
     if (existing.costSource === "platform" && existing.billingProvisionId) {
+      const billingUserId = req.userId || run.userId;
+      if (!billingUserId) {
+        console.error(`[Runs Service] Cannot bill for run ${id}: no userId available from request or run record`);
+        res.status(400).json({ error: "x-user-id header is required when updating platform cost items" });
+        return;
+      }
+
       const billingCtx: BillingContext = {
         orgId: req.orgId,
-        userId: req.userId || run.userId || "",
+        userId: billingUserId,
         runId: id,
         brandId: req.headerBrandId,
         campaignId: req.headerCampaignId,
