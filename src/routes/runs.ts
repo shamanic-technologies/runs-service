@@ -327,10 +327,12 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       workflowName: req.headerWorkflowName,
     };
 
-    // Deduct: sum actual + platform costs
-    const actualPlatformCents = costRows
-      .filter((r) => r.status === "actual" && r.costSource === "platform")
-      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+    // Deduct: sum actual + platform costs (round up to nearest integer cent for billing)
+    const actualPlatformCents = Math.ceil(
+      costRows
+        .filter((r) => r.status === "actual" && r.costSource === "platform")
+        .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0)
+    );
 
     if (actualPlatformCents > 0) {
       const deductResult = await deductCredits(
@@ -352,8 +354,10 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     // Provision: sum provisioned + platform costs
     const provisionedPlatformItems = costRows
       .filter((r) => r.status === "provisioned" && r.costSource === "platform");
-    const provisionedPlatformCents = provisionedPlatformItems
-      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+    const provisionedPlatformCents = Math.ceil(
+      provisionedPlatformItems
+        .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0)
+    );
 
     if (provisionedPlatformCents > 0) {
       const provisionResult = await provisionCredits(
@@ -455,7 +459,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         // Confirm provision with the actual cost
         await confirmProvision(
           existing.billingProvisionId,
-          Number(existing.totalCostInUsdCents),
+          Math.ceil(Number(existing.totalCostInUsdCents)),
           billingCtx,
         );
       } else if (existing.status === "provisioned" && newStatus === "cancelled") {
