@@ -25,8 +25,8 @@ async function sleep(ms: number): Promise<void> {
 
 export interface BillingContext {
   orgId: string;
-  userId?: string;
-  runId?: string;
+  userId: string;
+  runId: string;
   brandId?: string;
   campaignId?: string;
   workflowName?: string;
@@ -39,8 +39,8 @@ function buildHeaders(ctx: BillingContext): Record<string, string> {
   const apiKey = process.env.BILLING_SERVICE_API_KEY;
   if (apiKey) headers["x-api-key"] = apiKey;
   headers["x-org-id"] = ctx.orgId;
-  if (ctx.userId) headers["x-user-id"] = ctx.userId;
-  if (ctx.runId) headers["x-run-id"] = ctx.runId;
+  headers["x-user-id"] = ctx.userId;
+  headers["x-run-id"] = ctx.runId;
   if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
   if (ctx.campaignId) headers["x-campaign-id"] = ctx.campaignId;
   if (ctx.workflowName) headers["x-workflow-name"] = ctx.workflowName;

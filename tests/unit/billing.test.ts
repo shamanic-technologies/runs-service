@@ -128,16 +128,16 @@ describe("billing client", () => {
       expect(mockFetch).toHaveBeenCalledTimes(4);
     });
 
-    it("omits optional headers when not provided", async () => {
+    it("always sends required identity headers", async () => {
       const mockFetch = vi.fn().mockResolvedValue(okDeductResponse());
       vi.stubGlobal("fetch", mockFetch);
 
-      await deductCredits(100, "test", { orgId: TEST_CTX.orgId });
+      await deductCredits(100, "test", { orgId: TEST_CTX.orgId, userId: TEST_CTX.userId, runId: TEST_CTX.runId });
 
       const callHeaders = mockFetch.mock.calls[0][1].headers;
       expect(callHeaders["x-org-id"]).toBe(TEST_CTX.orgId);
-      expect(callHeaders).not.toHaveProperty("x-user-id");
-      expect(callHeaders).not.toHaveProperty("x-run-id");
+      expect(callHeaders["x-user-id"]).toBe(TEST_CTX.userId);
+      expect(callHeaders["x-run-id"]).toBe(TEST_CTX.runId);
     });
   });
 

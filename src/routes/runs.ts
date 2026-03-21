@@ -313,8 +313,8 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     // --- Billing integration ---
     const billingCtx: BillingContext = {
       orgId: req.orgId,
-      userId: req.userId,
-      runId: req.runId,
+      userId: req.userId || run.userId || "",
+      runId: id,
       brandId: req.headerBrandId,
       campaignId: req.headerCampaignId,
       workflowName: req.headerWorkflowName,
@@ -430,8 +430,8 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     if (existing.costSource === "platform" && existing.billingProvisionId) {
       const billingCtx: BillingContext = {
         orgId: req.orgId,
-        userId: req.userId,
-        runId: req.runId,
+        userId: req.userId || run.userId || "",
+        runId: id,
         brandId: req.headerBrandId,
         campaignId: req.headerCampaignId,
         workflowName: req.headerWorkflowName,
