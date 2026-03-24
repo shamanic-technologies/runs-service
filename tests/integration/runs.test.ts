@@ -470,6 +470,98 @@ describe("Runs CRUD", () => {
       expect(res.body.campaignId).toBeNull();
       expect(res.body.workflowName).toBeNull();
     });
+
+    it("stores featureSlug from x-feature-slug header", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-feature-slug": "cold-email-v2",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.featureSlug).toBe("cold-email-v2");
+    });
+
+    it("x-feature-slug header takes precedence over body featureSlug", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-feature-slug": "header-feature",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+          featureSlug: "body-feature",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.featureSlug).toBe("header-feature");
+    });
+
+    it("featureSlug defaults to null when not provided", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.featureSlug).toBeNull();
+    });
+
+    it("inherits featureSlug from parent", async () => {
+      const parent = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        featureSlug: "inherited-feature",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": parent.id })
+        .send({
+          serviceName: "child-svc",
+          taskName: "child-task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.featureSlug).toBe("inherited-feature");
+    });
+
+    it("returns 409 when featureSlug conflicts with parent", async () => {
+      const parent = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "parent-svc",
+        taskName: "parent-task",
+        featureSlug: "parent-feature",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-feature-slug": "different-feature",
+        })
+        .send({
+          serviceName: "child-svc",
+          taskName: "child-task",
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.conflicts).toEqual(
+        expect.arrayContaining([expect.stringContaining("featureSlug")])
+      );
+    });
   });
 
   describe("POST /v1/runs/:id/costs", () => {

@@ -12,6 +12,7 @@ declare global {
       headerBrandId?: string;
       headerCampaignId?: string;
       headerWorkflowName?: string;
+      headerFeatureSlug?: string;
     }
   }
 }
@@ -25,6 +26,9 @@ function extractWorkflowHeaders(req: Request) {
 
   const workflowName = req.headers["x-workflow-name"] as string | undefined;
   if (workflowName) req.headerWorkflowName = workflowName;
+
+  const featureSlug = req.headers["x-feature-slug"] as string | undefined;
+  if (featureSlug) req.headerFeatureSlug = featureSlug;
 }
 
 export function requireApiKey(req: Request, res: Response, next: NextFunction) {

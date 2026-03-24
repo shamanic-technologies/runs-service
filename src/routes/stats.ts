@@ -13,6 +13,7 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
   workflowName: "r.workflow_name",
   campaignId: "r.campaign_id",
+  featureSlug: "r.feature_slug",
   serviceName: "r.service_name",
   costName: "rc.cost_name",
 };
@@ -26,6 +27,7 @@ function buildFilterSql(
     campaignId?: string;
     workflowName?: string;
     workflowNames?: string;
+    featureSlug?: string;
     serviceName?: string;
     taskName?: string;
     startedAfter?: string;
@@ -36,6 +38,7 @@ function buildFilterSql(
 
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
+  if (filters.featureSlug) parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
   if (filters.workflowNames) {
     const names = filters.workflowNames.split(",").map((s) => s.trim()).filter(Boolean);
     if (names.length > 0) {
@@ -61,6 +64,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       campaignId,
       workflowName,
       workflowNames,
+      featureSlug,
       serviceName,
       taskName,
       startedAfter,
@@ -92,6 +96,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       campaignId,
       workflowName,
       workflowNames,
+      featureSlug,
       serviceName,
       taskName,
       startedAfter,
@@ -156,13 +161,14 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { campaignId, brandId, workflowName, windows } = parsed.data;
+    const { campaignId, brandId, workflowName, featureSlug, windows } = parsed.data;
 
     // Build base WHERE conditions
     const filterParts = [sql`r.organization_id = ${req.orgId}`];
     if (campaignId) filterParts.push(sql`r.campaign_id = ${campaignId}`);
     if (brandId) filterParts.push(sql`r.brand_id = ${brandId}`);
     if (workflowName) filterParts.push(sql`r.workflow_name = ${workflowName}`);
+    if (featureSlug) filterParts.push(sql`r.feature_slug = ${featureSlug}`);
 
     const baseWhere = filterParts.reduce((acc, part) => sql`${acc} AND ${part}`);
 
@@ -345,6 +351,7 @@ const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
   workflowName: "r.workflow_name",
   campaignId: "r.campaign_id",
+  featureSlug: "r.feature_slug",
   serviceName: "r.service_name",
   costName: "rc.cost_name",
 };
@@ -353,12 +360,14 @@ function buildPublicFilterSql(filters: {
   orgId?: string;
   brandId?: string;
   campaignId?: string;
+  featureSlug?: string;
   taskName?: string;
 }) {
   const parts: ReturnType<typeof sql>[] = [];
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
+  if (filters.featureSlug) parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
   if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
   return parts.length > 0
     ? parts.reduce((acc, part) => sql`${acc} AND ${part}`)
@@ -368,7 +377,7 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, taskName } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, featureSlug, taskName } = req.query as Record<string, string | undefined>;
 
       if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
         res.status(400).json({
@@ -384,7 +393,7 @@ function handlePublicCosts(req: any, res: any) {
         ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
         : sql``;
 
-      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, taskName });
+      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, taskName });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
       const result = await db.execute(sql`

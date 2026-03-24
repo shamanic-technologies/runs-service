@@ -41,6 +41,7 @@ export const RunSchema = z
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
     workflowName: z.string().nullable(),
+    featureSlug: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -63,6 +64,7 @@ export const CreateRunRequestSchema = z
     brandId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header instead. Kept for backwards compatibility; header takes precedence." }),
     campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
     workflowName: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-name header instead. Kept for backwards compatibility; header takes precedence." }),
+    featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
   })
@@ -153,6 +155,7 @@ export const RunWithCostsSchema = z
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
     workflowName: z.string().nullable(),
+    featureSlug: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -197,6 +200,7 @@ const WorkflowTrackingHeadersSchema = z.object({
   "x-brand-id": z.string().optional().openapi({ description: "Brand identifier, injected by workflow-service" }),
   "x-campaign-id": z.string().optional().openapi({ description: "Campaign identifier, injected by workflow-service" }),
   "x-workflow-name": z.string().optional().openapi({ description: "Workflow name, injected by workflow-service" }),
+  "x-feature-slug": z.string().optional().openapi({ description: "Feature slug from features-service, injected by campaign-service" }),
 });
 
 // --- Register paths ---
@@ -274,6 +278,7 @@ registry.registerPath({
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
       workflowName: z.string().optional(),
+      featureSlug: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
       status: z.string().optional(),
@@ -427,6 +432,7 @@ export const StatsFiltersSchema = z.object({
   campaignId: z.string().optional(),
   workflowName: z.string().optional().openapi({ description: "Filter by a single workflow name" }),
   workflowNames: z.string().optional().openapi({ description: "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided." }),
+  featureSlug: z.string().optional().openapi({ description: "Filter by feature slug" }),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
   startedAfter: z.string().datetime().optional(),
@@ -462,6 +468,7 @@ export const BudgetRequestSchema = z
     campaignId: z.string().optional(),
     brandId: z.string().optional(),
     workflowName: z.string().optional(),
+    featureSlug: z.string().optional(),
     windows: z.array(BudgetWindowSchema).min(1).max(10),
   })
   .openapi("BudgetRequest");
@@ -510,10 +517,11 @@ export const ChildrenSummaryResponseSchema = z
 
 export const PublicCostsQuerySchema = z
   .object({
-    groupBy: z.enum(["brandId", "workflowName", "campaignId", "serviceName", "costName"]),
+    groupBy: z.enum(["brandId", "workflowName", "campaignId", "featureSlug", "serviceName", "costName"]),
     orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
+    featureSlug: z.string().optional(),
     taskName: z.string().optional(),
   })
   .openapi("PublicCostsQuery");

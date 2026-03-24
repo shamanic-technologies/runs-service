@@ -76,6 +76,10 @@
             "type": "string",
             "nullable": true
           },
+          "featureSlug": {
+            "type": "string",
+            "nullable": true
+          },
           "serviceName": {
             "type": "string"
           },
@@ -115,6 +119,7 @@
           "brandId",
           "campaignId",
           "workflowName",
+          "featureSlug",
           "serviceName",
           "taskName",
           "status",
@@ -159,6 +164,12 @@
             "minLength": 1,
             "deprecated": true,
             "description": "Deprecated: use x-workflow-name header instead. Kept for backwards compatibility; header takes precedence."
+          },
+          "featureSlug": {
+            "type": "string",
+            "minLength": 1,
+            "deprecated": true,
+            "description": "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence."
           },
           "serviceName": {
             "type": "string",
@@ -251,6 +262,10 @@
             "type": "string",
             "nullable": true
           },
+          "featureSlug": {
+            "type": "string",
+            "nullable": true
+          },
           "serviceName": {
             "type": "string"
           },
@@ -329,6 +344,7 @@
           "brandId",
           "campaignId",
           "workflowName",
+          "featureSlug",
           "serviceName",
           "taskName",
           "status",
@@ -654,6 +670,9 @@
           "workflowName": {
             "type": "string"
           },
+          "featureSlug": {
+            "type": "string"
+          },
           "windows": {
             "type": "array",
             "items": {
@@ -862,6 +881,16 @@
             "description": "Workflow name, injected by workflow-service",
             "name": "x-workflow-name",
             "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Feature slug from features-service, injected by campaign-service"
+            },
+            "required": false,
+            "description": "Feature slug from features-service, injected by campaign-service",
+            "name": "x-feature-slug",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -949,6 +978,14 @@
             },
             "required": false,
             "name": "workflowName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
             "in": "query"
           },
           {
@@ -1195,6 +1232,16 @@
             "description": "Workflow name, injected by workflow-service",
             "name": "x-workflow-name",
             "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Feature slug from features-service, injected by campaign-service"
+            },
+            "required": false,
+            "description": "Feature slug from features-service, injected by campaign-service",
+            "name": "x-feature-slug",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -1376,6 +1423,16 @@
           },
           {
             "schema": {
+              "type": "string",
+              "description": "Filter by feature slug"
+            },
+            "required": false,
+            "description": "Filter by feature slug",
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "required": false,
@@ -1549,6 +1606,7 @@
                 "brandId",
                 "workflowName",
                 "campaignId",
+                "featureSlug",
                 "serviceName",
                 "costName"
               ]
@@ -1580,6 +1638,14 @@
             },
             "required": false,
             "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
             "in": "query"
           },
           {
@@ -1653,6 +1719,16 @@
             "required": false,
             "description": "Workflow name, injected by workflow-service",
             "name": "x-workflow-name",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Feature slug from features-service, injected by campaign-service"
+            },
+            "required": false,
+            "description": "Feature slug from features-service, injected by campaign-service",
+            "name": "x-feature-slug",
             "in": "header"
           }
         ],

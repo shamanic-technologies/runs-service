@@ -26,7 +26,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       return;
     }
 
-    const { brandId, campaignId, workflowName, serviceName, taskName } = parsed.data;
+    const { brandId, campaignId, workflowName, featureSlug, serviceName, taskName } = parsed.data;
 
     // Priority: header > body (deprecated)
     const values = {
@@ -35,6 +35,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       brandId: req.headerBrandId || brandId || null,
       campaignId: req.headerCampaignId || campaignId || null,
       workflowName: req.headerWorkflowName || workflowName || null,
+      featureSlug: req.headerFeatureSlug || featureSlug || null,
       serviceName,
       taskName,
       parentRunId: null,

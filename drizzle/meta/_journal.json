@@ -71,6 +71,13 @@
       "when": 1774015498034,
       "tag": "0009_amazing_energizer",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1774317765347,
+      "tag": "0010_optimal_stellaris",
+      "breakpoints": true
     }
   ]
 }
