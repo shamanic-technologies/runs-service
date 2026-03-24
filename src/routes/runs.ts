@@ -52,7 +52,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { brandId, campaignId, workflowName, serviceName, taskName } = parsed.data;
+    const { brandId, campaignId, workflowName, featureSlug, serviceName, taskName } = parsed.data;
     const parentRunId = req.runId || null;
 
     // Priority: header > body (deprecated) > parent inheritance
@@ -60,6 +60,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     let resolvedBrandId = req.headerBrandId || brandId || null;
     let resolvedCampaignId = req.headerCampaignId || campaignId || null;
     let resolvedWorkflowName = req.headerWorkflowName || workflowName || null;
+    let resolvedFeatureSlug = req.headerFeatureSlug || featureSlug || null;
     let resolvedOrgId = req.orgId;
     let resolvedUserId = req.userId || null;
 
@@ -69,6 +70,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           brandId: runs.brandId,
           campaignId: runs.campaignId,
           workflowName: runs.workflowName,
+          featureSlug: runs.featureSlug,
           organizationId: runs.organizationId,
           userId: runs.userId,
         })
@@ -87,6 +89,9 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
         }
         if (resolvedWorkflowName && parentRun.workflowName && resolvedWorkflowName !== parentRun.workflowName) {
           conflicts.push(`workflowName: request="${resolvedWorkflowName}" vs parent="${parentRun.workflowName}"`);
+        }
+        if (resolvedFeatureSlug && parentRun.featureSlug && resolvedFeatureSlug !== parentRun.featureSlug) {
+          conflicts.push(`featureSlug: request="${resolvedFeatureSlug}" vs parent="${parentRun.featureSlug}"`);
         }
         if (parentRun.organizationId && resolvedOrgId !== parentRun.organizationId) {
           conflicts.push(`orgId: request="${resolvedOrgId}" vs parent="${parentRun.organizationId}"`);
@@ -108,6 +113,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
         if (!resolvedBrandId) resolvedBrandId = parentRun.brandId;
         if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
         if (!resolvedWorkflowName) resolvedWorkflowName = parentRun.workflowName;
+        if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
         if (!resolvedUserId) resolvedUserId = parentRun.userId;
       }
     }
@@ -118,6 +124,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       brandId: resolvedBrandId,
       campaignId: resolvedCampaignId,
       workflowName: resolvedWorkflowName,
+      featureSlug: resolvedFeatureSlug,
       serviceName,
       taskName,
       parentRunId,
@@ -280,6 +287,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         brandId: req.headerBrandId,
         campaignId: req.headerCampaignId,
         workflowName: req.headerWorkflowName,
+        featureSlug: req.headerFeatureSlug,
       });
     } catch (err) {
       if (err instanceof CostNotFoundError) {
@@ -325,6 +333,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       brandId: req.headerBrandId,
       campaignId: req.headerCampaignId,
       workflowName: req.headerWorkflowName,
+      featureSlug: req.headerFeatureSlug,
     };
 
     // Deduct: sum actual + platform costs (round up to nearest integer cent for billing)
@@ -453,6 +462,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         brandId: req.headerBrandId,
         campaignId: req.headerCampaignId,
         workflowName: req.headerWorkflowName,
+        featureSlug: req.headerFeatureSlug,
       };
 
       if (existing.status === "provisioned" && newStatus === "actual") {
@@ -531,6 +541,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       brandId,
       campaignId,
       workflowName,
+      featureSlug,
       serviceName,
       taskName,
       status,
@@ -547,6 +558,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (brandId) conditions.push(eq(runs.brandId, brandId as string));
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
     if (workflowName) conditions.push(eq(runs.workflowName, workflowName as string));
+    if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (status) conditions.push(eq(runs.status, status as string));
@@ -570,6 +582,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         brandId: runs.brandId,
         campaignId: runs.campaignId,
         workflowName: runs.workflowName,
+        featureSlug: runs.featureSlug,
         serviceName: runs.serviceName,
         taskName: runs.taskName,
         status: runs.status,
@@ -592,6 +605,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         runs.brandId,
         runs.campaignId,
         runs.workflowName,
+        runs.featureSlug,
         runs.serviceName,
         runs.taskName,
         runs.status,

@@ -235,6 +235,86 @@ describe("Stats endpoints", () => {
       expect(res.body.groups).toEqual([]);
     });
 
+    it("groups costs by featureSlug", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "lead-gen",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "500",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.5000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureSlug")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+
+      const coldEmail = res.body.groups.find((g: any) => g.dimensions.featureSlug === "cold-email");
+      const leadGen = res.body.groups.find((g: any) => g.dimensions.featureSlug === "lead-gen");
+      expect(coldEmail.totalCostInUsdCents).toBe("1.0000000000");
+      expect(leadGen.totalCostInUsdCents).toBe("0.5000000000");
+    });
+
+    it("filters by featureSlug", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "lead-gen",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "500",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.5000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureSlug&featureSlug=cold-email")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.featureSlug).toBe("cold-email");
+    });
+
     it("rejects invalid groupBy", async () => {
       const res = await request(app)
         .get("/v1/stats/costs?groupBy=invalidColumn")
