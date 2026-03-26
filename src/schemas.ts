@@ -453,6 +453,8 @@ export const StatsCostsResponseSchema = z
         provisionedCostInUsdCents: z.string(),
         cancelledCostInUsdCents: z.string(),
         runCount: z.number(),
+        minStartedAt: z.string().datetime().nullable().openapi({ description: "Earliest started_at across matching runs" }),
+        maxStartedAt: z.string().datetime().nullable().openapi({ description: "Latest started_at across matching runs" }),
       })
     ),
   })

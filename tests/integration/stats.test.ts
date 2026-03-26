@@ -315,6 +315,47 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].dimensions.featureSlug).toBe("cold-email");
     });
 
+    it("returns minStartedAt and maxStartedAt", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-ts",
+        startedAt: new Date("2025-01-01T00:00:00.000Z"),
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        brandId: "brand-ts",
+        startedAt: new Date("2025-06-15T12:00:00.000Z"),
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=brandId")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-ts");
+      expect(group.minStartedAt).toBe("2025-01-01T00:00:00.000Z");
+      expect(group.maxStartedAt).toBe("2025-06-15T12:00:00.000Z");
+    });
+
     it("rejects invalid groupBy", async () => {
       const res = await request(app)
         .get("/v1/stats/costs?groupBy=invalidColumn")
