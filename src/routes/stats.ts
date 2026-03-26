@@ -114,7 +114,9 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
         COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
         COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
-        COUNT(DISTINCT r.id) as run_count
+        COUNT(DISTINCT r.id) as run_count,
+        MIN(r.started_at) as min_started_at,
+        MAX(r.started_at) as max_started_at
         ${quantitySelect}
       FROM runs r
       ${joinType} runs_costs rc ON rc.run_id = r.id
@@ -138,6 +140,8 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
         runCount: Number(row.run_count),
+        minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
+        maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
       };
       if (hasCostName) {
         group.totalQuantity = Number(row.total_quantity).toFixed(6);

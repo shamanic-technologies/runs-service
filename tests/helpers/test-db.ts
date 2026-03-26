@@ -16,6 +16,7 @@ export async function insertTestRun(data: {
   userId?: string;
   parentRunId?: string;
   status?: string;
+  startedAt?: Date;
 }) {
   const [run] = await db
     .insert(runs)
@@ -30,6 +31,7 @@ export async function insertTestRun(data: {
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",
+      ...(data.startedAt ? { startedAt: data.startedAt } : {}),
     })
     .returning();
   return run;

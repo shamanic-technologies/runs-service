@@ -607,6 +607,18 @@
                 },
                 "runCount": {
                   "type": "number"
+                },
+                "minStartedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "date-time",
+                  "description": "Earliest started_at across matching runs"
+                },
+                "maxStartedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "date-time",
+                  "description": "Latest started_at across matching runs"
                 }
               },
               "required": [
@@ -615,7 +627,9 @@
                 "actualCostInUsdCents",
                 "provisionedCostInUsdCents",
                 "cancelledCostInUsdCents",
-                "runCount"
+                "runCount",
+                "minStartedAt",
+                "maxStartedAt"
               ]
             }
           }
