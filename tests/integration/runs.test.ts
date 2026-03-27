@@ -652,6 +652,45 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(502);
       expect(res.body.error).toContain("costs-service");
     });
+
+    it("forwards run identity to cost-resolver even without x-user-id and x-run-id headers", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+      mockedResolve.mockResolvedValueOnce(
+        new Map([["gpt-4o-input-token", "0.0003000000"]])
+      );
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        userId: TEST_USER_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // Send only x-org-id, omit x-user-id and x-run-id
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set({
+          "X-API-Key": "test-api-key",
+          "Content-Type": "application/json",
+          "x-org-id": TEST_ORG_ID,
+        })
+        .send({
+          items: [{ costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 }],
+        });
+
+      expect(res.status).toBe(201);
+
+      // Verify cost-resolver received identity from the run record
+      expect(mockedResolve).toHaveBeenCalledWith(
+        ["gpt-4o-input-token"],
+        expect.objectContaining({
+          orgId: TEST_ORG_ID,
+          userId: TEST_USER_ID,
+          runId: run.id,
+        })
+      );
+    });
   });
 
   describe("PATCH /v1/runs/:id", () => {

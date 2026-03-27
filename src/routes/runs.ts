@@ -282,8 +282,8 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     try {
       costMap = await resolveMultipleUnitCosts(names, {
         orgId: req.orgId,
-        userId: req.userId,
-        runId: req.runId,
+        userId: req.userId || (run.userId ?? undefined),
+        runId: req.runId || id,
         brandId: req.headerBrandId,
         campaignId: req.headerCampaignId,
         workflowName: req.headerWorkflowName,

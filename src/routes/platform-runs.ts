@@ -76,11 +76,15 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
       return;
     }
 
-    // Resolve unit costs from costs-service (no org context for platform runs)
+    // Resolve unit costs from costs-service (use run record for identity context)
     const names = items.map((i) => i.costName);
     let costMap: Map<string, string>;
     try {
-      costMap = await resolveMultipleUnitCosts(names, {});
+      costMap = await resolveMultipleUnitCosts(names, {
+        orgId: run.organizationId ?? undefined,
+        userId: run.userId ?? undefined,
+        runId: id,
+      });
     } catch (err) {
       if (err instanceof CostNotFoundError) {
         res
