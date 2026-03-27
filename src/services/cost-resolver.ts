@@ -75,7 +75,8 @@ export async function resolveUnitCost(name: string, ctx: CostResolverContext): P
         throw new CostNotFoundError(name);
       }
       if (!res.ok) {
-        throw new UpstreamError(res.status, `costs-service returned ${res.status}`);
+        const body = await res.text().catch(() => "(unreadable body)");
+        throw new UpstreamError(res.status, `costs-service returned ${res.status}: ${body}`);
       }
 
       const data = await res.json();

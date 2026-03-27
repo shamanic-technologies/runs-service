@@ -37,17 +37,23 @@ describe("cost-resolver", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    it("throws UpstreamError on non-retryable non-ok response", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 400 }));
+    it("throws UpstreamError on non-retryable non-ok response and includes body", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: () => Promise.resolve('{"error":"missing required field"}'),
+      }));
 
       await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow(UpstreamError);
-      await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow("costs-service returned 400");
+      await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow(
+        'costs-service returned 400: {"error":"missing required field"}'
+      );
     });
 
     it("retries on 502 and succeeds", async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 502 })
+        .mockResolvedValueOnce({ ok: false, status: 502, text: () => Promise.resolve("Bad Gateway") })
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
@@ -64,7 +70,7 @@ describe("cost-resolver", () => {
     it("retries on 503 and succeeds", async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 503 })
+        .mockResolvedValueOnce({ ok: false, status: 503, text: () => Promise.resolve("Service Unavailable") })
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
@@ -79,7 +85,7 @@ describe("cost-resolver", () => {
     it("retries on 429 and succeeds", async () => {
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 429 })
+        .mockResolvedValueOnce({ ok: false, status: 429, text: () => Promise.resolve("Too Many Requests") })
         .mockResolvedValueOnce(okResponse("test", "0.01"));
       vi.stubGlobal("fetch", mockFetch);
 
@@ -107,7 +113,7 @@ describe("cost-resolver", () => {
     });
 
     it("gives up after max retries and throws UpstreamError", async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502 });
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502, text: () => Promise.resolve("Bad Gateway") });
       vi.stubGlobal("fetch", mockFetch);
 
       const promise = resolveUnitCost("test", TEST_CTX);
@@ -125,11 +131,12 @@ describe("cost-resolver", () => {
     });
 
     it("uses exponential backoff between retries", async () => {
+      const err502 = { ok: false, status: 502, text: () => Promise.resolve("Bad Gateway") };
       const mockFetch = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status: 502 }) // attempt 0
-        .mockResolvedValueOnce({ ok: false, status: 502 }) // attempt 1 (after 1s)
-        .mockResolvedValueOnce({ ok: false, status: 502 }) // attempt 2 (after 2s)
+        .mockResolvedValueOnce(err502) // attempt 0
+        .mockResolvedValueOnce(err502) // attempt 1 (after 1s)
+        .mockResolvedValueOnce(err502) // attempt 2 (after 2s)
         .mockResolvedValueOnce(okResponse("test", "0.01")); // attempt 3 (after 4s)
       vi.stubGlobal("fetch", mockFetch);
 
@@ -160,7 +167,7 @@ describe("cost-resolver", () => {
     });
 
     it("does not retry on 400", async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 400 });
+      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 400, text: () => Promise.resolve("Bad Request") });
       vi.stubGlobal("fetch", mockFetch);
 
       await expect(resolveUnitCost("test", TEST_CTX)).rejects.toThrow(UpstreamError);
