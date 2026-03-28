@@ -4,6 +4,13 @@ import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { BudgetRequestSchema } from "../schemas.js";
+import {
+  resolveWorkflowDynastySlugs,
+  resolveFeatureDynastySlugs,
+  fetchAllWorkflowDynasties,
+  fetchAllFeatureDynasties,
+  buildSlugToDynastyMap,
+} from "../services/dynasty-resolver.js";
 
 const router = Router();
 
@@ -18,6 +25,17 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   costName: "rc.cost_name",
 };
 
+// Dynasty groupBy keys map to their underlying DB column
+const DYNASTY_GROUP_BY: Record<string, string> = {
+  workflowDynastySlug: "r.workflow_slug",
+  featureDynastySlug: "r.feature_slug",
+};
+
+const ALL_GROUP_BY_COLUMNS: Record<string, string> = {
+  ...GROUP_BY_COLUMNS,
+  ...DYNASTY_GROUP_BY,
+};
+
 // --- Helpers ---
 
 function buildFilterSql(
@@ -26,8 +44,9 @@ function buildFilterSql(
     brandId?: string;
     campaignId?: string;
     workflowSlug?: string;
-    workflowSlugs?: string;
+    workflowSlugs?: string[];
     featureSlug?: string;
+    featureSlugs?: string[];
     serviceName?: string;
     taskName?: string;
     startedAfter?: string;
@@ -38,21 +57,117 @@ function buildFilterSql(
 
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
-  if (filters.featureSlug) parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
-  if (filters.workflowSlugs) {
-    const names = filters.workflowSlugs.split(",").map((s) => s.trim()).filter(Boolean);
-    if (names.length > 0) {
-      parts.push(sql`r.workflow_slug IN (${sql.join(names.map((n) => sql`${n}`), sql`, `)})`);
-    }
+
+  // Feature slug filtering: resolved dynasty slugs > single slug
+  if (filters.featureSlugs && filters.featureSlugs.length > 0) {
+    parts.push(sql`r.feature_slug IN (${sql.join(filters.featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
+  } else if (filters.featureSlug) {
+    parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
+  }
+
+  // Workflow slug filtering: resolved dynasty slugs > comma-separated > single slug
+  if (filters.workflowSlugs && filters.workflowSlugs.length > 0) {
+    parts.push(sql`r.workflow_slug IN (${sql.join(filters.workflowSlugs.map((n) => sql`${n}`), sql`, `)})`);
   } else if (filters.workflowSlug) {
     parts.push(sql`r.workflow_slug = ${filters.workflowSlug}`);
   }
+
   if (filters.serviceName) parts.push(sql`r.service_name = ${filters.serviceName}`);
   if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
   if (filters.startedAfter) parts.push(sql`r.started_at >= ${filters.startedAfter}::timestamptz`);
   if (filters.startedBefore) parts.push(sql`r.started_at <= ${filters.startedBefore}::timestamptz`);
 
   return parts.reduce((acc, part) => sql`${acc} AND ${part}`);
+}
+
+/** Resolve dynasty slug filters into arrays of versioned slugs */
+async function resolveDynastyFilters(query: Record<string, string | undefined>): Promise<{
+  workflowSlugs?: string[];
+  featureSlugs?: string[];
+  emptyResult: boolean;
+}> {
+  let workflowSlugs: string[] | undefined;
+  let featureSlugs: string[] | undefined;
+  let emptyResult = false;
+
+  if (query.workflowDynastySlug) {
+    const resolved = await resolveWorkflowDynastySlugs(query.workflowDynastySlug);
+    if (resolved.length === 0) {
+      emptyResult = true;
+    } else {
+      workflowSlugs = resolved;
+    }
+  } else if (query.workflowSlugs) {
+    workflowSlugs = query.workflowSlugs.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+
+  if (query.featureDynastySlug) {
+    const resolved = await resolveFeatureDynastySlugs(query.featureDynastySlug);
+    if (resolved.length === 0) {
+      emptyResult = true;
+    } else {
+      featureSlugs = resolved;
+    }
+  }
+
+  return { workflowSlugs, featureSlugs, emptyResult };
+}
+
+const EMPTY_STATS_RESPONSE = { groups: [] };
+
+interface AggRow {
+  dimensions: Record<string, string | null>;
+  totalCostInUsdCents: string;
+  actualCostInUsdCents: string;
+  provisionedCostInUsdCents: string;
+  cancelledCostInUsdCents: string;
+  runCount: number;
+  minStartedAt: string | null;
+  maxStartedAt: string | null;
+  totalQuantity?: string;
+}
+
+/** Re-group rows by dynasty slug, merging rows whose underlying slug maps to the same dynasty */
+function regroupByDynasty(
+  groups: AggRow[],
+  dynastyKey: string,
+  underlyingKey: string,
+  slugToDynasty: Map<string, string>
+): AggRow[] {
+  const merged = new Map<string, AggRow>();
+
+  for (const group of groups) {
+    const rawSlug = group.dimensions[underlyingKey] ?? "";
+    const dynasty = slugToDynasty.get(rawSlug) ?? rawSlug;
+
+    const existing = merged.get(dynasty);
+    if (!existing) {
+      const newDimensions = { ...group.dimensions };
+      delete newDimensions[underlyingKey];
+      newDimensions[dynastyKey] = dynasty;
+      merged.set(dynasty, { ...group, dimensions: newDimensions });
+    } else {
+      existing.totalCostInUsdCents = (Number(existing.totalCostInUsdCents) + Number(group.totalCostInUsdCents)).toFixed(10);
+      existing.actualCostInUsdCents = (Number(existing.actualCostInUsdCents) + Number(group.actualCostInUsdCents)).toFixed(10);
+      existing.provisionedCostInUsdCents = (Number(existing.provisionedCostInUsdCents) + Number(group.provisionedCostInUsdCents)).toFixed(10);
+      existing.cancelledCostInUsdCents = (Number(existing.cancelledCostInUsdCents) + Number(group.cancelledCostInUsdCents)).toFixed(10);
+      existing.runCount += group.runCount;
+
+      if (group.minStartedAt && (!existing.minStartedAt || group.minStartedAt < existing.minStartedAt)) {
+        existing.minStartedAt = group.minStartedAt;
+      }
+      if (group.maxStartedAt && (!existing.maxStartedAt || group.maxStartedAt > existing.maxStartedAt)) {
+        existing.maxStartedAt = group.maxStartedAt;
+      }
+      if (existing.totalQuantity !== undefined && group.totalQuantity !== undefined) {
+        existing.totalQuantity = (Number(existing.totalQuantity) + Number(group.totalQuantity)).toFixed(6);
+      }
+    }
+  }
+
+  return Array.from(merged.values()).sort(
+    (a, b) => Number(b.totalCostInUsdCents) - Number(a.totalCostInUsdCents)
+  );
 }
 
 // GET /v1/stats/costs — aggregation with GROUP BY
@@ -63,8 +178,10 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       brandId,
       campaignId,
       workflowSlug,
-      workflowSlugs,
+      workflowSlugs: workflowSlugsParam,
+      workflowDynastySlug,
       featureSlug,
+      featureDynastySlug,
       serviceName,
       taskName,
       startedAfter,
@@ -78,15 +195,35 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     // Validate groupBy columns
     const groupByKeys = groupBy.split(",").map((s) => s.trim());
-    const invalidKeys = groupByKeys.filter((k) => !GROUP_BY_COLUMNS[k]);
+    const invalidKeys = groupByKeys.filter((k) => !ALL_GROUP_BY_COLUMNS[k]);
     if (invalidKeys.length > 0) {
       res.status(400).json({
-        error: `Invalid groupBy values: ${invalidKeys.join(", ")}. Allowed: ${Object.keys(GROUP_BY_COLUMNS).join(", ")}`,
+        error: `Invalid groupBy values: ${invalidKeys.join(", ")}. Allowed: ${Object.keys(ALL_GROUP_BY_COLUMNS).join(", ")}`,
       });
       return;
     }
 
-    const groupByCols = groupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
+    // Resolve dynasty filters
+    const dynastyFilters = await resolveDynastyFilters({
+      workflowDynastySlug,
+      featureDynastySlug,
+      workflowSlugs: workflowSlugsParam,
+    });
+
+    if (dynastyFilters.emptyResult) {
+      res.json(EMPTY_STATS_RESPONSE);
+      return;
+    }
+
+    // Determine which dynasty groupBy keys are present
+    const hasDynastyWorkflowGroupBy = groupByKeys.includes("workflowDynastySlug");
+    const hasDynastyFeatureGroupBy = groupByKeys.includes("featureDynastySlug");
+
+    // Build actual SQL groupBy keys: replace dynasty keys with their underlying column
+    const sqlGroupByKeys = groupByKeys.map((k) => DYNASTY_GROUP_BY[k] ? (k === "workflowDynastySlug" ? "workflowSlug" : "featureSlug") : k);
+    const uniqueSqlGroupByKeys = [...new Set(sqlGroupByKeys)];
+
+    const groupByCols = uniqueSqlGroupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
     const selectCols = groupByCols.map((col) => sql.raw(col));
     const groupByClause = sql.raw(groupByCols.join(", "));
     const hasCostName = groupByKeys.includes("costName");
@@ -95,8 +232,9 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       brandId,
       campaignId,
       workflowSlug,
-      workflowSlugs,
+      workflowSlugs: dynastyFilters.workflowSlugs,
       featureSlug,
+      featureSlugs: dynastyFilters.featureSlugs,
       serviceName,
       taskName,
       startedAfter,
@@ -127,13 +265,13 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     const rows = result as any[];
 
-    const groups = rows.map((row) => {
+    let groups: AggRow[] = rows.map((row) => {
       const dimensions: Record<string, string | null> = {};
-      for (const key of groupByKeys) {
+      for (const key of uniqueSqlGroupByKeys) {
         const dbCol = GROUP_BY_COLUMNS[key].replace(/^r\.|^rc\./, "");
         dimensions[key] = row[dbCol] ?? null;
       }
-      const group: any = {
+      const group: AggRow = {
         dimensions,
         totalCostInUsdCents: Number(row.total_cost).toFixed(10),
         actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
@@ -148,6 +286,18 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       }
       return group;
     });
+
+    // Post-process: re-group by dynasty if needed
+    if (hasDynastyWorkflowGroupBy) {
+      const dynasties = await fetchAllWorkflowDynasties();
+      const slugMap = buildSlugToDynastyMap(dynasties);
+      groups = regroupByDynasty(groups, "workflowDynastySlug", "workflowSlug", slugMap);
+    }
+    if (hasDynastyFeatureGroupBy) {
+      const dynasties = await fetchAllFeatureDynasties();
+      const slugMap = buildSlugToDynastyMap(dynasties);
+      groups = regroupByDynasty(groups, "featureDynastySlug", "featureSlug", slugMap);
+    }
 
     res.json({ groups });
   } catch (err) {
@@ -349,7 +499,7 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
   }
 });
 
-// --- Public costs endpoint (replaces leaderboard) ---
+// --- Public costs endpoint ---
 
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   brandId: "r.brand_id",
@@ -360,18 +510,40 @@ const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
   costName: "rc.cost_name",
 };
 
+const PUBLIC_DYNASTY_GROUP_BY: Record<string, string> = {
+  workflowDynastySlug: "r.workflow_slug",
+  featureDynastySlug: "r.feature_slug",
+};
+
+const ALL_PUBLIC_GROUP_BY: Record<string, string> = {
+  ...PUBLIC_GROUP_BY_COLUMNS,
+  ...PUBLIC_DYNASTY_GROUP_BY,
+};
+
 function buildPublicFilterSql(filters: {
   orgId?: string;
   brandId?: string;
   campaignId?: string;
   featureSlug?: string;
+  featureSlugs?: string[];
+  workflowSlugs?: string[];
   taskName?: string;
 }) {
   const parts: ReturnType<typeof sql>[] = [];
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
   if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
-  if (filters.featureSlug) parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
+
+  if (filters.featureSlugs && filters.featureSlugs.length > 0) {
+    parts.push(sql`r.feature_slug IN (${sql.join(filters.featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
+  } else if (filters.featureSlug) {
+    parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
+  }
+
+  if (filters.workflowSlugs && filters.workflowSlugs.length > 0) {
+    parts.push(sql`r.workflow_slug IN (${sql.join(filters.workflowSlugs.map((n) => sql`${n}`), sql`, `)})`);
+  }
+
   if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
   return parts.length > 0
     ? parts.reduce((acc, part) => sql`${acc} AND ${part}`)
@@ -381,23 +553,47 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, featureSlug, taskName } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, featureSlug, featureDynastySlug, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
 
-      if (!groupBy || !PUBLIC_GROUP_BY_COLUMNS[groupBy]) {
+      if (!groupBy || !ALL_PUBLIC_GROUP_BY[groupBy]) {
         res.status(400).json({
-          error: `Invalid groupBy value. Allowed: ${Object.keys(PUBLIC_GROUP_BY_COLUMNS).join(", ")}`,
+          error: `Invalid groupBy value. Allowed: ${Object.keys(ALL_PUBLIC_GROUP_BY).join(", ")}`,
         });
         return;
       }
 
-      const col = PUBLIC_GROUP_BY_COLUMNS[groupBy];
+      const isDynastyGroupBy = !!PUBLIC_DYNASTY_GROUP_BY[groupBy];
+      const actualGroupBy = isDynastyGroupBy
+        ? (groupBy === "workflowDynastySlug" ? "workflowSlug" : "featureSlug")
+        : groupBy;
+      const col = PUBLIC_GROUP_BY_COLUMNS[actualGroupBy];
       const hasCostName = groupBy === "costName";
       const joinType = hasCostName ? sql`INNER JOIN` : sql`LEFT JOIN`;
       const quantitySelect = hasCostName
         ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
         : sql``;
 
-      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, taskName });
+      // Resolve dynasty filters
+      let featureSlugs: string[] | undefined;
+      let workflowSlugs: string[] | undefined;
+      if (featureDynastySlug) {
+        const resolved = await resolveFeatureDynastySlugs(featureDynastySlug);
+        if (resolved.length === 0) {
+          res.json(EMPTY_STATS_RESPONSE);
+          return;
+        }
+        featureSlugs = resolved;
+      }
+      if (workflowDynastySlug) {
+        const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug);
+        if (resolved.length === 0) {
+          res.json(EMPTY_STATS_RESPONSE);
+          return;
+        }
+        workflowSlugs = resolved;
+      }
+
+      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, featureSlugs, workflowSlugs, taskName });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
       const result = await db.execute(sql`
@@ -418,20 +614,32 @@ function handlePublicCosts(req: any, res: any) {
       const rows = result as any[];
       const dbCol = col.replace(/^r\.|^rc\./, "");
 
-      const groups = rows.map((row) => {
-        const group: any = {
-          dimensions: { [groupBy]: row[dbCol] ?? null },
+      let groups: AggRow[] = rows.map((row) => {
+        const group: AggRow = {
+          dimensions: { [actualGroupBy]: row[dbCol] ?? null },
           totalCostInUsdCents: Number(row.total_cost).toFixed(10),
           actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
           provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
           cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
           runCount: Number(row.run_count),
+          minStartedAt: null,
+          maxStartedAt: null,
         };
         if (hasCostName) {
           group.totalQuantity = Number(row.total_quantity).toFixed(6);
         }
         return group;
       });
+
+      // Post-process dynasty groupBy
+      if (isDynastyGroupBy) {
+        const isWorkflow = groupBy === "workflowDynastySlug";
+        const dynasties = isWorkflow
+          ? await fetchAllWorkflowDynasties()
+          : await fetchAllFeatureDynasties();
+        const slugMap = buildSlugToDynastyMap(dynasties);
+        groups = regroupByDynasty(groups, groupBy, actualGroupBy, slugMap);
+      }
 
       res.json({ groups });
     } catch (err) {
