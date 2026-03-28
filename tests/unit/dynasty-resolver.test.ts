@@ -5,9 +5,15 @@ import {
   fetchAllWorkflowDynasties,
   fetchAllFeatureDynasties,
   buildSlugToDynastyMap,
+  type IdentityHeaders,
 } from "../../src/services/dynasty-resolver.js";
 
 const originalEnv = { ...process.env };
+const testIdentity: IdentityHeaders = {
+  orgId: "00000000-0000-0000-0000-000000000001",
+  userId: "00000000-0000-0000-0000-000000000002",
+  runId: "00000000-0000-0000-0000-000000000003",
+};
 
 beforeEach(() => {
   process.env.WORKFLOW_SERVICE_URL = "https://workflow.test";
@@ -30,7 +36,7 @@ describe("resolveWorkflowDynastySlugs", () => {
       })
     );
 
-    const slugs = await resolveWorkflowDynastySlugs("cold-email");
+    const slugs = await resolveWorkflowDynastySlugs("cold-email", testIdentity);
     expect(slugs).toEqual(["cold-email", "cold-email-v2", "cold-email-v3"]);
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
@@ -39,6 +45,9 @@ describe("resolveWorkflowDynastySlugs", () => {
     );
     const headers = fetchCall[1]?.headers as Record<string, string>;
     expect(headers["X-API-Key"]).toBe("wf-key");
+    expect(headers["x-org-id"]).toBe(testIdentity.orgId);
+    expect(headers["x-user-id"]).toBe(testIdentity.userId);
+    expect(headers["x-run-id"]).toBe(testIdentity.runId);
   });
 
   it("returns empty array when dynasty has no versions", async () => {
@@ -46,7 +55,7 @@ describe("resolveWorkflowDynastySlugs", () => {
       new Response(JSON.stringify({ slugs: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
     );
 
-    const slugs = await resolveWorkflowDynastySlugs("nonexistent");
+    const slugs = await resolveWorkflowDynastySlugs("nonexistent", testIdentity);
     expect(slugs).toEqual([]);
   });
 
@@ -63,7 +72,7 @@ describe("resolveWorkflowDynastySlugs", () => {
     // Re-import won't help due to module caching, so we test the error path instead
     process.env.WORKFLOW_SERVICE_URL = "https://workflow.test";
     await expect(
-      resolveWorkflowDynastySlugs("bad").catch(() => {
+      resolveWorkflowDynastySlugs("bad", testIdentity).catch(() => {
         throw new Error("upstream error");
       })
     ).rejects.toThrow();
@@ -74,7 +83,7 @@ describe("resolveWorkflowDynastySlugs", () => {
       new Response("Internal Server Error", { status: 500 })
     );
 
-    await expect(resolveWorkflowDynastySlugs("test")).rejects.toThrow(
+    await expect(resolveWorkflowDynastySlugs("test", testIdentity)).rejects.toThrow(
       /Dynasty resolution failed: 500/
     );
   });
@@ -89,13 +98,15 @@ describe("resolveFeatureDynastySlugs", () => {
       })
     );
 
-    const slugs = await resolveFeatureDynastySlugs("feat-a");
+    const slugs = await resolveFeatureDynastySlugs("feat-a", testIdentity);
     expect(slugs).toEqual(["feat-a", "feat-a-v2"]);
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe(
       "https://features.test/features/dynasty/slugs?dynastySlug=feat-a"
     );
+    const headers = fetchCall[1]?.headers as Record<string, string>;
+    expect(headers["x-org-id"]).toBe(testIdentity.orgId);
   });
 });
 
@@ -112,7 +123,7 @@ describe("fetchAllWorkflowDynasties", () => {
       })
     );
 
-    const result = await fetchAllWorkflowDynasties();
+    const result = await fetchAllWorkflowDynasties(testIdentity);
     expect(result).toEqual(dynasties);
   });
 });
@@ -129,7 +140,7 @@ describe("fetchAllFeatureDynasties", () => {
       })
     );
 
-    const result = await fetchAllFeatureDynasties();
+    const result = await fetchAllFeatureDynasties(testIdentity);
     expect(result).toEqual(dynasties);
   });
 });
