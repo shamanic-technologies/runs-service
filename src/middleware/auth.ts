@@ -11,7 +11,7 @@ declare global {
       platformServiceName?: string;
       headerBrandId?: string;
       headerCampaignId?: string;
-      headerWorkflowName?: string;
+      headerWorkflowSlug?: string;
       headerFeatureSlug?: string;
     }
   }
@@ -24,8 +24,8 @@ function extractWorkflowHeaders(req: Request) {
   const campaignId = req.headers["x-campaign-id"] as string | undefined;
   if (campaignId) req.headerCampaignId = campaignId;
 
-  const workflowName = req.headers["x-workflow-name"] as string | undefined;
-  if (workflowName) req.headerWorkflowName = workflowName;
+  const workflowSlug = req.headers["x-workflow-slug"] as string | undefined;
+  if (workflowSlug) req.headerWorkflowSlug = workflowSlug;
 
   const featureSlug = req.headers["x-feature-slug"] as string | undefined;
   if (featureSlug) req.headerFeatureSlug = featureSlug;

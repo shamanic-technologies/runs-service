@@ -9,7 +9,7 @@ export const runs = pgTable(
     userId: uuid("user_id"),
     brandId: text("brand_id"),
     campaignId: text("campaign_id"),
-    workflowName: text("workflow_name"),
+    workflowSlug: text("workflow_slug"),
     featureSlug: text("feature_slug"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
@@ -27,7 +27,7 @@ export const runs = pgTable(
     index("idx_runs_parent").on(table.parentRunId),
     index("idx_runs_brand").on(table.brandId),
     index("idx_runs_campaign").on(table.campaignId),
-    index("idx_runs_workflow_name").on(table.workflowName),
+    index("idx_runs_workflow_slug").on(table.workflowSlug),
     index("idx_runs_feature_slug").on(table.featureSlug),
   ]
 );

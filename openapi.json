@@ -72,7 +72,7 @@
             "type": "string",
             "nullable": true
           },
-          "workflowName": {
+          "workflowSlug": {
             "type": "string",
             "nullable": true
           },
@@ -118,7 +118,7 @@
           "userId",
           "brandId",
           "campaignId",
-          "workflowName",
+          "workflowSlug",
           "featureSlug",
           "serviceName",
           "taskName",
@@ -159,11 +159,11 @@
             "deprecated": true,
             "description": "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence."
           },
-          "workflowName": {
+          "workflowSlug": {
             "type": "string",
             "minLength": 1,
             "deprecated": true,
-            "description": "Deprecated: use x-workflow-name header instead. Kept for backwards compatibility; header takes precedence."
+            "description": "Deprecated: use x-workflow-slug header instead. Kept for backwards compatibility; header takes precedence."
           },
           "featureSlug": {
             "type": "string",
@@ -258,7 +258,7 @@
             "type": "string",
             "nullable": true
           },
-          "workflowName": {
+          "workflowSlug": {
             "type": "string",
             "nullable": true
           },
@@ -343,7 +343,7 @@
           "userId",
           "brandId",
           "campaignId",
-          "workflowName",
+          "workflowSlug",
           "featureSlug",
           "serviceName",
           "taskName",
@@ -681,7 +681,7 @@
           "brandId": {
             "type": "string"
           },
-          "workflowName": {
+          "workflowSlug": {
             "type": "string"
           },
           "featureSlug": {
@@ -859,7 +859,7 @@
     "/v1/runs": {
       "post": {
         "summary": "Create a run",
-        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowName differ from the parent run.",
+        "description": "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowSlug differ from the parent run.",
         "security": [
           {
             "apiKey": []
@@ -889,11 +889,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name, injected by workflow-service"
+              "description": "Workflow slug, injected by workflow-service"
             },
             "required": false,
-            "description": "Workflow name, injected by workflow-service",
-            "name": "x-workflow-name",
+            "description": "Workflow slug, injected by workflow-service",
+            "name": "x-workflow-slug",
             "in": "header"
           },
           {
@@ -991,7 +991,7 @@
               "type": "string"
             },
             "required": false,
-            "name": "workflowName",
+            "name": "workflowSlug",
             "in": "query"
           },
           {
@@ -1201,7 +1201,7 @@
     "/v1/runs/{id}/costs": {
       "post": {
         "summary": "Add costs to a run",
-        "description": "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are forwarded to downstream services.",
+        "description": "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-slug headers are forwarded to downstream services.",
         "security": [
           {
             "apiKey": []
@@ -1240,11 +1240,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name, injected by workflow-service"
+              "description": "Workflow slug, injected by workflow-service"
             },
             "required": false,
-            "description": "Workflow name, injected by workflow-service",
-            "name": "x-workflow-name",
+            "description": "Workflow slug, injected by workflow-service",
+            "name": "x-workflow-slug",
             "in": "header"
           },
           {
@@ -1392,7 +1392,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -1418,21 +1418,21 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by a single workflow name"
+              "description": "Filter by a single workflow slug"
             },
             "required": false,
-            "description": "Filter by a single workflow name",
-            "name": "workflowName",
+            "description": "Filter by a single workflow slug",
+            "name": "workflowSlug",
             "in": "query"
           },
           {
             "schema": {
               "type": "string",
-              "description": "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided."
+              "description": "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided."
             },
             "required": false,
-            "description": "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided.",
-            "name": "workflowNames",
+            "description": "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided.",
+            "name": "workflowSlugs",
             "in": "query"
           },
           {
@@ -1611,14 +1611,14 @@
     "/v1/stats/public/costs": {
       "get": {
         "summary": "Public cost aggregation (no auth)",
-        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowName, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
+        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
         "parameters": [
           {
             "schema": {
               "type": "string",
               "enum": [
                 "brandId",
-                "workflowName",
+                "workflowSlug",
                 "campaignId",
                 "featureSlug",
                 "serviceName",
@@ -1728,11 +1728,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name, injected by workflow-service"
+              "description": "Workflow slug, injected by workflow-service"
             },
             "required": false,
-            "description": "Workflow name, injected by workflow-service",
-            "name": "x-workflow-name",
+            "description": "Workflow slug, injected by workflow-service",
+            "name": "x-workflow-slug",
             "in": "header"
           },
           {

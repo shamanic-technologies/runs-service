@@ -29,7 +29,7 @@ export interface BillingContext {
   runId: string;
   brandId?: string;
   campaignId?: string;
-  workflowName?: string;
+  workflowSlug?: string;
   featureSlug?: string;
 }
 
@@ -44,7 +44,7 @@ function buildHeaders(ctx: BillingContext): Record<string, string> {
   headers["x-run-id"] = ctx.runId;
   if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
   if (ctx.campaignId) headers["x-campaign-id"] = ctx.campaignId;
-  if (ctx.workflowName) headers["x-workflow-name"] = ctx.workflowName;
+  if (ctx.workflowSlug) headers["x-workflow-slug"] = ctx.workflowSlug;
   if (ctx.featureSlug) headers["x-feature-slug"] = ctx.featureSlug;
   return headers;
 }

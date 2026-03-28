@@ -78,6 +78,13 @@
       "when": 1774317765347,
       "tag": "0010_optimal_stellaris",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1774915200000,
+      "tag": "0011_rename_workflow_name_to_slug",
+      "breakpoints": true
     }
   ]
 }

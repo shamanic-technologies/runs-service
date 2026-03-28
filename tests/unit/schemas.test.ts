@@ -19,7 +19,7 @@ describe("schemas", () => {
       const result = CreateRunRequestSchema.safeParse({
         brandId: "brand_1",
         campaignId: "campaign_1",
-        workflowName: "wf-1",
+        workflowSlug: "wf-1",
         serviceName: "my-agent",
         taskName: "run-task",
         parentRunId: "770e8400-e29b-41d4-a716-446655440000",
