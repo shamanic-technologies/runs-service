@@ -10,6 +10,7 @@ import {
   fetchAllWorkflowDynasties,
   fetchAllFeatureDynasties,
   buildSlugToDynastyMap,
+  type IdentityHeaders,
 } from "../services/dynasty-resolver.js";
 
 const router = Router();
@@ -81,7 +82,7 @@ function buildFilterSql(
 }
 
 /** Resolve dynasty slug filters into arrays of versioned slugs */
-async function resolveDynastyFilters(query: Record<string, string | undefined>): Promise<{
+async function resolveDynastyFilters(query: Record<string, string | undefined>, identity: IdentityHeaders): Promise<{
   workflowSlugs?: string[];
   featureSlugs?: string[];
   emptyResult: boolean;
@@ -91,7 +92,7 @@ async function resolveDynastyFilters(query: Record<string, string | undefined>):
   let emptyResult = false;
 
   if (query.workflowDynastySlug) {
-    const resolved = await resolveWorkflowDynastySlugs(query.workflowDynastySlug);
+    const resolved = await resolveWorkflowDynastySlugs(query.workflowDynastySlug, identity);
     if (resolved.length === 0) {
       emptyResult = true;
     } else {
@@ -102,7 +103,7 @@ async function resolveDynastyFilters(query: Record<string, string | undefined>):
   }
 
   if (query.featureDynastySlug) {
-    const resolved = await resolveFeatureDynastySlugs(query.featureDynastySlug);
+    const resolved = await resolveFeatureDynastySlugs(query.featureDynastySlug, identity);
     if (resolved.length === 0) {
       emptyResult = true;
     } else {
@@ -204,11 +205,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     }
 
     // Resolve dynasty filters
+    const identity: IdentityHeaders = { orgId: req.orgId, userId: req.userId, runId: req.runId };
     const dynastyFilters = await resolveDynastyFilters({
       workflowDynastySlug,
       featureDynastySlug,
       workflowSlugs: workflowSlugsParam,
-    });
+    }, identity);
 
     if (dynastyFilters.emptyResult) {
       res.json(EMPTY_STATS_RESPONSE);
@@ -289,12 +291,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     // Post-process: re-group by dynasty if needed
     if (hasDynastyWorkflowGroupBy) {
-      const dynasties = await fetchAllWorkflowDynasties();
+      const dynasties = await fetchAllWorkflowDynasties(identity);
       const slugMap = buildSlugToDynastyMap(dynasties);
       groups = regroupByDynasty(groups, "workflowDynastySlug", "workflowSlug", slugMap);
     }
     if (hasDynastyFeatureGroupBy) {
-      const dynasties = await fetchAllFeatureDynasties();
+      const dynasties = await fetchAllFeatureDynasties(identity);
       const slugMap = buildSlugToDynastyMap(dynasties);
       groups = regroupByDynasty(groups, "featureDynastySlug", "featureSlug", slugMap);
     }
@@ -574,10 +576,15 @@ function handlePublicCosts(req: any, res: any) {
         : sql``;
 
       // Resolve dynasty filters
+      const identity: IdentityHeaders = {
+        orgId: req.orgId ?? (req.headers["x-org-id"] as string),
+        userId: req.userId ?? (req.headers["x-user-id"] as string),
+        runId: req.runId ?? (req.headers["x-run-id"] as string),
+      };
       let featureSlugs: string[] | undefined;
       let workflowSlugs: string[] | undefined;
       if (featureDynastySlug) {
-        const resolved = await resolveFeatureDynastySlugs(featureDynastySlug);
+        const resolved = await resolveFeatureDynastySlugs(featureDynastySlug, identity);
         if (resolved.length === 0) {
           res.json(EMPTY_STATS_RESPONSE);
           return;
@@ -585,7 +592,7 @@ function handlePublicCosts(req: any, res: any) {
         featureSlugs = resolved;
       }
       if (workflowDynastySlug) {
-        const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug);
+        const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug, identity);
         if (resolved.length === 0) {
           res.json(EMPTY_STATS_RESPONSE);
           return;
@@ -635,8 +642,8 @@ function handlePublicCosts(req: any, res: any) {
       if (isDynastyGroupBy) {
         const isWorkflow = groupBy === "workflowDynastySlug";
         const dynasties = isWorkflow
-          ? await fetchAllWorkflowDynasties()
-          : await fetchAllFeatureDynasties();
+          ? await fetchAllWorkflowDynasties(identity)
+          : await fetchAllFeatureDynasties(identity);
         const slugMap = buildSlugToDynastyMap(dynasties);
         groups = regroupByDynasty(groups, groupBy, actualGroupBy, slugMap);
       }

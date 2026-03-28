@@ -5,9 +5,18 @@ export interface DynastyEntry {
   slugs: string[];
 }
 
-async function fetchJson<T>(url: string, apiKey: string | undefined): Promise<T> {
+export interface IdentityHeaders {
+  orgId: string;
+  userId?: string;
+  runId?: string;
+}
+
+async function fetchJson<T>(url: string, apiKey: string | undefined, identity?: IdentityHeaders): Promise<T> {
   const headers: Record<string, string> = {};
   if (apiKey) headers["X-API-Key"] = apiKey;
+  if (identity?.orgId) headers["x-org-id"] = identity.orgId;
+  if (identity?.userId) headers["x-user-id"] = identity.userId;
+  if (identity?.runId) headers["x-run-id"] = identity.runId;
 
   const res = await fetch(url, {
     headers,
@@ -22,42 +31,46 @@ async function fetchJson<T>(url: string, apiKey: string | undefined): Promise<T>
   return res.json() as Promise<T>;
 }
 
-export async function resolveWorkflowDynastySlugs(dynastySlug: string): Promise<string[]> {
+export async function resolveWorkflowDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
   const data = await fetchJson<{ slugs: string[] }>(
     `${url}/workflows/dynasty/slugs?dynastySlug=${encodeURIComponent(dynastySlug)}`,
-    process.env.WORKFLOW_SERVICE_API_KEY
+    process.env.WORKFLOW_SERVICE_API_KEY,
+    identity
   );
   return data.slugs;
 }
 
-export async function resolveFeatureDynastySlugs(dynastySlug: string): Promise<string[]> {
+export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
   const url = process.env.FEATURES_SERVICE_URL;
   if (!url) throw new Error("FEATURES_SERVICE_URL not configured");
   const data = await fetchJson<{ slugs: string[] }>(
     `${url}/features/dynasty/slugs?dynastySlug=${encodeURIComponent(dynastySlug)}`,
-    process.env.FEATURES_SERVICE_API_KEY
+    process.env.FEATURES_SERVICE_API_KEY,
+    identity
   );
   return data.slugs;
 }
 
-export async function fetchAllWorkflowDynasties(): Promise<DynastyEntry[]> {
+export async function fetchAllWorkflowDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
   const data = await fetchJson<{ dynasties: DynastyEntry[] }>(
     `${url}/workflows/dynasties`,
-    process.env.WORKFLOW_SERVICE_API_KEY
+    process.env.WORKFLOW_SERVICE_API_KEY,
+    identity
   );
   return data.dynasties;
 }
 
-export async function fetchAllFeatureDynasties(): Promise<DynastyEntry[]> {
+export async function fetchAllFeatureDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
   const url = process.env.FEATURES_SERVICE_URL;
   if (!url) throw new Error("FEATURES_SERVICE_URL not configured");
   const data = await fetchJson<{ dynasties: DynastyEntry[] }>(
     `${url}/features/dynasties`,
-    process.env.FEATURES_SERVICE_API_KEY
+    process.env.FEATURES_SERVICE_API_KEY,
+    identity
   );
   return data.dynasties;
 }
