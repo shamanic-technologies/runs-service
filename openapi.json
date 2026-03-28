@@ -1392,7 +1392,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, featureDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Dynasty groupBy re-groups versioned slugs under their dynasty. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -1438,11 +1438,31 @@
           {
             "schema": {
               "type": "string",
+              "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service. Takes precedence over workflowSlug/workflowSlugs."
+            },
+            "required": false,
+            "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service. Takes precedence over workflowSlug/workflowSlugs.",
+            "name": "workflowDynastySlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "description": "Filter by feature slug"
             },
             "required": false,
             "description": "Filter by feature slug",
             "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug."
+            },
+            "required": false,
+            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug.",
+            "name": "featureDynastySlug",
             "in": "query"
           },
           {
@@ -1611,7 +1631,7 @@
     "/v1/stats/public/costs": {
       "get": {
         "summary": "Public cost aggregation (no auth)",
-        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
+        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
         "parameters": [
           {
             "schema": {
@@ -1622,7 +1642,9 @@
                 "campaignId",
                 "featureSlug",
                 "serviceName",
-                "costName"
+                "costName",
+                "workflowDynastySlug",
+                "featureDynastySlug"
               ]
             },
             "required": true,
@@ -1660,6 +1682,26 @@
             },
             "required": false,
             "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug."
+            },
+            "required": false,
+            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug.",
+            "name": "featureDynastySlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service."
+            },
+            "required": false,
+            "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service.",
+            "name": "workflowDynastySlug",
             "in": "query"
           },
           {

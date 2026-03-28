@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders, TEST_ORG_ID } from "../helpers/test-app.js";
 import {
@@ -7,6 +7,7 @@ import {
   insertTestRunCost,
   closeDb,
 } from "../helpers/test-db.js";
+import * as dynastyResolver from "../../src/services/dynasty-resolver.js";
 
 describe("Stats endpoints", () => {
   const app = createTestApp();
@@ -14,6 +15,10 @@ describe("Stats endpoints", () => {
 
   beforeEach(async () => {
     await cleanTestData();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   afterAll(async () => {
@@ -876,6 +881,412 @@ describe("Stats endpoints", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toBeDefined();
+    });
+  });
+
+  describe("Dynasty slug filtering — GET /v1/stats/costs", () => {
+    it("filters by workflowDynastySlug (resolved to versioned slugs)", async () => {
+      vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([
+        "cold-email",
+        "cold-email-v2",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email-v2",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "unrelated-workflow",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowDynastySlug=cold-email")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+      const slugs = res.body.groups.map((g: any) => g.dimensions.workflowSlug).sort();
+      expect(slugs).toEqual(["cold-email", "cold-email-v2"]);
+    });
+
+    it("filters by featureDynastySlug (resolved to versioned slugs)", async () => {
+      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
+        "feat-alpha",
+        "feat-alpha-v2",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha-v2",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "unrelated-feature",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureSlug&featureDynastySlug=feat-alpha")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+      const slugs = res.body.groups.map((g: any) => g.dimensions.featureSlug).sort();
+      expect(slugs).toEqual(["feat-alpha", "feat-alpha-v2"]);
+    });
+
+    it("returns empty stats when dynasty resolves to empty list", async () => {
+      vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([]);
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "some-wf",
+      });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowDynastySlug=nonexistent-dynasty")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toEqual([]);
+    });
+
+    it("workflowDynastySlug takes precedence over workflowSlug and workflowSlugs", async () => {
+      vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([
+        "dynasty-wf",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "dynasty-wf",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "other-wf",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowDynastySlug=dynasty-wf&workflowSlug=other-wf&workflowSlugs=other-wf")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.workflowSlug).toBe("dynasty-wf");
+    });
+
+    it("combines dynasty filter with other filters", async () => {
+      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
+        "feat-a",
+        "feat-a-v2",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-a",
+        brandId: "brand-x",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-a-v2",
+        brandId: "brand-y",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureSlug&featureDynastySlug=feat-a&brandId=brand-x")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.featureSlug).toBe("feat-a");
+    });
+  });
+
+  describe("Dynasty slug groupBy — GET /v1/stats/costs", () => {
+    it("groups by workflowDynastySlug (merges versioned slugs)", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllWorkflowDynasties").mockResolvedValue([
+        { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
+        { dynastySlug: "warm-intro", slugs: ["warm-intro"] },
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email-v2",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "warm-intro",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowDynastySlug")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+
+      const coldEmail = res.body.groups.find((g: any) => g.dimensions.workflowDynastySlug === "cold-email");
+      const warmIntro = res.body.groups.find((g: any) => g.dimensions.workflowDynastySlug === "warm-intro");
+
+      expect(coldEmail).toBeDefined();
+      expect(coldEmail.totalCostInUsdCents).toBe("0.3000000000");
+      expect(coldEmail.runCount).toBe(2);
+
+      expect(warmIntro).toBeDefined();
+      expect(warmIntro.totalCostInUsdCents).toBe("0.3000000000");
+      expect(warmIntro.runCount).toBe(1);
+    });
+
+    it("groups by featureDynastySlug (merges versioned slugs)", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllFeatureDynasties").mockResolvedValue([
+        { dynastySlug: "feat-alpha", slugs: ["feat-alpha", "feat-alpha-v2"] },
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha-v2",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureDynastySlug")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.featureDynastySlug).toBe("feat-alpha");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("orphan slugs (not in any dynasty) fall back to raw slug value", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllWorkflowDynasties").mockResolvedValue([
+        { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "orphan-workflow",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=workflowDynastySlug")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+
+      const coldEmail = res.body.groups.find((g: any) => g.dimensions.workflowDynastySlug === "cold-email");
+      const orphan = res.body.groups.find((g: any) => g.dimensions.workflowDynastySlug === "orphan-workflow");
+
+      expect(coldEmail).toBeDefined();
+      expect(orphan).toBeDefined();
+      expect(orphan.totalCostInUsdCents).toBe("0.2000000000");
+    });
+  });
+
+  describe("Dynasty slug — GET /v1/stats/public/costs", () => {
+    it("groups by workflowDynastySlug", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllWorkflowDynasties").mockResolvedValue([
+        { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        workflowSlug: "cold-email-v2",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "workflowDynastySlug" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.workflowDynastySlug).toBe("cold-email");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("groups by featureDynastySlug", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllFeatureDynasties").mockResolvedValue([
+        { dynastySlug: "feat-alpha", slugs: ["feat-alpha", "feat-alpha-v2"] },
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-alpha-v2",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureDynastySlug" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.featureDynastySlug).toBe("feat-alpha");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+    });
+
+    it("filters by featureDynastySlug", async () => {
+      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
+        "feat-a",
+        "feat-a-v2",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-a",
+        brandId: "brand-x",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-a-v2",
+        brandId: "brand-x",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "unrelated",
+        brandId: "brand-x",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId", featureDynastySlug: "feat-a" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].runCount).toBe(2);
+    });
+
+    it("returns empty when dynasty resolves to empty list (public)", async () => {
+      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([]);
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "something",
+      });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId", featureDynastySlug: "nonexistent" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toEqual([]);
     });
   });
 
