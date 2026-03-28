@@ -215,21 +215,21 @@ describe("Runs CRUD", () => {
       expect(res.body.campaignId).toBe("campaign_1");
     });
 
-    it("stores workflowName when provided", async () => {
+    it("stores workflowSlug when provided", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          workflowName: "sales-cold-email-v1",
+          workflowSlug: "sales-cold-email-v1",
           serviceName: "svc",
           taskName: "task",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.workflowName).toBe("sales-cold-email-v1");
+      expect(res.body.workflowSlug).toBe("sales-cold-email-v1");
     });
 
-    it("workflowName defaults to null", async () => {
+    it("workflowSlug defaults to null", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
@@ -239,17 +239,17 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.workflowName).toBeNull();
+      expect(res.body.workflowSlug).toBeNull();
     });
 
-    it("inherits workflowName, brandId, campaignId from parent", async () => {
+    it("inherits workflowSlug, brandId, campaignId from parent", async () => {
       const parent = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
         brandId: "inherited-brand",
         campaignId: "inherited-campaign",
-        workflowName: "inherited-workflow",
+        workflowSlug: "inherited-workflow",
       });
 
       const res = await request(app)
@@ -263,7 +263,7 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("inherited-brand");
       expect(res.body.campaignId).toBe("inherited-campaign");
-      expect(res.body.workflowName).toBe("inherited-workflow");
+      expect(res.body.workflowSlug).toBe("inherited-workflow");
     });
 
     it("returns 409 when body values conflict with parent", async () => {
@@ -274,7 +274,7 @@ describe("Runs CRUD", () => {
         taskName: "parent-task",
         brandId: "parent-brand",
         campaignId: "parent-campaign",
-        workflowName: "parent-workflow",
+        workflowSlug: "parent-workflow",
       });
 
       const res = await request(app)
@@ -285,7 +285,7 @@ describe("Runs CRUD", () => {
           taskName: "child-task",
           brandId: "child-brand",
           campaignId: "child-campaign",
-          workflowName: "child-workflow",
+          workflowSlug: "child-workflow",
         });
 
       expect(res.status).toBe(409);
@@ -299,7 +299,7 @@ describe("Runs CRUD", () => {
         userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        workflowName: "parent-workflow",
+        workflowSlug: "parent-workflow",
       });
 
       const res = await request(app)
@@ -307,7 +307,7 @@ describe("Runs CRUD", () => {
         .set({
           ...authHeaders,
           "x-run-id": parent.id,
-          "x-workflow-name": "different-workflow",
+          "x-workflow-slug": "different-workflow",
         })
         .send({
           serviceName: "child-svc",
@@ -316,7 +316,7 @@ describe("Runs CRUD", () => {
 
       expect(res.status).toBe(409);
       expect(res.body.conflicts).toEqual(
-        expect.arrayContaining([expect.stringContaining("workflowName")])
+        expect.arrayContaining([expect.stringContaining("workflowSlug")])
       );
     });
 
@@ -350,7 +350,7 @@ describe("Runs CRUD", () => {
         taskName: "parent-task",
         brandId: "same-brand",
         campaignId: "same-campaign",
-        workflowName: "same-workflow",
+        workflowSlug: "same-workflow",
       });
 
       const res = await request(app)
@@ -360,7 +360,7 @@ describe("Runs CRUD", () => {
           "x-run-id": parent.id,
           "x-brand-id": "same-brand",
           "x-campaign-id": "same-campaign",
-          "x-workflow-name": "same-workflow",
+          "x-workflow-slug": "same-workflow",
         })
         .send({
           serviceName: "child-svc",
@@ -371,14 +371,14 @@ describe("Runs CRUD", () => {
       expect(res.body.brandId).toBe("same-brand");
     });
 
-    it("uses x-brand-id, x-campaign-id, x-workflow-name headers as fallback", async () => {
+    it("uses x-brand-id, x-campaign-id, x-workflow-slug headers as fallback", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set({
           ...authHeaders,
           "x-brand-id": "header-brand",
           "x-campaign-id": "header-campaign",
-          "x-workflow-name": "header-workflow",
+          "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "svc",
@@ -388,7 +388,7 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("header-brand");
       expect(res.body.campaignId).toBe("header-campaign");
-      expect(res.body.workflowName).toBe("header-workflow");
+      expect(res.body.workflowSlug).toBe("header-workflow");
     });
 
     it("header values take precedence over body values", async () => {
@@ -398,20 +398,20 @@ describe("Runs CRUD", () => {
           ...authHeaders,
           "x-brand-id": "header-brand",
           "x-campaign-id": "header-campaign",
-          "x-workflow-name": "header-workflow",
+          "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "svc",
           taskName: "task",
           brandId: "body-brand",
           campaignId: "body-campaign",
-          workflowName: "body-workflow",
+          workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("header-brand");
       expect(res.body.campaignId).toBe("header-campaign");
-      expect(res.body.workflowName).toBe("header-workflow");
+      expect(res.body.workflowSlug).toBe("header-workflow");
     });
 
     it("body values fill in gaps when header has partial values", async () => {
@@ -426,13 +426,13 @@ describe("Runs CRUD", () => {
           taskName: "task",
           brandId: "body-brand",
           campaignId: "body-campaign",
-          workflowName: "body-workflow",
+          workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("header-brand");
       expect(res.body.campaignId).toBe("body-campaign");
-      expect(res.body.workflowName).toBe("body-workflow");
+      expect(res.body.workflowSlug).toBe("body-workflow");
     });
 
     it("headers do not break existing behavior when absent", async () => {
@@ -447,7 +447,7 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBeNull();
       expect(res.body.campaignId).toBeNull();
-      expect(res.body.workflowName).toBeNull();
+      expect(res.body.workflowSlug).toBeNull();
     });
 
     it("no inheritance when parent has null values", async () => {
@@ -468,7 +468,7 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBeNull();
       expect(res.body.campaignId).toBeNull();
-      expect(res.body.workflowName).toBeNull();
+      expect(res.body.workflowSlug).toBeNull();
     });
 
     it("stores featureSlug from x-feature-slug header", async () => {
@@ -1243,27 +1243,27 @@ describe("Runs CRUD", () => {
       expect(res.body.runs[0].ownProvisionedCostInUsdCents).toBe("0.2000000000");
     });
 
-    it("filters by workflowName", async () => {
+    it("filters by workflowSlug", async () => {
       await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "sales-cold-email-v1",
+        workflowSlug: "sales-cold-email-v1",
       });
       await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "journalist-outreach-v2",
+        workflowSlug: "journalist-outreach-v2",
       });
 
       const res = await request(app)
-        .get("/v1/runs?workflowName=sales-cold-email-v1")
+        .get("/v1/runs?workflowSlug=sales-cold-email-v1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.runs).toHaveLength(1);
-      expect(res.body.runs[0].workflowName).toBe("sales-cold-email-v1");
+      expect(res.body.runs[0].workflowSlug).toBe("sales-cold-email-v1");
     });
   });
 

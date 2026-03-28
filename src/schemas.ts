@@ -40,7 +40,7 @@ export const RunSchema = z
     userId: z.string().uuid().nullable(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
-    workflowName: z.string().nullable(),
+    workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
@@ -63,7 +63,7 @@ export const CreateRunRequestSchema = z
   .object({
     brandId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header instead. Kept for backwards compatibility; header takes precedence." }),
     campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
-    workflowName: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-name header instead. Kept for backwards compatibility; header takes precedence." }),
+    workflowSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
@@ -154,7 +154,7 @@ export const RunWithCostsSchema = z
     userId: z.string().uuid().nullable(),
     brandId: z.string().nullable(),
     campaignId: z.string().nullable(),
-    workflowName: z.string().nullable(),
+    workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
@@ -199,7 +199,7 @@ export const HealthResponseSchema = z
 const WorkflowTrackingHeadersSchema = z.object({
   "x-brand-id": z.string().optional().openapi({ description: "Brand identifier, injected by workflow-service" }),
   "x-campaign-id": z.string().optional().openapi({ description: "Campaign identifier, injected by workflow-service" }),
-  "x-workflow-name": z.string().optional().openapi({ description: "Workflow name, injected by workflow-service" }),
+  "x-workflow-slug": z.string().optional().openapi({ description: "Workflow slug, injected by workflow-service" }),
   "x-feature-slug": z.string().optional().openapi({ description: "Feature slug from features-service, injected by campaign-service" }),
 });
 
@@ -240,7 +240,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowName differ from the parent run.",
+    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowSlug differ from the parent run.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -277,7 +277,7 @@ registry.registerPath({
       userId: z.string().uuid().optional(),
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
-      workflowName: z.string().optional(),
+      workflowSlug: z.string().optional(),
       featureSlug: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
@@ -328,7 +328,7 @@ registry.registerPath({
   path: "/v1/runs/{id}/costs",
   summary: "Add costs to a run",
   description:
-    "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-name headers are forwarded to downstream services.",
+    "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-slug headers are forwarded to downstream services.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -430,8 +430,8 @@ registry.registerPath({
 export const StatsFiltersSchema = z.object({
   brandId: z.string().optional(),
   campaignId: z.string().optional(),
-  workflowName: z.string().optional().openapi({ description: "Filter by a single workflow name" }),
-  workflowNames: z.string().optional().openapi({ description: "Filter by multiple workflow names (comma-separated). Takes precedence over workflowName when both are provided." }),
+  workflowSlug: z.string().optional().openapi({ description: "Filter by a single workflow slug" }),
+  workflowSlugs: z.string().optional().openapi({ description: "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided." }),
   featureSlug: z.string().optional().openapi({ description: "Filter by feature slug" }),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
@@ -469,7 +469,7 @@ export const BudgetRequestSchema = z
   .object({
     campaignId: z.string().optional(),
     brandId: z.string().optional(),
-    workflowName: z.string().optional(),
+    workflowSlug: z.string().optional(),
     featureSlug: z.string().optional(),
     windows: z.array(BudgetWindowSchema).min(1).max(10),
   })
@@ -519,7 +519,7 @@ export const ChildrenSummaryResponseSchema = z
 
 export const PublicCostsQuerySchema = z
   .object({
-    groupBy: z.enum(["brandId", "workflowName", "campaignId", "featureSlug", "serviceName", "costName"]),
+    groupBy: z.enum(["brandId", "workflowSlug", "campaignId", "featureSlug", "serviceName", "costName"]),
     orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
@@ -535,7 +535,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Aggregate costs with GROUP BY",
   description:
-    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowName, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, serviceName, costName). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsCostsQuerySchema,
@@ -608,7 +608,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs",
   summary: "Public cost aggregation (no auth)",
   description:
-    "Returns aggregated costs across all organizations, grouped by brandId, workflowName, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
+    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, serviceName, or costName. Supports optional filters: orgId, brandId, campaignId, taskName. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
   },

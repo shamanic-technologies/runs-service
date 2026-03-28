@@ -41,7 +41,7 @@ export interface CostResolverContext {
   runId?: string;
   brandId?: string;
   campaignId?: string;
-  workflowName?: string;
+  workflowSlug?: string;
   featureSlug?: string;
 }
 
@@ -52,7 +52,7 @@ export async function resolveUnitCost(name: string, ctx: CostResolverContext): P
   if (ctx.runId) headers["x-run-id"] = ctx.runId;
   if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
   if (ctx.campaignId) headers["x-campaign-id"] = ctx.campaignId;
-  if (ctx.workflowName) headers["x-workflow-name"] = ctx.workflowName;
+  if (ctx.workflowSlug) headers["x-workflow-slug"] = ctx.workflowSlug;
   if (ctx.featureSlug) headers["x-feature-slug"] = ctx.featureSlug;
   if (COSTS_SERVICE_API_KEY) {
     headers["X-API-Key"] = COSTS_SERVICE_API_KEY;

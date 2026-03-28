@@ -66,11 +66,11 @@ describe("Platform Runs", () => {
         .send({
           serviceName: "workflow-service",
           taskName: "upgrade-workflows",
-          workflowName: "auto-upgrade",
+          workflowSlug: "auto-upgrade",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.workflowName).toBe("auto-upgrade");
+      expect(res.body.workflowSlug).toBe("auto-upgrade");
     });
 
     it("rejects request without x-service-name header", async () => {
@@ -111,7 +111,7 @@ describe("Platform Runs", () => {
           ...platformHeaders,
           "x-brand-id": "header-brand",
           "x-campaign-id": "header-campaign",
-          "x-workflow-name": "header-workflow",
+          "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "workflow-service",
@@ -121,7 +121,7 @@ describe("Platform Runs", () => {
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("header-brand");
       expect(res.body.campaignId).toBe("header-campaign");
-      expect(res.body.workflowName).toBe("header-workflow");
+      expect(res.body.workflowSlug).toBe("header-workflow");
     });
 
     it("header values take precedence over body values for platform runs", async () => {
@@ -131,20 +131,20 @@ describe("Platform Runs", () => {
           ...platformHeaders,
           "x-brand-id": "header-brand",
           "x-campaign-id": "header-campaign",
-          "x-workflow-name": "header-workflow",
+          "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "workflow-service",
           taskName: "upgrade-workflows",
           brandId: "body-brand",
           campaignId: "body-campaign",
-          workflowName: "body-workflow",
+          workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
       expect(res.body.brandId).toBe("header-brand");
       expect(res.body.campaignId).toBe("header-campaign");
-      expect(res.body.workflowName).toBe("header-workflow");
+      expect(res.body.workflowSlug).toBe("header-workflow");
     });
 
     it("rejects invalid body", async () => {

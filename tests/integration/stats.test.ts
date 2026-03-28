@@ -98,14 +98,14 @@ describe("Stats endpoints", () => {
         serviceName: "svc-a",
         taskName: "task",
         brandId: "brand-f",
-        workflowName: "wf-1",
+        workflowSlug: "wf-1",
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc-b",
         taskName: "task",
         brandId: "brand-f",
-        workflowName: "wf-2",
+        workflowSlug: "wf-2",
       });
 
       await insertTestRunCost({
@@ -124,7 +124,7 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?groupBy=brandId&workflowName=wf-1")
+        .get("/v1/stats/costs?groupBy=brandId&workflowSlug=wf-1")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
@@ -132,24 +132,24 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].totalCostInUsdCents).toBe("0.1000000000");
     });
 
-    it("filters by workflowNames (comma-separated)", async () => {
+    it("filters by workflowSlugs (comma-separated)", async () => {
       const run1 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "wf-alpha",
+        workflowSlug: "wf-alpha",
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "wf-beta",
+        workflowSlug: "wf-beta",
       });
       const run3 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "wf-gamma",
+        workflowSlug: "wf-gamma",
       });
 
       await insertTestRunCost({
@@ -175,27 +175,27 @@ describe("Stats endpoints", () => {
       });
 
       const res = await request(app)
-        .get("/v1/stats/costs?groupBy=workflowName&workflowNames=wf-alpha,wf-beta")
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowSlugs=wf-alpha,wf-beta")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toHaveLength(2);
-      const names = res.body.groups.map((g: any) => g.dimensions.workflowName).sort();
+      const names = res.body.groups.map((g: any) => g.dimensions.workflowSlug).sort();
       expect(names).toEqual(["wf-alpha", "wf-beta"]);
     });
 
-    it("workflowNames takes precedence over workflowName", async () => {
+    it("workflowSlugs takes precedence over workflowSlug", async () => {
       const run1 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "wf-alpha",
+        workflowSlug: "wf-alpha",
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        workflowName: "wf-beta",
+        workflowSlug: "wf-beta",
       });
 
       await insertTestRunCost({
@@ -213,14 +213,14 @@ describe("Stats endpoints", () => {
         totalCostInUsdCents: "0.2000000000",
       });
 
-      // Both workflowName and workflowNames provided — workflowNames wins
+      // Both workflowSlug and workflowSlugs provided — workflowSlugs wins
       const res = await request(app)
-        .get("/v1/stats/costs?groupBy=workflowName&workflowName=wf-alpha&workflowNames=wf-beta")
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowSlug=wf-alpha&workflowSlugs=wf-beta")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.workflowName).toBe("wf-beta");
+      expect(res.body.groups[0].dimensions.workflowSlug).toBe("wf-beta");
     });
 
     it("returns empty when org has no runs", async () => {
