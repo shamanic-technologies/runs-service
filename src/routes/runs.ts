@@ -21,6 +21,7 @@ import {
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
   UpdateCostRequestSchema,
+  BatchCostsRequestSchema,
 } from "../schemas.js";
 
 const router = Router();
@@ -149,6 +150,55 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     res.status(201).json(created);
   } catch (err) {
     console.error("[Runs Service] Error creating run:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /v1/runs/costs/batch — batch cost lookup by run IDs
+router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
+  try {
+    const parsed = BatchCostsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const { runIds } = parsed.data;
+
+    // Single recursive CTE: find each requested run + all its descendants,
+    // tracking which root run ID each row belongs to.
+    const result = await db.execute(
+      sql`WITH RECURSIVE descendants AS (
+        SELECT id, id as root_run_id
+        FROM runs
+        WHERE id IN (${sql.join(runIds.map((id) => sql`${id}`), sql`, `)})
+          AND organization_id = ${req.orgId}
+        UNION ALL
+        SELECT r.id, d.root_run_id
+        FROM runs r
+        INNER JOIN descendants d ON r.parent_run_id = d.id
+      )
+      SELECT
+        d.root_run_id,
+        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
+        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
+        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost
+      FROM descendants d
+      LEFT JOIN runs_costs rc ON rc.run_id = d.id
+      GROUP BY d.root_run_id`
+    );
+
+    const rows = result as any[];
+    const costs = rows.map((row) => ({
+      runId: row.root_run_id,
+      totalCostInUsdCents: Number(row.total_cost).toFixed(10),
+      actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
+      provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
+    }));
+
+    res.json({ costs });
+  } catch (err) {
+    console.error("[Runs Service] Error in POST /v1/runs/costs/batch:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
