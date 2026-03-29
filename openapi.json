@@ -563,6 +563,60 @@
           "status"
         ]
       },
+      "BatchCostsResponse": {
+        "type": "object",
+        "properties": {
+          "costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchCostsEntry"
+            }
+          }
+        },
+        "required": [
+          "costs"
+        ]
+      },
+      "BatchCostsEntry": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "totalCostInUsdCents": {
+            "type": "string"
+          },
+          "actualCostInUsdCents": {
+            "type": "string"
+          },
+          "provisionedCostInUsdCents": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "totalCostInUsdCents",
+          "actualCostInUsdCents",
+          "provisionedCostInUsdCents"
+        ]
+      },
+      "BatchCostsRequest": {
+        "type": "object",
+        "properties": {
+          "runIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "runIds"
+        ]
+      },
       "UpdateRunRequest": {
         "type": "object",
         "properties": {
@@ -1385,6 +1439,51 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/runs/costs/batch": {
+      "post": {
+        "summary": "Batch cost lookup by run IDs",
+        "description": "Returns aggregated cost totals (including all descendant costs) for a list of run IDs. Runs not found are omitted from the response. Uses a single recursive CTE for efficiency.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCostsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cost totals per run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchCostsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

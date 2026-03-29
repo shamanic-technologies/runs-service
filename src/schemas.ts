@@ -125,6 +125,29 @@ export const UpdateCostRequestSchema = z
 
 export type UpdateCostRequest = z.infer<typeof UpdateCostRequestSchema>;
 
+export const BatchCostsRequestSchema = z
+  .object({
+    runIds: z.array(z.string().uuid()).min(1),
+  })
+  .openapi("BatchCostsRequest");
+
+export type BatchCostsRequest = z.infer<typeof BatchCostsRequestSchema>;
+
+export const BatchCostsEntrySchema = z
+  .object({
+    runId: z.string().uuid(),
+    totalCostInUsdCents: z.string(),
+    actualCostInUsdCents: z.string(),
+    provisionedCostInUsdCents: z.string(),
+  })
+  .openapi("BatchCostsEntry");
+
+export const BatchCostsResponseSchema = z
+  .object({
+    costs: z.array(BatchCostsEntrySchema),
+  })
+  .openapi("BatchCostsResponse");
+
 export const AddCostsResponseSchema = z
   .object({
     costs: z.array(CostSchema),
@@ -390,6 +413,31 @@ registry.registerPath({
       description: "Run or cost not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/runs/costs/batch",
+  summary: "Batch cost lookup by run IDs",
+  description:
+    "Returns aggregated cost totals (including all descendant costs) for a list of run IDs. Runs not found are omitted from the response. Uses a single recursive CTE for efficiency.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: BatchCostsRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Cost totals per run",
+      content: { "application/json": { schema: BatchCostsResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
   },
 });
 
