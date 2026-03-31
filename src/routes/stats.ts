@@ -575,7 +575,7 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, featureSlug, featureDynastySlug, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, featureDynastySlug, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
 
       if (!groupBy || !ALL_PUBLIC_GROUP_BY[groupBy]) {
         res.status(400).json({
@@ -610,6 +610,8 @@ function handlePublicCosts(req: any, res: any) {
           return;
         }
         featureSlugs = resolved;
+      } else if (featureSlugsParam) {
+        featureSlugs = featureSlugsParam.split(",").map((s) => s.trim()).filter(Boolean);
       }
       if (workflowDynastySlug) {
         const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug, identity);
