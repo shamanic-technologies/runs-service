@@ -199,19 +199,19 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(400);
     });
 
-    it("stores optional brandId and campaignId", async () => {
+    it("stores optional brandIds and campaignId", async () => {
       const res = await request(app)
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          brandId: "brand_1",
+          brandIds: ["brand_1"],
           campaignId: "campaign_1",
           serviceName: "svc",
           taskName: "task",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("brand_1");
+      expect(res.body.brandIds).toEqual(["brand_1"]);
       expect(res.body.campaignId).toBe("campaign_1");
     });
 
@@ -242,12 +242,12 @@ describe("Runs CRUD", () => {
       expect(res.body.workflowSlug).toBeNull();
     });
 
-    it("inherits workflowSlug, brandId, campaignId from parent", async () => {
+    it("inherits workflowSlug, brandIds, campaignId from parent", async () => {
       const parent = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandId: "inherited-brand",
+        brandIds: ["inherited-brand"],
         campaignId: "inherited-campaign",
         workflowSlug: "inherited-workflow",
       });
@@ -261,7 +261,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("inherited-brand");
+      expect(res.body.brandIds).toEqual(["inherited-brand"]);
       expect(res.body.campaignId).toBe("inherited-campaign");
       expect(res.body.workflowSlug).toBe("inherited-workflow");
     });
@@ -272,7 +272,7 @@ describe("Runs CRUD", () => {
         userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandId: "parent-brand",
+        brandIds: ["parent-brand"],
         campaignId: "parent-campaign",
         workflowSlug: "parent-workflow",
       });
@@ -283,7 +283,7 @@ describe("Runs CRUD", () => {
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          brandId: "child-brand",
+          brandIds: ["child-brand"],
           campaignId: "child-campaign",
           workflowSlug: "child-workflow",
         });
@@ -348,7 +348,7 @@ describe("Runs CRUD", () => {
         userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandId: "same-brand",
+        brandIds: ["same-brand"],
         campaignId: "same-campaign",
         workflowSlug: "same-workflow",
       });
@@ -368,7 +368,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("same-brand");
+      expect(res.body.brandIds).toEqual(["same-brand"]);
     });
 
     it("uses x-brand-id, x-campaign-id, x-workflow-slug headers as fallback", async () => {
@@ -386,7 +386,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.brandIds).toEqual(["header-brand"]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -403,13 +403,13 @@ describe("Runs CRUD", () => {
         .send({
           serviceName: "svc",
           taskName: "task",
-          brandId: "body-brand",
+          brandIds: ["body-brand"],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.brandIds).toEqual(["header-brand"]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -424,13 +424,13 @@ describe("Runs CRUD", () => {
         .send({
           serviceName: "svc",
           taskName: "task",
-          brandId: "body-brand",
+          brandIds: ["body-brand"],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.brandIds).toEqual(["header-brand"]);
       expect(res.body.campaignId).toBe("body-campaign");
       expect(res.body.workflowSlug).toBe("body-workflow");
     });
@@ -445,7 +445,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBeNull();
+      expect(res.body.brandIds).toBeNull();
       expect(res.body.campaignId).toBeNull();
       expect(res.body.workflowSlug).toBeNull();
     });
@@ -466,9 +466,57 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBeNull();
+      expect(res.body.brandIds).toBeNull();
       expect(res.body.campaignId).toBeNull();
       expect(res.body.workflowSlug).toBeNull();
+    });
+
+    it("parses multi-brand CSV from x-brand-id header", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "brand-1,brand-2,brand-3",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandIds).toEqual(["brand-1", "brand-2", "brand-3"]);
+    });
+
+    it("trims whitespace in multi-brand CSV header", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": " brand-1 , brand-2 ",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandIds).toEqual(["brand-1", "brand-2"]);
+    });
+
+    it("single brand in x-brand-id header stores as single-element array", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "only-brand",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.brandIds).toEqual(["only-brand"]);
     });
 
     it("stores featureSlug from x-feature-slug header", async () => {

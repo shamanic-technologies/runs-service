@@ -17,13 +17,24 @@ const router = Router();
 
 // --- Validated allowlist for GROUP BY columns ---
 
+// Maps groupBy keys to their SQL expression. For brandId we unnest the array.
 const GROUP_BY_COLUMNS: Record<string, string> = {
-  brandId: "r.brand_id",
+  brandId: "unnest(r.brand_ids)",
   workflowSlug: "r.workflow_slug",
   campaignId: "r.campaign_id",
   featureSlug: "r.feature_slug",
   serviceName: "r.service_name",
   costName: "rc.cost_name",
+};
+
+// Maps groupBy keys to the result column name in the SQL result row.
+const RESULT_COL_NAMES: Record<string, string> = {
+  brandId: "unnest",
+  workflowSlug: "workflow_slug",
+  campaignId: "campaign_id",
+  featureSlug: "feature_slug",
+  serviceName: "service_name",
+  costName: "cost_name",
 };
 
 // Dynasty groupBy keys map to their underlying DB column
@@ -56,7 +67,7 @@ function buildFilterSql(
 ) {
   const parts = [sql`r.organization_id = ${orgId}`];
 
-  if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
+  if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
 
   // Feature slug filtering: resolved dynasty slugs > single slug
@@ -270,8 +281,8 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     let groups: AggRow[] = rows.map((row) => {
       const dimensions: Record<string, string | null> = {};
       for (const key of uniqueSqlGroupByKeys) {
-        const dbCol = GROUP_BY_COLUMNS[key].replace(/^r\.|^rc\./, "");
-        dimensions[key] = row[dbCol] ?? null;
+        const resultCol = RESULT_COL_NAMES[key] ?? GROUP_BY_COLUMNS[key].replace(/^r\.|^rc\./, "");
+        dimensions[key] = row[resultCol] ?? null;
       }
       const group: AggRow = {
         dimensions,
@@ -322,7 +333,7 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
     // Build base WHERE conditions
     const filterParts = [sql`r.organization_id = ${req.orgId}`];
     if (campaignId) filterParts.push(sql`r.campaign_id = ${campaignId}`);
-    if (brandId) filterParts.push(sql`r.brand_id = ${brandId}`);
+    if (brandId) filterParts.push(sql`${brandId} = ANY(r.brand_ids)`);
     if (workflowSlug) filterParts.push(sql`r.workflow_slug = ${workflowSlug}`);
     if (featureSlug) filterParts.push(sql`r.feature_slug = ${featureSlug}`);
 
@@ -504,12 +515,21 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
 // --- Public costs endpoint ---
 
 const PUBLIC_GROUP_BY_COLUMNS: Record<string, string> = {
-  brandId: "r.brand_id",
+  brandId: "unnest(r.brand_ids)",
   workflowSlug: "r.workflow_slug",
   campaignId: "r.campaign_id",
   featureSlug: "r.feature_slug",
   serviceName: "r.service_name",
   costName: "rc.cost_name",
+};
+
+const PUBLIC_RESULT_COL_NAMES: Record<string, string> = {
+  brandId: "unnest",
+  workflowSlug: "workflow_slug",
+  campaignId: "campaign_id",
+  featureSlug: "feature_slug",
+  serviceName: "service_name",
+  costName: "cost_name",
 };
 
 const PUBLIC_DYNASTY_GROUP_BY: Record<string, string> = {
@@ -533,7 +553,7 @@ function buildPublicFilterSql(filters: {
 }) {
   const parts: ReturnType<typeof sql>[] = [];
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
-  if (filters.brandId) parts.push(sql`r.brand_id = ${filters.brandId}`);
+  if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
 
   if (filters.featureSlugs && filters.featureSlugs.length > 0) {
@@ -619,11 +639,11 @@ function handlePublicCosts(req: any, res: any) {
       `);
 
       const rows = result as any[];
-      const dbCol = col.replace(/^r\.|^rc\./, "");
+      const resultCol = PUBLIC_RESULT_COL_NAMES[actualGroupBy] ?? col.replace(/^r\.|^rc\./, "");
 
       let groups: AggRow[] = rows.map((row) => {
         const group: AggRow = {
-          dimensions: { [actualGroupBy]: row[dbCol] ?? null },
+          dimensions: { [actualGroupBy]: row[resultCol] ?? null },
           totalCostInUsdCents: Number(row.total_cost).toFixed(10),
           actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
           provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),

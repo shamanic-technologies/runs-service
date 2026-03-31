@@ -53,12 +53,12 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { brandId, campaignId, workflowSlug, featureSlug, serviceName, taskName } = parsed.data;
+    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName } = parsed.data;
     const parentRunId = req.runId || null;
 
     // Priority: header > body (deprecated) > parent inheritance
     // If parent has a different non-null value than the resolved one, reject with 409
-    let resolvedBrandId = req.headerBrandId || brandId || null;
+    let resolvedBrandIds = req.headerBrandIds || brandIds || null;
     let resolvedCampaignId = req.headerCampaignId || campaignId || null;
     let resolvedWorkflowSlug = req.headerWorkflowSlug || workflowSlug || null;
     let resolvedFeatureSlug = req.headerFeatureSlug || featureSlug || null;
@@ -68,7 +68,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     if (parentRunId) {
       const [parentRun] = await db
         .select({
-          brandId: runs.brandId,
+          brandIds: runs.brandIds,
           campaignId: runs.campaignId,
           workflowSlug: runs.workflowSlug,
           featureSlug: runs.featureSlug,
@@ -82,8 +82,12 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (parentRun) {
         // Conflict detection: if both parent and resolved value are non-null and differ, reject
         const conflicts: string[] = [];
-        if (resolvedBrandId && parentRun.brandId && resolvedBrandId !== parentRun.brandId) {
-          conflicts.push(`brandId: request="${resolvedBrandId}" vs parent="${parentRun.brandId}"`);
+        if (resolvedBrandIds && parentRun.brandIds) {
+          const sortedResolved = [...resolvedBrandIds].sort().join(",");
+          const sortedParent = [...parentRun.brandIds].sort().join(",");
+          if (sortedResolved !== sortedParent) {
+            conflicts.push(`brandIds: request="${resolvedBrandIds.join(",")}" vs parent="${parentRun.brandIds.join(",")}"`);
+          }
         }
         if (resolvedCampaignId && parentRun.campaignId && resolvedCampaignId !== parentRun.campaignId) {
           conflicts.push(`campaignId: request="${resolvedCampaignId}" vs parent="${parentRun.campaignId}"`);
@@ -111,7 +115,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
         }
 
         // Inherit from parent when resolved value is absent
-        if (!resolvedBrandId) resolvedBrandId = parentRun.brandId;
+        if (!resolvedBrandIds) resolvedBrandIds = parentRun.brandIds;
         if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
         if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
         if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
@@ -122,7 +126,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     const values = {
       organizationId: resolvedOrgId,
       userId: resolvedUserId,
-      brandId: resolvedBrandId,
+      brandIds: resolvedBrandIds,
       campaignId: resolvedCampaignId,
       workflowSlug: resolvedWorkflowSlug,
       featureSlug: resolvedFeatureSlug,
@@ -334,7 +338,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         orgId: req.orgId,
         userId: req.userId || (run.userId ?? undefined),
         runId: req.runId || id,
-        brandId: req.headerBrandId,
+        brandIds: req.headerBrandIds,
         campaignId: req.headerCampaignId,
         workflowSlug: req.headerWorkflowSlug,
         featureSlug: req.headerFeatureSlug,
@@ -380,7 +384,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       orgId: req.orgId,
       userId: billingUserId!,
       runId: id,
-      brandId: req.headerBrandId,
+      brandIds: req.headerBrandIds,
       campaignId: req.headerCampaignId,
       workflowSlug: req.headerWorkflowSlug,
       featureSlug: req.headerFeatureSlug,
@@ -509,7 +513,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         orgId: req.orgId,
         userId: billingUserId,
         runId: id,
-        brandId: req.headerBrandId,
+        brandIds: req.headerBrandIds,
         campaignId: req.headerCampaignId,
         workflowSlug: req.headerWorkflowSlug,
         featureSlug: req.headerFeatureSlug,
@@ -605,7 +609,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     const conditions = [eq(runs.organizationId, req.orgId)];
 
     if (userId) conditions.push(eq(runs.userId, userId as string));
-    if (brandId) conditions.push(eq(runs.brandId, brandId as string));
+    if (brandId) conditions.push(sql`${brandId} = ANY(${runs.brandIds})`);
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
     if (workflowSlug) conditions.push(eq(runs.workflowSlug, workflowSlug as string));
     if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
@@ -629,7 +633,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         parentRunId: runs.parentRunId,
         organizationId: runs.organizationId,
         userId: runs.userId,
-        brandId: runs.brandId,
+        brandIds: runs.brandIds,
         campaignId: runs.campaignId,
         workflowSlug: runs.workflowSlug,
         featureSlug: runs.featureSlug,
@@ -652,7 +656,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         runs.parentRunId,
         runs.organizationId,
         runs.userId,
-        runs.brandId,
+        runs.brandIds,
         runs.campaignId,
         runs.workflowSlug,
         runs.featureSlug,
