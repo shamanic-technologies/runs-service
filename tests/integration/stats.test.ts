@@ -915,6 +915,105 @@ describe("Stats endpoints", () => {
       expect(res.status).toBe(200);
       expect(res.body.groups).toBeDefined();
     });
+
+    it("filters by featureSlugs (comma-separated)", async () => {
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "sales-cold-email",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "sales-cold-email-v2",
+      });
+      const run3 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "unrelated-feature",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+      await insertTestRunCost({
+        runId: run3.id,
+        costName: "token",
+        quantity: "300",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.3000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "workflowSlug", featureSlugs: "sales-cold-email,sales-cold-email-v2" });
+
+      expect(res.status).toBe(200);
+      // Should only include runs with the two feature slugs, not the unrelated one
+      const totalRunCount = res.body.groups.reduce((acc: number, g: any) => acc + g.runCount, 0);
+      expect(totalRunCount).toBe(2);
+    });
+
+    it("featureDynastySlug takes precedence over featureSlugs", async () => {
+      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
+        "dynasty-resolved-slug",
+      ]);
+
+      const run1 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "dynasty-resolved-slug",
+      });
+      const run2 = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "direct-slug",
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+
+      // When both featureDynastySlug and featureSlugs are provided, dynasty wins
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({
+          groupBy: "workflowSlug",
+          featureSlugs: "direct-slug",
+          featureDynastySlug: "some-dynasty",
+        });
+
+      expect(res.status).toBe(200);
+      const totalRunCount = res.body.groups.reduce((acc: number, g: any) => acc + g.runCount, 0);
+      expect(totalRunCount).toBe(1); // Only dynasty-resolved-slug matched
+    });
   });
 
   describe("Dynasty slug filtering — GET /v1/stats/costs", () => {

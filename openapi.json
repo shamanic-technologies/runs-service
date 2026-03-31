@@ -1744,7 +1744,7 @@
     "/v1/stats/public/costs": {
       "get": {
         "summary": "Public cost aggregation (no auth)",
-        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
+        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
         "parameters": [
           {
             "schema": {
@@ -1800,10 +1800,20 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug."
+              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this."
             },
             "required": false,
-            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug.",
+            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this.",
+            "name": "featureSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs."
+            },
+            "required": false,
+            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs.",
             "name": "featureDynastySlug",
             "in": "query"
           },

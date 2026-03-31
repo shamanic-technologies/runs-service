@@ -574,7 +574,8 @@ export const PublicCostsQuerySchema = z
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     featureSlug: z.string().optional(),
-    featureDynastySlug: z.string().optional().openapi({ description: "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug." }),
+    featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this." }),
+    featureDynastySlug: z.string().optional().openapi({ description: "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs." }),
     workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service." }),
     taskName: z.string().optional(),
   })
@@ -660,7 +661,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs",
   summary: "Public cost aggregation (no auth)",
   description:
-    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
+    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
   },
