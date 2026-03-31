@@ -17,7 +17,7 @@ describe("schemas", () => {
 
     it("accepts all optional fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        brandId: "brand_1",
+        brandIds: ["brand_1"],
         campaignId: "campaign_1",
         workflowSlug: "wf-1",
         serviceName: "my-agent",

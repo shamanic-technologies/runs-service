@@ -119,7 +119,7 @@ describe("Platform Runs", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.brandIds).toEqual(["header-brand"]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -136,13 +136,13 @@ describe("Platform Runs", () => {
         .send({
           serviceName: "workflow-service",
           taskName: "upgrade-workflows",
-          brandId: "body-brand",
+          brandIds: ["body-brand"],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandId).toBe("header-brand");
+      expect(res.body.brandIds).toEqual(["header-brand"]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });

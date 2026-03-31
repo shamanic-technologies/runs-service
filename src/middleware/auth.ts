@@ -9,7 +9,7 @@ declare global {
       userId?: string;
       runId?: string;
       platformServiceName?: string;
-      headerBrandId?: string;
+      headerBrandIds?: string[];
       headerCampaignId?: string;
       headerWorkflowSlug?: string;
       headerFeatureSlug?: string;
@@ -18,8 +18,11 @@ declare global {
 }
 
 function extractWorkflowHeaders(req: Request) {
-  const brandId = req.headers["x-brand-id"] as string | undefined;
-  if (brandId) req.headerBrandId = brandId;
+  const brandIdRaw = req.headers["x-brand-id"] as string | undefined;
+  if (brandIdRaw) {
+    const parsed = brandIdRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parsed.length > 0) req.headerBrandIds = parsed;
+  }
 
   const campaignId = req.headers["x-campaign-id"] as string | undefined;
   if (campaignId) req.headerCampaignId = campaignId;

@@ -64,9 +64,12 @@
             "nullable": true,
             "format": "uuid"
           },
-          "brandId": {
-            "type": "string",
-            "nullable": true
+          "brandIds": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
           },
           "campaignId": {
             "type": "string",
@@ -116,7 +119,7 @@
           "id",
           "organizationId",
           "userId",
-          "brandId",
+          "brandIds",
           "campaignId",
           "workflowSlug",
           "featureSlug",
@@ -147,11 +150,15 @@
       "CreateRunRequest": {
         "type": "object",
         "properties": {
-          "brandId": {
-            "type": "string",
-            "minLength": 1,
+          "brandIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
             "deprecated": true,
-            "description": "Deprecated: use x-brand-id header instead. Kept for backwards compatibility; header takes precedence."
+            "description": "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence."
           },
           "campaignId": {
             "type": "string",
@@ -250,9 +257,12 @@
             "nullable": true,
             "format": "uuid"
           },
-          "brandId": {
-            "type": "string",
-            "nullable": true
+          "brandIds": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
           },
           "campaignId": {
             "type": "string",
@@ -341,7 +351,7 @@
           "id",
           "organizationId",
           "userId",
-          "brandId",
+          "brandIds",
           "campaignId",
           "workflowSlug",
           "featureSlug",
@@ -923,10 +933,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Brand identifier, injected by workflow-service"
+              "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
+              "example": "uuid1,uuid2"
             },
             "required": false,
-            "description": "Brand identifier, injected by workflow-service",
+            "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
             "name": "x-brand-id",
             "in": "header"
           },
@@ -1274,10 +1285,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Brand identifier, injected by workflow-service"
+              "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
+              "example": "uuid1,uuid2"
             },
             "required": false,
-            "description": "Brand identifier, injected by workflow-service",
+            "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
             "name": "x-brand-id",
             "in": "header"
           },
@@ -1500,9 +1512,11 @@
         "parameters": [
           {
             "schema": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter by brand ID. Matches runs where this brand is in brandIds array."
             },
             "required": false,
+            "description": "Filter by brand ID. Matches runs where this brand is in brandIds array.",
             "name": "brandId",
             "in": "query"
           },
@@ -1849,10 +1863,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Brand identifier, injected by workflow-service"
+              "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
+              "example": "uuid1,uuid2"
             },
             "required": false,
-            "description": "Brand identifier, injected by workflow-service",
+            "description": "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service",
             "name": "x-brand-id",
             "in": "header"
           },

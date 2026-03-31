@@ -9,7 +9,7 @@ export async function insertTestRun(data: {
   organizationId: string;
   serviceName: string;
   taskName: string;
-  brandId?: string;
+  brandIds?: string[];
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
@@ -24,7 +24,7 @@ export async function insertTestRun(data: {
       organizationId: data.organizationId,
       serviceName: data.serviceName,
       taskName: data.taskName,
-      brandId: data.brandId || null,
+      brandIds: data.brandIds || null,
       campaignId: data.campaignId || null,
       workflowSlug: data.workflowSlug || null,
       featureSlug: data.featureSlug || null,

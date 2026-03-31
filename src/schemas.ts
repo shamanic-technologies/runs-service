@@ -38,7 +38,7 @@ export const RunSchema = z
     id: z.string().uuid(),
     organizationId: z.string().uuid().nullable(),
     userId: z.string().uuid().nullable(),
-    brandId: z.string().nullable(),
+    brandIds: z.array(z.string()).nullable(),
     campaignId: z.string().nullable(),
     workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
@@ -61,7 +61,7 @@ export const RunWithOwnCostSchema = RunSchema.extend({
 
 export const CreateRunRequestSchema = z
   .object({
-    brandId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header instead. Kept for backwards compatibility; header takes precedence." }),
+    brandIds: z.array(z.string().min(1)).min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence." }),
     campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
     workflowSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
@@ -175,7 +175,7 @@ export const RunWithCostsSchema = z
     id: z.string().uuid(),
     organizationId: z.string().uuid().nullable(),
     userId: z.string().uuid().nullable(),
-    brandId: z.string().nullable(),
+    brandIds: z.array(z.string()).nullable(),
     campaignId: z.string().nullable(),
     workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
@@ -220,7 +220,7 @@ export const HealthResponseSchema = z
 // --- Workflow tracking headers (optional, injected by workflow-service) ---
 
 const WorkflowTrackingHeadersSchema = z.object({
-  "x-brand-id": z.string().optional().openapi({ description: "Brand identifier, injected by workflow-service" }),
+  "x-brand-id": z.string().optional().openapi({ description: "Brand identifier(s) as CSV (e.g. uuid1,uuid2), injected by workflow-service", example: "uuid1,uuid2" }),
   "x-campaign-id": z.string().optional().openapi({ description: "Campaign identifier, injected by workflow-service" }),
   "x-workflow-slug": z.string().optional().openapi({ description: "Workflow slug, injected by workflow-service" }),
   "x-feature-slug": z.string().optional().openapi({ description: "Feature slug from features-service, injected by campaign-service" }),
@@ -476,7 +476,7 @@ registry.registerPath({
 // --- Stats schemas ---
 
 export const StatsFiltersSchema = z.object({
-  brandId: z.string().optional(),
+  brandId: z.string().optional().openapi({ description: "Filter by brand ID. Matches runs where this brand is in brandIds array." }),
   campaignId: z.string().optional(),
   workflowSlug: z.string().optional().openapi({ description: "Filter by a single workflow slug" }),
   workflowSlugs: z.string().optional().openapi({ description: "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided." }),

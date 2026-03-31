@@ -32,13 +32,13 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-a",
+        brandIds: ["brand-a"],
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-b",
+        brandIds: ["brand-b"],
       });
 
       await insertTestRunCost({
@@ -71,12 +71,45 @@ describe("Stats endpoints", () => {
       expect(brandB.runCount).toBe(1);
     });
 
+    it("unnests multi-brand runs when grouping by brandId", async () => {
+      // A run with two brands should appear in both brand groups
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        brandIds: ["brand-m1", "brand-m2"],
+      });
+
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=brandId")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+
+      const m1 = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-m1");
+      const m2 = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-m2");
+      expect(m1).toBeDefined();
+      expect(m2).toBeDefined();
+      // Each brand group gets the full cost (the run belongs to both brands)
+      expect(m1.totalCostInUsdCents).toBe("0.1000000000");
+      expect(m2.totalCostInUsdCents).toBe("0.1000000000");
+    });
+
     it("groups by multiple dimensions", async () => {
       const run1 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
-        brandId: "brand-x",
+        brandIds: ["brand-x"],
       });
 
       await insertTestRunCost({
@@ -102,14 +135,14 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
-        brandId: "brand-f",
+        brandIds: ["brand-f"],
         workflowSlug: "wf-1",
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc-b",
         taskName: "task",
-        brandId: "brand-f",
+        brandIds: ["brand-f"],
         workflowSlug: "wf-2",
       });
 
@@ -325,14 +358,14 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-ts",
+        brandIds: ["brand-ts"],
         startedAt: new Date("2025-01-01T00:00:00.000Z"),
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-ts",
+        brandIds: ["brand-ts"],
         startedAt: new Date("2025-06-15T12:00:00.000Z"),
       });
 
@@ -455,7 +488,7 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-s",
+        brandIds: ["brand-s"],
       });
 
       await insertTestRunCost({
@@ -738,13 +771,13 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-pub",
+        brandIds: ["brand-pub"],
       });
       const run2 = await insertTestRun({
         organizationId: otherOrgId,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-pub",
+        brandIds: ["brand-pub"],
       });
 
       await insertTestRunCost({
@@ -830,13 +863,13 @@ describe("Stats endpoints", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-filter",
+        brandIds: ["brand-filter"],
       });
       const run2 = await insertTestRun({
         organizationId: otherOrgId,
         serviceName: "svc",
         taskName: "task",
-        brandId: "brand-filter",
+        brandIds: ["brand-filter"],
       });
 
       await insertTestRunCost({
@@ -1023,14 +1056,14 @@ describe("Stats endpoints", () => {
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a",
-        brandId: "brand-x",
+        brandIds: ["brand-x"],
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a-v2",
-        brandId: "brand-y",
+        brandIds: ["brand-y"],
       });
 
       await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
@@ -1239,21 +1272,21 @@ describe("Stats endpoints", () => {
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a",
-        brandId: "brand-x",
+        brandIds: ["brand-x"],
       });
       const run2 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a-v2",
-        brandId: "brand-x",
+        brandIds: ["brand-x"],
       });
       const run3 = await insertTestRun({
         organizationId: TEST_ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "unrelated",
-        brandId: "brand-x",
+        brandIds: ["brand-x"],
       });
 
       await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
