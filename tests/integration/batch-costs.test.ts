@@ -281,4 +281,21 @@ describe("POST /v1/runs/costs/batch", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("accepts large payloads without 413 error", async () => {
+    // Regression: press-kits-service was getting 413 PayloadTooLargeError
+    // when sending large batches of run IDs
+    const largeRunIds = Array.from({ length: 5000 }, (_, i) =>
+      `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`
+    );
+
+    const res = await request(app)
+      .post("/v1/runs/costs/batch")
+      .set(authHeaders)
+      .send({ runIds: largeRunIds });
+
+    // Should get 200 (no matching runs) rather than 413
+    expect(res.status).toBe(200);
+    expect(res.body.costs).toHaveLength(0);
+  });
 });
