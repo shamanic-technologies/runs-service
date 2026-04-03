@@ -92,6 +92,13 @@
       "when": 1775001600000,
       "tag": "0012_multi_brand_support",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1775174400000,
+      "tag": "0013_optimize_indexes",
+      "breakpoints": true
     }
   ]
 }
