@@ -20,15 +20,12 @@ export const runs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("idx_runs_org").on(table.organizationId),
     index("idx_runs_org_service").on(table.organizationId, table.serviceName),
-    index("idx_runs_status").on(table.status),
-    index("idx_runs_started_at").on(table.startedAt),
     index("idx_runs_parent").on(table.parentRunId),
     index("idx_runs_brand_ids").using("gin", table.brandIds),
     index("idx_runs_campaign").on(table.campaignId),
-    index("idx_runs_workflow_slug").on(table.workflowSlug),
     index("idx_runs_feature_slug").on(table.featureSlug),
+    index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
   ]
 );
 
@@ -52,9 +49,9 @@ export const runsCosts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("idx_runs_costs_run_id").on(table.runId),
-    index("idx_runs_costs_cost_name").on(table.costName),
+    index("idx_runs_costs_run_agg").on(table.runId, table.status, table.totalCostInUsdCents, table.quantity),
     index("idx_runs_costs_status").on(table.runId, table.status),
+    index("idx_runs_costs_created_at").on(table.createdAt),
   ]
 );
 
