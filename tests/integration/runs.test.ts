@@ -1313,6 +1313,48 @@ describe("Runs CRUD", () => {
       expect(res.body.runs).toHaveLength(1);
       expect(res.body.runs[0].workflowSlug).toBe("sales-cold-email-v1");
     });
+
+    it("returns all runs when no limit is specified (no silent truncation)", async () => {
+      // Regression: previously defaulted to limit=50 and capped at max=200,
+      // silently truncating results without the caller knowing.
+      const insertPromises = [];
+      for (let i = 0; i < 55; i++) {
+        insertPromises.push(
+          insertTestRun({
+            organizationId: TEST_ORG_ID,
+            serviceName: "svc",
+            taskName: `task-${i}`,
+          }),
+        );
+      }
+      await Promise.all(insertPromises);
+
+      const res = await request(app)
+        .get("/v1/runs")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.runs).toHaveLength(55);
+      expect(res.body.limit).toBeUndefined();
+    });
+
+    it("respects explicit limit without hidden cap", async () => {
+      for (let i = 0; i < 5; i++) {
+        await insertTestRun({
+          organizationId: TEST_ORG_ID,
+          serviceName: "svc",
+          taskName: `task-${i}`,
+        });
+      }
+
+      const res = await request(app)
+        .get("/v1/runs?limit=3")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.runs).toHaveLength(3);
+      expect(res.body.limit).toBe(3);
+    });
   });
 
   describe("Billing integration", () => {
