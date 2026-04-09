@@ -623,11 +623,11 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
 
     const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
-    const limit = Math.min(Number(limitStr) || 50, 200);
-    const offset = Number(offsetStr) || 0;
+    const limit = limitStr ? Number(limitStr) : undefined;
+    const offset = offsetStr ? Number(offsetStr) : 0;
 
     // Select runs with own cost totals via LEFT JOIN + SUM
-    const result = await db
+    const query = db
       .select({
         id: runs.id,
         parentRunId: runs.parentRunId,
@@ -668,9 +668,12 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         runs.createdAt,
         runs.updatedAt,
       )
-      .orderBy(desc(runs.startedAt))
-      .limit(limit)
-      .offset(offset);
+      .orderBy(desc(runs.startedAt));
+
+    if (limit !== undefined) query.limit(limit);
+    if (offset) query.offset(offset);
+
+    const result = await query;
 
     // Format cost fields to fixed decimal
     const formattedRuns = result.map((r) => ({
@@ -680,7 +683,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       ownProvisionedCostInUsdCents: Number(r.ownProvisionedCostInUsdCents).toFixed(10),
     }));
 
-    res.json({ runs: formattedRuns, limit, offset });
+    res.json({ runs: formattedRuns, ...(limit !== undefined && { limit }), offset });
   } catch (err) {
     console.error("[Runs Service] Error listing runs:", err);
     res.status(500).json({ error: "Internal server error" });
