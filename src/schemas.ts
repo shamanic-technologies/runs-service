@@ -204,7 +204,7 @@ export const RunWithCostsSchema = z
 export const ListRunsResponseSchema = z
   .object({
     runs: z.array(RunWithOwnCostSchema),
-    limit: z.number(),
+    limit: z.number().optional(),
     offset: z.number(),
   })
   .openapi("ListRunsResponse");
