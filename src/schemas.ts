@@ -473,6 +473,54 @@ registry.registerPath({
   },
 });
 
+// --- Internal schemas ---
+
+export const TransferBrandRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    sourceOrgId: z.string().uuid(),
+    targetOrgId: z.string().uuid(),
+  })
+  .openapi("TransferBrandRequest");
+
+export type TransferBrandRequest = z.infer<typeof TransferBrandRequestSchema>;
+
+export const TransferBrandResponseSchema = z
+  .object({
+    updatedTables: z.array(
+      z.object({
+        tableName: z.string(),
+        count: z.number(),
+      })
+    ),
+  })
+  .openapi("TransferBrandResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/transfer-brand",
+  summary: "Transfer solo-brand runs to a different org",
+  description:
+    "Re-assigns all runs where brand_ids contains exactly one element matching brandId from sourceOrgId to targetOrgId. Skips co-branding rows (multiple brand IDs). Idempotent.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: TransferBrandRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Transfer complete",
+      content: { "application/json": { schema: TransferBrandResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Stats schemas ---
 
 export const StatsFiltersSchema = z.object({
