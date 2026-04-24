@@ -8,6 +8,7 @@ import healthRoutes from "./routes/health.js";
 import runsRoutes from "./routes/runs.js";
 import statsRoutes from "./routes/stats.js";
 import platformRunsRoutes from "./routes/platform-runs.js";
+import internalRoutes from "./routes/internal.js";
 import { db } from "./db/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,6 +37,7 @@ app.use(healthRoutes);
 app.use(runsRoutes);
 app.use(statsRoutes);
 app.use(platformRunsRoutes);
+app.use(internalRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
