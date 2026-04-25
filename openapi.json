@@ -670,7 +670,7 @@
       "TransferBrandRequest": {
         "type": "object",
         "properties": {
-          "brandId": {
+          "sourceBrandId": {
             "type": "string",
             "format": "uuid"
           },
@@ -681,10 +681,14 @@
           "targetOrgId": {
             "type": "string",
             "format": "uuid"
+          },
+          "targetBrandId": {
+            "type": "string",
+            "format": "uuid"
           }
         },
         "required": [
-          "brandId",
+          "sourceBrandId",
           "sourceOrgId",
           "targetOrgId"
         ]
@@ -1550,7 +1554,7 @@
     "/internal/transfer-brand": {
       "post": {
         "summary": "Transfer solo-brand runs to a different org",
-        "description": "Re-assigns all runs where brand_ids contains exactly one element matching brandId from sourceOrgId to targetOrgId. Skips co-branding rows (multiple brand IDs). Idempotent.",
+        "description": "Re-assigns all runs where brand_ids contains exactly one element matching sourceBrandId from sourceOrgId to targetOrgId. When targetBrandId is provided, also rewrites the brand reference. Skips co-branding rows (multiple brand IDs). Idempotent.",
         "security": [
           {
             "apiKey": []

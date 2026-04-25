@@ -16,22 +16,28 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
       return;
     }
 
-    const { brandId, sourceOrgId, targetOrgId } = parsed.data;
+    const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
-    // Update runs where org_id = sourceOrgId AND brand_ids has exactly one element AND that element is brandId
+    // Update runs where org_id = sourceOrgId AND brand_ids has exactly one element AND that element is sourceBrandId
+    // When targetBrandId is present, also rewrite the brand reference
+    const setClause: Record<string, unknown> = { organizationId: targetOrgId, updatedAt: new Date() };
+    if (targetBrandId) {
+      setClause.brandIds = sql`ARRAY[${targetBrandId}]::text[]`;
+    }
+
     const result = await db
       .update(runs)
-      .set({ organizationId: targetOrgId, updatedAt: new Date() })
+      .set(setClause)
       .where(
         and(
           eq(runs.organizationId, sourceOrgId),
           sql`array_length(${runs.brandIds}, 1) = 1`,
-          sql`${runs.brandIds}[1] = ${brandId}`
+          sql`${runs.brandIds}[1] = ${sourceBrandId}`
         )
       )
       .returning({ id: runs.id });
 
-    console.log(`[Runs Service] transfer-brand: moved ${result.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${brandId}`);
+    console.log(`[Runs Service] transfer-brand: moved ${result.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${sourceBrandId}${targetBrandId ? ` → ${targetBrandId}` : ""}`);
 
     res.json({
       updatedTables: [{ tableName: "runs", count: result.length }],
