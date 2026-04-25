@@ -16,25 +16,42 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
       return;
     }
 
-    const { brandId, sourceOrgId, targetOrgId } = parsed.data;
+    const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
-    // Update runs where org_id = sourceOrgId AND brand_ids has exactly one element AND that element is brandId
-    const result = await db
+    // Step 1: Move org — solo-brand runs from sourceOrgId to targetOrgId
+    const step1 = await db
       .update(runs)
       .set({ organizationId: targetOrgId, updatedAt: new Date() })
       .where(
         and(
           eq(runs.organizationId, sourceOrgId),
           sql`array_length(${runs.brandIds}, 1) = 1`,
-          sql`${runs.brandIds}[1] = ${brandId}`
+          sql`${runs.brandIds}[1] = ${sourceBrandId}`
         )
       )
       .returning({ id: runs.id });
 
-    console.log(`[Runs Service] transfer-brand: moved ${result.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${brandId}`);
+    // Step 2: Rewrite brand reference globally (no org filter) when targetBrandId is present
+    let rewriteCount = 0;
+    if (targetBrandId) {
+      const step2 = await db
+        .update(runs)
+        .set({ brandIds: sql`ARRAY[${targetBrandId}]::text[]`, updatedAt: new Date() })
+        .where(
+          and(
+            sql`array_length(${runs.brandIds}, 1) = 1`,
+            sql`${runs.brandIds}[1] = ${sourceBrandId}`
+          )
+        )
+        .returning({ id: runs.id });
+      rewriteCount = step2.length;
+    }
+
+    const totalUpdated = Math.max(step1.length, rewriteCount);
+    console.log(`[Runs Service] transfer-brand: moved ${step1.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${sourceBrandId}${targetBrandId ? `, rewrote ${rewriteCount} brand refs → ${targetBrandId}` : ""}`);
 
     res.json({
-      updatedTables: [{ tableName: "runs", count: result.length }],
+      updatedTables: [{ tableName: "runs", count: totalUpdated }],
     });
   } catch (err) {
     console.error("[Runs Service] Error in POST /internal/transfer-brand:", err);
