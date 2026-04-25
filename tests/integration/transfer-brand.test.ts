@@ -183,6 +183,54 @@ describe("POST /internal/transfer-brand", () => {
     expect(verifyRes.body.brandIds).toEqual([TARGET_BRAND]);
   });
 
+  it("rewrites brand globally across orgs when targetBrandId is provided", async () => {
+    const TARGET_BRAND = "cccccccc-cccc-4ccc-accc-cccccccccccc";
+    const OTHER_ORG_ID = "44444444-4444-4444-a444-444444444444";
+
+    // Run in sourceOrg — should move org AND rewrite brand
+    const run1 = await insertTestRun({
+      organizationId: SOURCE_ORG_ID,
+      serviceName: "test-service",
+      taskName: "task-source-org",
+      brandIds: [BRAND_A],
+    });
+
+    // Run in a different org referencing the same brand — should rewrite brand only (no org change)
+    const run2 = await insertTestRun({
+      organizationId: OTHER_ORG_ID,
+      serviceName: "test-service",
+      taskName: "task-other-org",
+      brandIds: [BRAND_A],
+    });
+
+    const res = await request(app)
+      .post("/internal/transfer-brand")
+      .set(headers)
+      .send({
+        sourceBrandId: BRAND_A,
+        sourceOrgId: SOURCE_ORG_ID,
+        targetOrgId: TARGET_ORG_ID,
+        targetBrandId: TARGET_BRAND,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 2 }]);
+
+    // Verify run1: org moved + brand rewritten
+    const verify1 = await request(app)
+      .get(`/v1/runs/${run1.id}`)
+      .set({ ...headers, "x-org-id": TARGET_ORG_ID });
+    expect(verify1.body.organizationId).toBe(TARGET_ORG_ID);
+    expect(verify1.body.brandIds).toEqual([TARGET_BRAND]);
+
+    // Verify run2: org unchanged, brand rewritten
+    const verify2 = await request(app)
+      .get(`/v1/runs/${run2.id}`)
+      .set({ ...headers, "x-org-id": OTHER_ORG_ID });
+    expect(verify2.body.organizationId).toBe(OTHER_ORG_ID);
+    expect(verify2.body.brandIds).toEqual([TARGET_BRAND]);
+  });
+
   it("skips runs with null brand_ids", async () => {
     await insertTestRun({
       organizationId: SOURCE_ORG_ID,
