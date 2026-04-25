@@ -26,7 +26,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set("Content-Type", "application/json")
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(401);
   });
@@ -35,7 +35,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: "not-a-uuid" });
+      .send({ sourceBrandId: "not-a-uuid" });
 
     expect(res.status).toBe(400);
   });
@@ -60,7 +60,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 2 }]);
@@ -95,7 +95,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 1 }]);
@@ -112,7 +112,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 0 }]);
@@ -129,7 +129,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 0 }]);
@@ -143,13 +143,44 @@ describe("POST /internal/transfer-brand", () => {
       brandIds: [BRAND_A],
     });
 
-    const body = { brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID };
+    const body = { sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID };
 
     const res1 = await request(app).post("/internal/transfer-brand").set(headers).send(body);
     expect(res1.body.updatedTables).toEqual([{ tableName: "runs", count: 1 }]);
 
     const res2 = await request(app).post("/internal/transfer-brand").set(headers).send(body);
     expect(res2.body.updatedTables).toEqual([{ tableName: "runs", count: 0 }]);
+  });
+
+  it("rewrites brand_ids when targetBrandId is provided", async () => {
+    const TARGET_BRAND = "cccccccc-cccc-4ccc-accc-cccccccccccc";
+
+    const run = await insertTestRun({
+      organizationId: SOURCE_ORG_ID,
+      serviceName: "test-service",
+      taskName: "task-rewrite",
+      brandIds: [BRAND_A],
+    });
+
+    const res = await request(app)
+      .post("/internal/transfer-brand")
+      .set(headers)
+      .send({
+        sourceBrandId: BRAND_A,
+        sourceOrgId: SOURCE_ORG_ID,
+        targetOrgId: TARGET_ORG_ID,
+        targetBrandId: TARGET_BRAND,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 1 }]);
+
+    // Verify brand_ids was rewritten to targetBrandId
+    const verifyRes = await request(app)
+      .get(`/v1/runs/${run.id}`)
+      .set({ ...headers, "x-org-id": TARGET_ORG_ID });
+    expect(verifyRes.body.organizationId).toBe(TARGET_ORG_ID);
+    expect(verifyRes.body.brandIds).toEqual([TARGET_BRAND]);
   });
 
   it("skips runs with null brand_ids", async () => {
@@ -162,7 +193,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(headers)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG_ID, targetOrgId: TARGET_ORG_ID });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([{ tableName: "runs", count: 0 }]);

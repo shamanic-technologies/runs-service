@@ -477,9 +477,10 @@ registry.registerPath({
 
 export const TransferBrandRequestSchema = z
   .object({
-    brandId: z.string().uuid(),
+    sourceBrandId: z.string().uuid(),
     sourceOrgId: z.string().uuid(),
     targetOrgId: z.string().uuid(),
+    targetBrandId: z.string().uuid().optional(),
   })
   .openapi("TransferBrandRequest");
 
@@ -501,7 +502,7 @@ registry.registerPath({
   path: "/internal/transfer-brand",
   summary: "Transfer solo-brand runs to a different org",
   description:
-    "Re-assigns all runs where brand_ids contains exactly one element matching brandId from sourceOrgId to targetOrgId. Skips co-branding rows (multiple brand IDs). Idempotent.",
+    "Re-assigns all runs where brand_ids contains exactly one element matching sourceBrandId from sourceOrgId to targetOrgId. When targetBrandId is provided, also rewrites the brand reference. Skips co-branding rows (multiple brand IDs). Idempotent.",
   security: [{ apiKey: [] }],
   request: {
     body: {
