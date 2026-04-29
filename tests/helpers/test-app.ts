@@ -43,6 +43,9 @@ export function createTestApp() {
 
 const TEST_ORG_ID = "11111111-1111-1111-1111-111111111111";
 const TEST_USER_ID = "22222222-2222-2222-2222-222222222222";
+const TEST_BRAND_A = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+const TEST_BRAND_B = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+const TEST_BRAND_C = "cccccccc-cccc-4ccc-bccc-cccccccccccc";
 
 export function getAuthHeaders(overrides?: { orgId?: string; userId?: string }) {
   return {
@@ -68,4 +71,4 @@ export function getInternalAuthHeaders() {
   };
 }
 
-export { TEST_ORG_ID, TEST_USER_ID };
+export { TEST_ORG_ID, TEST_USER_ID, TEST_BRAND_A, TEST_BRAND_B, TEST_BRAND_C };

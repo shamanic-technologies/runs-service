@@ -17,10 +17,15 @@ declare global {
   }
 }
 
-function extractWorkflowHeaders(req: Request) {
+function extractWorkflowHeaders(req: Request, res: Response): boolean {
   const brandIdRaw = req.headers["x-brand-id"] as string | undefined;
   if (brandIdRaw) {
     const parsed = brandIdRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    const invalid = parsed.filter((id) => !UUID_RE.test(id));
+    if (invalid.length > 0) {
+      res.status(400).json({ error: `x-brand-id header contains invalid UUIDs: ${invalid.join(", ")}` });
+      return false;
+    }
     if (parsed.length > 0) req.headerBrandIds = parsed;
   }
 
@@ -32,6 +37,8 @@ function extractWorkflowHeaders(req: Request) {
 
   const featureSlug = req.headers["x-feature-slug"] as string | undefined;
   if (featureSlug) req.headerFeatureSlug = featureSlug;
+
+  return true;
 }
 
 export function requireApiKey(req: Request, res: Response, next: NextFunction) {
@@ -67,7 +74,7 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction) {
     req.runId = runId;
   }
 
-  extractWorkflowHeaders(req);
+  if (!extractWorkflowHeaders(req, res)) return;
 
   next();
 }
@@ -95,7 +102,7 @@ export function requirePlatformAuth(req: Request, res: Response, next: NextFunct
   }
   req.platformServiceName = serviceName;
 
-  extractWorkflowHeaders(req);
+  if (!extractWorkflowHeaders(req, res)) return;
 
   next();
 }

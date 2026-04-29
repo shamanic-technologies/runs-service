@@ -61,7 +61,7 @@ export const RunWithOwnCostSchema = RunSchema.extend({
 
 export const CreateRunRequestSchema = z
   .object({
-    brandIds: z.array(z.string().min(1)).min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence." }),
+    brandIds: z.array(z.string().uuid()).min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence." }),
     campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
     workflowSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
