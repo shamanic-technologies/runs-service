@@ -34,12 +34,12 @@ async function fetchJson<T>(url: string, apiKey: string | undefined, identity?: 
 export async function resolveWorkflowDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
-  const data = await fetchJson<{ slugs: string[] }>(
-    `${url}/workflows/dynasty/slugs?dynastySlug=${encodeURIComponent(dynastySlug)}`,
+  const data = await fetchJson<{ workflows: { workflowSlug: string }[] }>(
+    `${url}/workflows?workflowDynastySlug=${encodeURIComponent(dynastySlug)}&status=all`,
     process.env.WORKFLOW_SERVICE_API_KEY,
     identity
   );
-  return data.slugs;
+  return data.workflows.map((w) => w.workflowSlug);
 }
 
 export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
@@ -56,12 +56,21 @@ export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: 
 export async function fetchAllWorkflowDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
-  const data = await fetchJson<{ dynasties: DynastyEntry[] }>(
-    `${url}/workflows/dynasties`,
+  const data = await fetchJson<{ workflows: { workflowSlug: string; workflowDynastySlug: string }[] }>(
+    `${url}/workflows?status=all`,
     process.env.WORKFLOW_SERVICE_API_KEY,
     identity
   );
-  return data.dynasties;
+  const dynastyMap = new Map<string, string[]>();
+  for (const w of data.workflows) {
+    const existing = dynastyMap.get(w.workflowDynastySlug);
+    if (existing) {
+      existing.push(w.workflowSlug);
+    } else {
+      dynastyMap.set(w.workflowDynastySlug, [w.workflowSlug]);
+    }
+  }
+  return Array.from(dynastyMap.entries()).map(([dynastySlug, slugs]) => ({ dynastySlug, slugs }));
 }
 
 export async function fetchAllFeatureDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
