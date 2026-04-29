@@ -30,7 +30,11 @@ afterEach(() => {
 describe("resolveWorkflowDynastySlugs", () => {
   it("returns slugs from workflow-service", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ slugs: ["cold-email", "cold-email-v2", "cold-email-v3"] }), {
+      new Response(JSON.stringify({ workflows: [
+        { workflowSlug: "cold-email", workflowDynastySlug: "cold-email" },
+        { workflowSlug: "cold-email-v2", workflowDynastySlug: "cold-email" },
+        { workflowSlug: "cold-email-v3", workflowDynastySlug: "cold-email" },
+      ] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       })
@@ -41,7 +45,7 @@ describe("resolveWorkflowDynastySlugs", () => {
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe(
-      "https://workflow.test/workflows/dynasty/slugs?dynastySlug=cold-email"
+      "https://workflow.test/workflows?workflowDynastySlug=cold-email&status=all"
     );
     const headers = fetchCall[1]?.headers as Record<string, string>;
     expect(headers["X-API-Key"]).toBe("wf-key");
@@ -52,7 +56,7 @@ describe("resolveWorkflowDynastySlugs", () => {
 
   it("returns empty array when dynasty has no versions", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ slugs: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
+      new Response(JSON.stringify({ workflows: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
     );
 
     const slugs = await resolveWorkflowDynastySlugs("nonexistent", testIdentity);
@@ -61,15 +65,10 @@ describe("resolveWorkflowDynastySlugs", () => {
 
   it("throws when WORKFLOW_SERVICE_URL is not set", async () => {
     delete process.env.WORKFLOW_SERVICE_URL;
-    // Need to re-import to pick up the deleted env var — but since it reads at call time,
-    // we test the function directly. However the module reads at import time.
-    // Actually, the module reads env vars at module-level const, so we need to test differently.
-    // Let's just verify the function behavior when URL is configured but service returns error.
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response("Not Found", { status: 404 })
     );
 
-    // Re-import won't help due to module caching, so we test the error path instead
     process.env.WORKFLOW_SERVICE_URL = "https://workflow.test";
     await expect(
       resolveWorkflowDynastySlugs("bad", testIdentity).catch(() => {
@@ -111,20 +110,26 @@ describe("resolveFeatureDynastySlugs", () => {
 });
 
 describe("fetchAllWorkflowDynasties", () => {
-  it("returns all dynasties", async () => {
-    const dynasties = [
-      { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
-      { dynastySlug: "warm-intro", slugs: ["warm-intro"] },
-    ];
+  it("returns all dynasties grouped from workflow list", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ dynasties }), {
+      new Response(JSON.stringify({ workflows: [
+        { workflowSlug: "cold-email", workflowDynastySlug: "cold-email" },
+        { workflowSlug: "cold-email-v2", workflowDynastySlug: "cold-email" },
+        { workflowSlug: "warm-intro", workflowDynastySlug: "warm-intro" },
+      ] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       })
     );
 
     const result = await fetchAllWorkflowDynasties(testIdentity);
-    expect(result).toEqual(dynasties);
+    expect(result).toEqual([
+      { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
+      { dynastySlug: "warm-intro", slugs: ["warm-intro"] },
+    ]);
+
+    const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(fetchCall[0]).toBe("https://workflow.test/workflows?status=all");
   });
 });
 
