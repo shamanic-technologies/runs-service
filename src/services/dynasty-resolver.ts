@@ -34,12 +34,12 @@ async function fetchJson<T>(url: string, apiKey: string | undefined, identity?: 
 export async function resolveWorkflowDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
-  const data = await fetchJson<{ workflows: { workflowSlug: string }[] }>(
-    `${url}/workflows?workflowDynastySlug=${encodeURIComponent(dynastySlug)}&status=all`,
+  const data = await fetchJson<{ workflowSlugs: string[] }>(
+    `${url}/workflows/dynasty/slugs?workflowDynastySlug=${encodeURIComponent(dynastySlug)}`,
     process.env.WORKFLOW_SERVICE_API_KEY,
     identity
   );
-  return data.workflows.map((w) => w.workflowSlug);
+  return data.workflowSlugs;
 }
 
 export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
@@ -56,21 +56,12 @@ export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: 
 export async function fetchAllWorkflowDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
-  const data = await fetchJson<{ workflows: { workflowSlug: string; workflowDynastySlug: string }[] }>(
-    `${url}/workflows?status=all`,
+  const data = await fetchJson<{ dynasties: { workflowDynastySlug: string; workflowSlugs: string[] }[] }>(
+    `${url}/workflows/dynasties`,
     process.env.WORKFLOW_SERVICE_API_KEY,
     identity
   );
-  const dynastyMap = new Map<string, string[]>();
-  for (const w of data.workflows) {
-    const existing = dynastyMap.get(w.workflowDynastySlug);
-    if (existing) {
-      existing.push(w.workflowSlug);
-    } else {
-      dynastyMap.set(w.workflowDynastySlug, [w.workflowSlug]);
-    }
-  }
-  return Array.from(dynastyMap.entries()).map(([dynastySlug, slugs]) => ({ dynastySlug, slugs }));
+  return data.dynasties.map((d) => ({ dynastySlug: d.workflowDynastySlug, slugs: d.workflowSlugs }));
 }
 
 export async function fetchAllFeatureDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
