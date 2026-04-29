@@ -28,13 +28,9 @@ afterEach(() => {
 });
 
 describe("resolveWorkflowDynastySlugs", () => {
-  it("returns slugs from workflow-service", async () => {
+  it("returns slugs from workflow-service dynasty endpoint", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ workflows: [
-        { workflowSlug: "cold-email", workflowDynastySlug: "cold-email" },
-        { workflowSlug: "cold-email-v2", workflowDynastySlug: "cold-email" },
-        { workflowSlug: "cold-email-v3", workflowDynastySlug: "cold-email" },
-      ] }), {
+      new Response(JSON.stringify({ workflowSlugs: ["cold-email", "cold-email-v2", "cold-email-v3"] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       })
@@ -45,7 +41,7 @@ describe("resolveWorkflowDynastySlugs", () => {
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe(
-      "https://workflow.test/workflows?workflowDynastySlug=cold-email&status=all"
+      "https://workflow.test/workflows/dynasty/slugs?workflowDynastySlug=cold-email"
     );
     const headers = fetchCall[1]?.headers as Record<string, string>;
     expect(headers["X-API-Key"]).toBe("wf-key");
@@ -56,7 +52,7 @@ describe("resolveWorkflowDynastySlugs", () => {
 
   it("returns empty array when dynasty has no versions", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ workflows: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
+      new Response(JSON.stringify({ workflowSlugs: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
     );
 
     const slugs = await resolveWorkflowDynastySlugs("nonexistent", testIdentity);
@@ -65,16 +61,9 @@ describe("resolveWorkflowDynastySlugs", () => {
 
   it("throws when WORKFLOW_SERVICE_URL is not set", async () => {
     delete process.env.WORKFLOW_SERVICE_URL;
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("Not Found", { status: 404 })
+    await expect(resolveWorkflowDynastySlugs("test", testIdentity)).rejects.toThrow(
+      "WORKFLOW_SERVICE_URL not configured"
     );
-
-    process.env.WORKFLOW_SERVICE_URL = "https://workflow.test";
-    await expect(
-      resolveWorkflowDynastySlugs("bad", testIdentity).catch(() => {
-        throw new Error("upstream error");
-      })
-    ).rejects.toThrow();
   });
 
   it("throws on non-OK response", async () => {
@@ -110,12 +99,11 @@ describe("resolveFeatureDynastySlugs", () => {
 });
 
 describe("fetchAllWorkflowDynasties", () => {
-  it("returns all dynasties grouped from workflow list", async () => {
+  it("returns all dynasties from dedicated endpoint with new field names", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ workflows: [
-        { workflowSlug: "cold-email", workflowDynastySlug: "cold-email" },
-        { workflowSlug: "cold-email-v2", workflowDynastySlug: "cold-email" },
-        { workflowSlug: "warm-intro", workflowDynastySlug: "warm-intro" },
+      new Response(JSON.stringify({ dynasties: [
+        { workflowDynastySlug: "cold-email", workflowSlugs: ["cold-email", "cold-email-v2"] },
+        { workflowDynastySlug: "warm-intro", workflowSlugs: ["warm-intro"] },
       ] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -129,7 +117,7 @@ describe("fetchAllWorkflowDynasties", () => {
     ]);
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
-    expect(fetchCall[0]).toBe("https://workflow.test/workflows?status=all");
+    expect(fetchCall[0]).toBe("https://workflow.test/workflows/dynasties");
   });
 });
 
