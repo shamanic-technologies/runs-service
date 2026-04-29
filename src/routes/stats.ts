@@ -681,8 +681,8 @@ function handlePublicCosts(req: any, res: any) {
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
 
-// GET /v1/stats/public/runs — public run counts by status + monthly breakdown
-router.get("/v1/stats/public/runs", async (_req, res) => {
+// GET /public/stats/runs — public run counts by status + monthly breakdown
+router.get("/public/stats/runs", async (_req, res) => {
   try {
     const [statusResult, monthlyResult] = await Promise.all([
       db.execute(sql`
@@ -718,7 +718,7 @@ router.get("/v1/stats/public/runs", async (_req, res) => {
 
     res.json({ byStatus, monthly });
   } catch (err) {
-    console.error("[Runs Service] Error in GET /v1/stats/public/runs:", err);
+    console.error("[Runs Service] Error in GET /public/stats/runs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

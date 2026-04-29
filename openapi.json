@@ -2018,7 +2018,7 @@
         }
       }
     },
-    "/v1/stats/public/runs": {
+    "/public/stats/runs": {
       "get": {
         "summary": "Public run stats (no auth)",
         "description": "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",

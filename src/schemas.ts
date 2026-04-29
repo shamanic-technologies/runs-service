@@ -754,7 +754,7 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
-  path: "/v1/stats/public/runs",
+  path: "/public/stats/runs",
   summary: "Public run stats (no auth)",
   description:
     "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",

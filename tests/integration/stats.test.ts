@@ -1296,14 +1296,14 @@ describe("Stats endpoints", () => {
     });
   });
 
-  describe("GET /v1/stats/public/runs", () => {
+  describe("GET /public/stats/runs", () => {
     it("returns byStatus breakdown and monthly array", async () => {
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed" });
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "running" });
 
-      const res = await request(app).get("/v1/stats/public/runs");
+      const res = await request(app).get("/public/stats/runs");
 
       expect(res.status).toBe(200);
       expect(res.body.byStatus.completed).toBe(2);
@@ -1316,7 +1316,7 @@ describe("Stats endpoints", () => {
     });
 
     it("does not require auth", async () => {
-      const res = await request(app).get("/v1/stats/public/runs");
+      const res = await request(app).get("/public/stats/runs");
 
       expect(res.status).toBe(200);
       expect(res.body.byStatus).toBeDefined();
@@ -1324,7 +1324,7 @@ describe("Stats endpoints", () => {
     });
 
     it("returns zeros when no runs exist", async () => {
-      const res = await request(app).get("/v1/stats/public/runs");
+      const res = await request(app).get("/public/stats/runs");
 
       expect(res.status).toBe(200);
       expect(res.body.byStatus).toEqual({ completed: 0, failed: 0, running: 0 });
@@ -1336,7 +1336,7 @@ describe("Stats endpoints", () => {
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
       await insertTestRun({ organizationId: otherOrgId, serviceName: "svc", taskName: "t", status: "completed" });
 
-      const res = await request(app).get("/v1/stats/public/runs");
+      const res = await request(app).get("/public/stats/runs");
 
       expect(res.status).toBe(200);
       expect(res.body.byStatus.completed).toBe(2);
@@ -1349,7 +1349,7 @@ describe("Stats endpoints", () => {
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed", startedAt: feb });
       await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: feb });
 
-      const res = await request(app).get("/v1/stats/public/runs");
+      const res = await request(app).get("/public/stats/runs");
 
       expect(res.status).toBe(200);
       expect(res.body.monthly).toHaveLength(2);
