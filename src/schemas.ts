@@ -522,6 +522,32 @@ registry.registerPath({
   },
 });
 
+// --- Public runs stats schemas ---
+
+export const PublicRunsStatsStatusBreakdownSchema = z
+  .object({
+    completed: z.number(),
+    failed: z.number(),
+    running: z.number(),
+  })
+  .openapi("PublicRunsStatsStatusBreakdown");
+
+export const PublicRunsStatsMonthlyEntrySchema = z
+  .object({
+    month: z.string().openapi({ description: "YYYY-MM format", example: "2026-01" }),
+    completed: z.number(),
+    failed: z.number(),
+    running: z.number(),
+  })
+  .openapi("PublicRunsStatsMonthlyEntry");
+
+export const PublicRunsStatsResponseSchema = z
+  .object({
+    byStatus: PublicRunsStatsStatusBreakdownSchema,
+    monthly: z.array(PublicRunsStatsMonthlyEntrySchema),
+  })
+  .openapi("PublicRunsStatsResponse");
+
 // --- Stats schemas ---
 
 export const StatsFiltersSchema = z.object({
@@ -722,6 +748,20 @@ registry.registerPath({
     400: {
       description: "Invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/public/runs",
+  summary: "Public run stats (no auth)",
+  description:
+    "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",
+  responses: {
+    200: {
+      description: "Run stats",
+      content: { "application/json": { schema: PublicRunsStatsResponseSchema } },
     },
   },
 });
