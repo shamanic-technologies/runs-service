@@ -1296,6 +1296,72 @@ describe("Stats endpoints", () => {
     });
   });
 
+  describe("GET /v1/stats/public/runs", () => {
+    it("returns byStatus breakdown and monthly array", async () => {
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed" });
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "running" });
+
+      const res = await request(app).get("/v1/stats/public/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.byStatus.completed).toBe(2);
+      expect(res.body.byStatus.failed).toBe(1);
+      expect(res.body.byStatus.running).toBe(1);
+      expect(res.body.monthly).toHaveLength(1);
+      expect(res.body.monthly[0].completed).toBe(2);
+      expect(res.body.monthly[0].failed).toBe(1);
+      expect(res.body.monthly[0].running).toBe(1);
+    });
+
+    it("does not require auth", async () => {
+      const res = await request(app).get("/v1/stats/public/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.byStatus).toBeDefined();
+      expect(res.body.monthly).toBeDefined();
+    });
+
+    it("returns zeros when no runs exist", async () => {
+      const res = await request(app).get("/v1/stats/public/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.byStatus).toEqual({ completed: 0, failed: 0, running: 0 });
+      expect(res.body.monthly).toEqual([]);
+    });
+
+    it("aggregates across orgs", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: otherOrgId, serviceName: "svc", taskName: "t", status: "completed" });
+
+      const res = await request(app).get("/v1/stats/public/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.byStatus.completed).toBe(2);
+    });
+
+    it("returns monthly breakdown sorted ascending", async () => {
+      const jan = new Date("2026-01-15T12:00:00Z");
+      const feb = new Date("2026-02-15T12:00:00Z");
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: jan });
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed", startedAt: feb });
+      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: feb });
+
+      const res = await request(app).get("/v1/stats/public/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.monthly).toHaveLength(2);
+      expect(res.body.monthly[0].month).toBe("2026-01");
+      expect(res.body.monthly[0].completed).toBe(1);
+      expect(res.body.monthly[0].failed).toBe(0);
+      expect(res.body.monthly[1].month).toBe("2026-02");
+      expect(res.body.monthly[1].completed).toBe(1);
+      expect(res.body.monthly[1].failed).toBe(1);
+    });
+  });
+
   describe("Dynasty slug — GET /v1/stats/public/costs", () => {
     it("groups by workflowDynastySlug", async () => {
       vi.spyOn(dynastyResolver, "fetchAllWorkflowDynasties").mockResolvedValue([

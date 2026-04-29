@@ -681,4 +681,46 @@ function handlePublicCosts(req: any, res: any) {
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
 
+// GET /v1/stats/public/runs — public run counts by status + monthly breakdown
+router.get("/v1/stats/public/runs", async (_req, res) => {
+  try {
+    const [statusResult, monthlyResult] = await Promise.all([
+      db.execute(sql`
+        SELECT status, COUNT(*)::int as count
+        FROM runs
+        GROUP BY status
+      `),
+      db.execute(sql`
+        SELECT TO_CHAR(DATE_TRUNC('month', started_at), 'YYYY-MM') as month,
+          COUNT(*) FILTER (WHERE status = 'completed')::int as completed,
+          COUNT(*) FILTER (WHERE status = 'failed')::int as failed,
+          COUNT(*) FILTER (WHERE status = 'running')::int as running
+        FROM runs
+        GROUP BY DATE_TRUNC('month', started_at)
+        ORDER BY month ASC
+      `),
+    ]);
+
+    const statusRows = statusResult as any[];
+    const byStatus = { completed: 0, failed: 0, running: 0 };
+    for (const row of statusRows) {
+      if (row.status in byStatus) {
+        byStatus[row.status as keyof typeof byStatus] = row.count;
+      }
+    }
+
+    const monthly = (monthlyResult as any[]).map((row) => ({
+      month: row.month,
+      completed: row.completed,
+      failed: row.failed,
+      running: row.running,
+    }));
+
+    res.json({ byStatus, monthly });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /v1/stats/public/runs:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 export default router;
