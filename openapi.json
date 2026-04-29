@@ -920,6 +920,68 @@
           "provisionedCostInUsdCents",
           "costsByName"
         ]
+      },
+      "PublicRunsStatsResponse": {
+        "type": "object",
+        "properties": {
+          "byStatus": {
+            "$ref": "#/components/schemas/PublicRunsStatsStatusBreakdown"
+          },
+          "monthly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicRunsStatsMonthlyEntry"
+            }
+          }
+        },
+        "required": [
+          "byStatus",
+          "monthly"
+        ]
+      },
+      "PublicRunsStatsStatusBreakdown": {
+        "type": "object",
+        "properties": {
+          "completed": {
+            "type": "number"
+          },
+          "failed": {
+            "type": "number"
+          },
+          "running": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "completed",
+          "failed",
+          "running"
+        ]
+      },
+      "PublicRunsStatsMonthlyEntry": {
+        "type": "object",
+        "properties": {
+          "month": {
+            "type": "string",
+            "description": "YYYY-MM format",
+            "example": "2026-01"
+          },
+          "completed": {
+            "type": "number"
+          },
+          "failed": {
+            "type": "number"
+          },
+          "running": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "month",
+          "completed",
+          "failed",
+          "running"
+        ]
       }
     },
     "parameters": {}
@@ -1949,6 +2011,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/stats/runs": {
+      "get": {
+        "summary": "Public run stats (no auth)",
+        "description": "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",
+        "responses": {
+          "200": {
+            "description": "Run stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicRunsStatsResponse"
                 }
               }
             }
