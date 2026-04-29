@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
-import { createTestApp, getPlatformAuthHeaders } from "../helpers/test-app.js";
+import { createTestApp, getPlatformAuthHeaders, TEST_BRAND_A, TEST_BRAND_B } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 
 // Mock cost-resolver for integration tests
@@ -109,7 +109,7 @@ describe("Platform Runs", () => {
         .post("/v1/platform-runs")
         .set({
           ...platformHeaders,
-          "x-brand-id": "header-brand",
+          "x-brand-id": TEST_BRAND_A,
           "x-campaign-id": "header-campaign",
           "x-workflow-slug": "header-workflow",
         })
@@ -119,7 +119,7 @@ describe("Platform Runs", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["header-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -129,20 +129,20 @@ describe("Platform Runs", () => {
         .post("/v1/platform-runs")
         .set({
           ...platformHeaders,
-          "x-brand-id": "header-brand",
+          "x-brand-id": TEST_BRAND_A,
           "x-campaign-id": "header-campaign",
           "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "workflow-service",
           taskName: "upgrade-workflows",
-          brandIds: ["body-brand"],
+          brandIds: [TEST_BRAND_B],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["header-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
