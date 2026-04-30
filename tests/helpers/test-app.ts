@@ -8,6 +8,7 @@ import runsRoutes from "../../src/routes/runs.js";
 import statsRoutes from "../../src/routes/stats.js";
 import platformRunsRoutes from "../../src/routes/platform-runs.js";
 import internalRoutes from "../../src/routes/internal.js";
+import eventsRoutes from "../../src/routes/events.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,6 +36,7 @@ export function createTestApp() {
   app.use(statsRoutes);
   app.use(platformRunsRoutes);
   app.use(internalRoutes);
+  app.use(eventsRoutes);
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
   });

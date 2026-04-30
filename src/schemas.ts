@@ -217,6 +217,47 @@ export const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
+// --- Run event schemas ---
+
+export const EventLevelEnum = z.enum(["info", "warn", "error"]).openapi("EventLevel");
+
+export const RunEventSchema = z
+  .object({
+    id: z.string().uuid(),
+    runId: z.string().uuid(),
+    service: z.string(),
+    event: z.string(),
+    detail: z.string().nullable(),
+    level: EventLevelEnum,
+    data: z.any().nullable(),
+    orgId: z.string().uuid().nullable(),
+    userId: z.string().uuid().nullable(),
+    brandIds: z.string().nullable(),
+    campaignId: z.string().uuid().nullable(),
+    workflowSlug: z.string().nullable(),
+    featureSlug: z.string().nullable(),
+    createdAt: z.string().datetime(),
+  })
+  .openapi("RunEvent");
+
+export const CreateRunEventRequestSchema = z
+  .object({
+    service: z.string().min(1),
+    event: z.string().min(1),
+    detail: z.string().optional(),
+    level: EventLevelEnum.optional(),
+    data: z.any().optional(),
+  })
+  .openapi("CreateRunEventRequest");
+
+export type CreateRunEventRequest = z.infer<typeof CreateRunEventRequestSchema>;
+
+export const ListRunEventsResponseSchema = z
+  .object({
+    events: z.array(RunEventSchema),
+  })
+  .openapi("ListRunEventsResponse");
+
 // --- Workflow tracking headers (optional, injected by workflow-service) ---
 
 const WorkflowTrackingHeadersSchema = z.object({
@@ -859,5 +900,115 @@ registry.registerPath({
       description: "Run not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
+  },
+});
+
+// --- Run events path registrations ---
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/runs/{id}/events",
+  summary: "Create a run event",
+  description:
+    "Logs a structured event for a run. Reads identity headers (x-org-id, x-user-id, x-brand-id, x-campaign-id, x-workflow-slug, x-feature-slug) and stores them in the event row.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: { "application/json": { schema: CreateRunEventRequestSchema } },
+    },
+  },
+  responses: {
+    201: {
+      description: "Event created",
+      content: { "application/json": { schema: RunEventSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/events",
+  summary: "List events for a run",
+  description:
+    "Returns all events for a run, ordered by created_at ASC. Optionally filter by level.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    query: z.object({
+      level: EventLevelEnum.optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "List of events",
+      content: { "application/json": { schema: ListRunEventsResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/runs/{id}/events/stream",
+  summary: "Stream events for a run (SSE)",
+  description:
+    "Server-Sent Events endpoint streaming run events in real-time. Polls every 1s with last_id cursor.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "SSE event stream",
+      content: { "text/event-stream": { schema: z.any() } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/events",
+  summary: "List events across all runs",
+  description:
+    "Returns events across all runs for admin log viewing. Supports filtering by service, orgId, brandId, campaignId, workflowSlug, featureSlug, level. Ordered by created_at DESC.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      service: z.string().optional(),
+      orgId: z.string().uuid().optional(),
+      brandId: z.string().optional(),
+      campaignId: z.string().uuid().optional(),
+      workflowSlug: z.string().optional(),
+      featureSlug: z.string().optional(),
+      level: EventLevelEnum.optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "List of events",
+      content: { "application/json": { schema: ListRunEventsResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
   },
 });

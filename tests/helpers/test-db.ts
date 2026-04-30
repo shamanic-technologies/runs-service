@@ -1,8 +1,8 @@
 import { db, sql } from "../../src/db/index.js";
-import { runs, runsCosts } from "../../src/db/schema.js";
+import { runs, runsCosts, runEvents } from "../../src/db/schema.js";
 
 export async function cleanTestData() {
-  await sql`TRUNCATE runs_costs, runs CASCADE`;
+  await sql`TRUNCATE run_events, runs_costs, runs CASCADE`;
 }
 
 export async function insertTestRun(data: {
