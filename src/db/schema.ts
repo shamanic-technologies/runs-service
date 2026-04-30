@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, numeric, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, numeric, index, jsonb } from "drizzle-orm/pg-core";
 
 export const runs = pgTable(
   "runs",
@@ -57,3 +57,32 @@ export const runsCosts = pgTable(
 
 export type RunCost = typeof runsCosts.$inferSelect;
 export type NewRunCost = typeof runsCosts.$inferInsert;
+
+export const runEvents = pgTable(
+  "run_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    service: text("service").notNull(),
+    event: text("event").notNull(),
+    detail: text("detail"),
+    level: text("level").notNull().default("info"),
+    data: jsonb("data"),
+    orgId: uuid("org_id"),
+    userId: uuid("user_id"),
+    brandIds: text("brand_ids"),
+    campaignId: uuid("campaign_id"),
+    workflowSlug: text("workflow_slug"),
+    featureSlug: text("feature_slug"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_run_events_run_created").on(table.runId, table.createdAt),
+    index("idx_run_events_service_created").on(table.service, table.createdAt),
+  ]
+);
+
+export type RunEvent = typeof runEvents.$inferSelect;
+export type NewRunEvent = typeof runEvents.$inferInsert;
