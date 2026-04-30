@@ -17,7 +17,7 @@ describe("schemas", () => {
 
     it("accepts all optional fields", () => {
       const result = CreateRunRequestSchema.safeParse({
-        brandIds: ["brand_1"],
+        brandIds: ["aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"],
         campaignId: "campaign_1",
         workflowSlug: "wf-1",
         serviceName: "my-agent",
@@ -37,6 +37,15 @@ describe("schemas", () => {
     it("rejects missing taskName", () => {
       const result = CreateRunRequestSchema.safeParse({
         serviceName: "my-agent",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects non-UUID brandIds", () => {
+      const result = CreateRunRequestSchema.safeParse({
+        brandIds: ["lifecycle"],
+        serviceName: "my-agent",
+        taskName: "run-task",
       });
       expect(result.success).toBe(false);
     });

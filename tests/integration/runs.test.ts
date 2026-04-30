@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders, TEST_ORG_ID, TEST_USER_ID } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders, TEST_ORG_ID, TEST_USER_ID, TEST_BRAND_A, TEST_BRAND_B, TEST_BRAND_C } from "../helpers/test-app.js";
 import {
   cleanTestData,
   insertTestRun,
@@ -204,14 +204,14 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set(authHeaders)
         .send({
-          brandIds: ["brand_1"],
+          brandIds: [TEST_BRAND_A],
           campaignId: "campaign_1",
           serviceName: "svc",
           taskName: "task",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["brand_1"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("campaign_1");
     });
 
@@ -247,7 +247,7 @@ describe("Runs CRUD", () => {
         organizationId: TEST_ORG_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandIds: ["inherited-brand"],
+        brandIds: [TEST_BRAND_A],
         campaignId: "inherited-campaign",
         workflowSlug: "inherited-workflow",
       });
@@ -261,7 +261,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["inherited-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("inherited-campaign");
       expect(res.body.workflowSlug).toBe("inherited-workflow");
     });
@@ -272,7 +272,7 @@ describe("Runs CRUD", () => {
         userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandIds: ["parent-brand"],
+        brandIds: [TEST_BRAND_A],
         campaignId: "parent-campaign",
         workflowSlug: "parent-workflow",
       });
@@ -283,7 +283,7 @@ describe("Runs CRUD", () => {
         .send({
           serviceName: "child-svc",
           taskName: "child-task",
-          brandIds: ["child-brand"],
+          brandIds: [TEST_BRAND_B],
           campaignId: "child-campaign",
           workflowSlug: "child-workflow",
         });
@@ -348,7 +348,7 @@ describe("Runs CRUD", () => {
         userId: TEST_USER_ID,
         serviceName: "parent-svc",
         taskName: "parent-task",
-        brandIds: ["same-brand"],
+        brandIds: [TEST_BRAND_A],
         campaignId: "same-campaign",
         workflowSlug: "same-workflow",
       });
@@ -358,7 +358,7 @@ describe("Runs CRUD", () => {
         .set({
           ...authHeaders,
           "x-run-id": parent.id,
-          "x-brand-id": "same-brand",
+          "x-brand-id": TEST_BRAND_A,
           "x-campaign-id": "same-campaign",
           "x-workflow-slug": "same-workflow",
         })
@@ -368,7 +368,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["same-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
     });
 
     it("uses x-brand-id, x-campaign-id, x-workflow-slug headers as fallback", async () => {
@@ -376,7 +376,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": "header-brand",
+          "x-brand-id": TEST_BRAND_A,
           "x-campaign-id": "header-campaign",
           "x-workflow-slug": "header-workflow",
         })
@@ -386,7 +386,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["header-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -396,20 +396,20 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": "header-brand",
+          "x-brand-id": TEST_BRAND_A,
           "x-campaign-id": "header-campaign",
           "x-workflow-slug": "header-workflow",
         })
         .send({
           serviceName: "svc",
           taskName: "task",
-          brandIds: ["body-brand"],
+          brandIds: [TEST_BRAND_B],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["header-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("header-campaign");
       expect(res.body.workflowSlug).toBe("header-workflow");
     });
@@ -419,18 +419,18 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": "header-brand",
+          "x-brand-id": TEST_BRAND_A,
         })
         .send({
           serviceName: "svc",
           taskName: "task",
-          brandIds: ["body-brand"],
+          brandIds: [TEST_BRAND_B],
           campaignId: "body-campaign",
           workflowSlug: "body-workflow",
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["header-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
       expect(res.body.campaignId).toBe("body-campaign");
       expect(res.body.workflowSlug).toBe("body-workflow");
     });
@@ -476,7 +476,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": "brand-1,brand-2,brand-3",
+          "x-brand-id": `${TEST_BRAND_A},${TEST_BRAND_B},${TEST_BRAND_C}`,
         })
         .send({
           serviceName: "svc",
@@ -484,7 +484,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["brand-1", "brand-2", "brand-3"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A, TEST_BRAND_B, TEST_BRAND_C]);
     });
 
     it("trims whitespace in multi-brand CSV header", async () => {
@@ -492,7 +492,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": " brand-1 , brand-2 ",
+          "x-brand-id": ` ${TEST_BRAND_A} , ${TEST_BRAND_B} `,
         })
         .send({
           serviceName: "svc",
@@ -500,7 +500,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["brand-1", "brand-2"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A, TEST_BRAND_B]);
     });
 
     it("single brand in x-brand-id header stores as single-element array", async () => {
@@ -508,7 +508,7 @@ describe("Runs CRUD", () => {
         .post("/v1/runs")
         .set({
           ...authHeaders,
-          "x-brand-id": "only-brand",
+          "x-brand-id": TEST_BRAND_A,
         })
         .send({
           serviceName: "svc",
@@ -516,7 +516,36 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.brandIds).toEqual(["only-brand"]);
+      expect(res.body.brandIds).toEqual([TEST_BRAND_A]);
+    });
+
+    it("rejects non-UUID brand IDs in x-brand-id header", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-brand-id": "lifecycle",
+        })
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("invalid UUIDs");
+    });
+
+    it("rejects non-UUID brand IDs in body brandIds", async () => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "svc",
+          taskName: "task",
+          brandIds: ["not-a-uuid"],
+        });
+
+      expect(res.status).toBe(400);
     });
 
     it("stores featureSlug from x-feature-slug header", async () => {
