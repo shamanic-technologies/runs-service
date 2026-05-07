@@ -186,18 +186,14 @@ router.get("/v1/events", requireApiKey, async (req, res) => {
     const limit = limitStr ? Number(limitStr) : undefined;
     const offset = offsetStr ? Number(offsetStr) : 0;
 
-    let query = db
+    const baseQuery = db
       .select()
       .from(runEvents)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(runEvents.createdAt))
       .offset(offset);
 
-    if (limit !== undefined) {
-      query = query.limit(limit);
-    }
-
-    const events = await query;
+    const events = limit !== undefined ? await baseQuery.limit(limit) : await baseQuery;
 
     res.json({ events });
   } catch (err) {
