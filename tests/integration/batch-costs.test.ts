@@ -298,4 +298,236 @@ describe("POST /v1/runs/costs/batch", () => {
     expect(res.status).toBe(200);
     expect(res.body.costs).toHaveLength(0);
   });
+
+  describe("platform-split fields (own-run only)", () => {
+    it("returns ownActualPlatformCostInUsdCents for platform actuals only (excludes org)", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      // Platform actual — billable
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "platform-token",
+        costSource: "platform",
+        quantity: "100",
+        unitCostInUsdCents: "0.0030000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "actual",
+      });
+      // Org actual — NOT billable, must be excluded from platform field
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "org-token",
+        costSource: "org",
+        quantity: "100",
+        unitCostInUsdCents: "0.0050000000",
+        totalCostInUsdCents: "0.5000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [run.id] });
+
+      expect(res.status).toBe(200);
+      const entry = res.body.costs[0];
+      // Platform-only filter: 0.3 (excludes the 0.5 org row)
+      expect(entry.ownActualPlatformCostInUsdCents).toBe("0.3000000000");
+      expect(entry.ownProvisionedPlatformCostInUsdCents).toBe("0.0000000000");
+      // Existing fields preserved (sum of both sources)
+      expect(entry.actualCostInUsdCents).toBe("0.8000000000");
+    });
+
+    it("returns ownProvisionedPlatformCostInUsdCents for provisioned platform rows", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "platform-token",
+        costSource: "platform",
+        quantity: "100",
+        unitCostInUsdCents: "0.0070000000",
+        totalCostInUsdCents: "0.7000000000",
+        status: "provisioned",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [run.id] });
+
+      expect(res.status).toBe(200);
+      const entry = res.body.costs[0];
+      expect(entry.ownActualPlatformCostInUsdCents).toBe("0.0000000000");
+      expect(entry.ownProvisionedPlatformCostInUsdCents).toBe("0.7000000000");
+    });
+
+    it("excludes cancelled platform rows from platform fields", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "platform-token",
+        costSource: "platform",
+        quantity: "100",
+        unitCostInUsdCents: "0.0040000000",
+        totalCostInUsdCents: "0.4000000000",
+        status: "actual",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "platform-token",
+        costSource: "platform",
+        quantity: "100",
+        unitCostInUsdCents: "0.0040000000",
+        totalCostInUsdCents: "0.4000000000",
+        status: "cancelled",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [run.id] });
+
+      expect(res.status).toBe(200);
+      const entry = res.body.costs[0];
+      expect(entry.ownActualPlatformCostInUsdCents).toBe("0.4000000000");
+    });
+
+    it("returns 0.0000000000 platform fields for runs with no platform rows", async () => {
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "org-only",
+        costSource: "org",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [run.id] });
+
+      expect(res.status).toBe(200);
+      const entry = res.body.costs[0];
+      expect(entry.ownActualPlatformCostInUsdCents).toBe("0.0000000000");
+      expect(entry.ownProvisionedPlatformCostInUsdCents).toBe("0.0000000000");
+    });
+
+    it("platform fields exclude descendants (own-run only)", async () => {
+      const parent = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "parent",
+      });
+      const child = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "child",
+        parentRunId: parent.id,
+      });
+      // Cost on parent (own — must count)
+      await insertTestRunCost({
+        runId: parent.id,
+        costName: "parent-cost",
+        costSource: "platform",
+        quantity: "1",
+        unitCostInUsdCents: "0.2000000000",
+        totalCostInUsdCents: "0.2000000000",
+        status: "actual",
+      });
+      // Cost on child (descendant — must NOT count toward parent's own platform field)
+      await insertTestRunCost({
+        runId: child.id,
+        costName: "child-cost",
+        costSource: "platform",
+        quantity: "1",
+        unitCostInUsdCents: "0.5000000000",
+        totalCostInUsdCents: "0.5000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [parent.id] });
+
+      expect(res.status).toBe(200);
+      const entry = res.body.costs[0];
+      // Own-only: 0.2 (NOT 0.7 which would include the descendant)
+      expect(entry.ownActualPlatformCostInUsdCents).toBe("0.2000000000");
+      // Existing rolled-up field still includes descendants
+      expect(entry.actualCostInUsdCents).toBe("0.7000000000");
+    });
+
+    it("returns platform fields per row across multiple runs in one batch", async () => {
+      const runA = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "a",
+      });
+      const runB = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "b",
+      });
+      await insertTestRunCost({
+        runId: runA.id,
+        costName: "x",
+        costSource: "platform",
+        quantity: "1",
+        unitCostInUsdCents: "0.1100000000",
+        totalCostInUsdCents: "0.1100000000",
+        status: "actual",
+      });
+      await insertTestRunCost({
+        runId: runB.id,
+        costName: "y",
+        costSource: "platform",
+        quantity: "1",
+        unitCostInUsdCents: "0.2200000000",
+        totalCostInUsdCents: "0.2200000000",
+        status: "provisioned",
+      });
+      // Org row on B — must not leak into platform field
+      await insertTestRunCost({
+        runId: runB.id,
+        costName: "z",
+        costSource: "org",
+        quantity: "1",
+        unitCostInUsdCents: "0.9900000000",
+        totalCostInUsdCents: "0.9900000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/runs/costs/batch")
+        .set(authHeaders)
+        .send({ runIds: [runA.id, runB.id] });
+
+      expect(res.status).toBe(200);
+      const a = res.body.costs.find((c: any) => c.runId === runA.id);
+      const b = res.body.costs.find((c: any) => c.runId === runB.id);
+      expect(a.ownActualPlatformCostInUsdCents).toBe("0.1100000000");
+      expect(a.ownProvisionedPlatformCostInUsdCents).toBe("0.0000000000");
+      expect(b.ownActualPlatformCostInUsdCents).toBe("0.0000000000");
+      expect(b.ownProvisionedPlatformCostInUsdCents).toBe("0.2200000000");
+    });
+  });
 });

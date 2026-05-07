@@ -1621,4 +1621,188 @@ describe("Runs CRUD", () => {
       expect(vi.mocked(cancelProvision)).not.toHaveBeenCalled();
     });
   });
+
+  describe("Billing precision (drop Math.ceil)", () => {
+    it("sends raw fractional cents to deductCredits (NOT Math.ceil)", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+      const mockedDeduct = vi.mocked(deductCredits);
+
+      mockedDeduct.mockClear();
+      mockedResolve.mockResolvedValueOnce(
+        new Map([["test-cost", "0.0005000000"]])
+      );
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // 1000 × 0.0005 = 0.5¢ — strictly less than 1¢
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [{ costName: "test-cost", costSource: "platform", quantity: 1000 }],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedDeduct).toHaveBeenCalledTimes(1);
+      const amountSent = mockedDeduct.mock.calls[0][0];
+      // Must NOT be Math.ceil(0.5) = 1
+      expect(amountSent).toBeCloseTo(0.5, 10);
+      expect(amountSent).not.toBe(1);
+    });
+
+    // 5 sequential billed POSTs against a cold Neon CI branch can exceed the 5s default.
+    it("5 sequential POSTs of 0.2¢ each → total billed = exactly 1.0¢ (NOT 5¢)", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+      const mockedDeduct = vi.mocked(deductCredits);
+
+      mockedDeduct.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // 1000 × 0.0002 = 0.2¢ per POST
+      for (let i = 0; i < 5; i++) {
+        mockedResolve.mockResolvedValueOnce(
+          new Map([["sub-cent-token", "0.0002000000"]])
+        );
+        const res = await request(app)
+          .post(`/v1/runs/${run.id}/costs`)
+          .set(authHeaders)
+          .send({
+            items: [{ costName: "sub-cent-token", costSource: "platform", quantity: 1000 }],
+          });
+        expect(res.status).toBe(201);
+      }
+
+      expect(mockedDeduct).toHaveBeenCalledTimes(5);
+      const totalDeducted = mockedDeduct.mock.calls.reduce(
+        (sum, call) => sum + Number(call[0]),
+        0
+      );
+      // Real total = 5 × 0.2 = 1.0¢. Old buggy code would've sent 5 × 1¢ = 5¢.
+      expect(totalDeducted).toBeCloseTo(1.0, 10);
+      expect(totalDeducted).toBeLessThan(2);
+    }, 30_000);
+
+    it("sends raw fractional cents to provisionCredits (NOT Math.ceil)", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const { provisionCredits } = await import("../../src/services/billing.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+      const mockedProvision = vi.mocked(provisionCredits);
+
+      mockedProvision.mockClear();
+      mockedResolve.mockResolvedValueOnce(
+        new Map([["test-cost", "0.0003000000"]])
+      );
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // 1000 × 0.0003 = 0.3¢
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "test-cost", costSource: "platform", quantity: 1000, status: "provisioned" },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedProvision).toHaveBeenCalledTimes(1);
+      const amountSent = mockedProvision.mock.calls[0][0];
+      expect(amountSent).toBeCloseTo(0.3, 10);
+      expect(amountSent).not.toBe(1);
+    });
+
+    it("mixed org+platform single POST: only platform sum sent to deductCredits", async () => {
+      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
+      const { deductCredits } = await import("../../src/services/billing.js");
+      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
+      const mockedDeduct = vi.mocked(deductCredits);
+
+      mockedDeduct.mockClear();
+      mockedResolve.mockResolvedValueOnce(
+        new Map([
+          ["platform-cost", "0.0004000000"],
+          ["org-cost", "0.0010000000"],
+        ])
+      );
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      // platform: 1000 × 0.0004 = 0.4¢
+      // org: 1000 × 0.0010 = 1.0¢ (must NOT be billed)
+      const res = await request(app)
+        .post(`/v1/runs/${run.id}/costs`)
+        .set(authHeaders)
+        .send({
+          items: [
+            { costName: "platform-cost", costSource: "platform", quantity: 1000 },
+            { costName: "org-cost", costSource: "org", quantity: 1000 },
+          ],
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedDeduct).toHaveBeenCalledTimes(1);
+      const amountSent = mockedDeduct.mock.calls[0][0];
+      // Only platform 0.4¢, NOT 1.4¢ (mixed) and NOT 1¢ (ceil)
+      expect(amountSent).toBeCloseTo(0.4, 10);
+      expect(amountSent).not.toBe(1);
+      expect(amountSent).toBeLessThan(1);
+    });
+
+    it("PATCH provisioned → actual: confirmProvision receives raw fractional (NOT Math.ceil)", async () => {
+      const { confirmProvision } = await import("../../src/services/billing.js");
+      const mockedConfirm = vi.mocked(confirmProvision);
+      mockedConfirm.mockClear();
+
+      const run = await insertTestRun({
+        organizationId: TEST_ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+      });
+
+      const cost = await insertTestRunCost({
+        runId: run.id,
+        costName: "gpt-4o-input-token",
+        costSource: "platform",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0003000000",
+        totalCostInUsdCents: "0.3000000000",
+        status: "provisioned",
+        billingProvisionId: "prov_xyz",
+      });
+
+      const res = await request(app)
+        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
+        .set(authHeaders)
+        .send({ status: "actual" });
+
+      expect(res.status).toBe(200);
+      expect(mockedConfirm).toHaveBeenCalledTimes(1);
+      const amountSent = mockedConfirm.mock.calls[0][1];
+      // Must NOT be Math.ceil(0.3) = 1
+      expect(amountSent).toBeCloseTo(0.3, 10);
+      expect(amountSent).not.toBe(1);
+    });
+  });
 });

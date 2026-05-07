@@ -231,6 +231,7 @@ describe("Run Events", () => {
       expect(res.body.events[0].service).toBe("brand-service");
     });
 
+    // 7 sequential DB ops on a cold Neon CI branch can exceed the 5s default.
     it("supports pagination with limit and offset", async () => {
       const run = await insertTestRun({
         organizationId: TEST_ORG_ID,
@@ -251,7 +252,7 @@ describe("Run Events", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.events).toHaveLength(2);
-    });
+    }, 30_000);
 
     it("orders by created_at DESC", async () => {
       const run = await insertTestRun({

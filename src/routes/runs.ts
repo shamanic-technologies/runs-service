@@ -171,6 +171,7 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 
     // Single recursive CTE: find each requested run + all its descendants,
     // tracking which root run ID each row belongs to.
+    // Platform-only own-row aggregations gate on `d.id = d.root_run_id` to exclude descendants.
     const result = await db.execute(
       sql`WITH RECURSIVE descendants AS (
         SELECT id, id as root_run_id
@@ -186,7 +187,9 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
         d.root_run_id,
         COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
         COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost
+        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
+        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'actual' AND rc.cost_source = 'platform' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as own_actual_platform_cost,
+        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'provisioned' AND rc.cost_source = 'platform' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as own_provisioned_platform_cost
       FROM descendants d
       LEFT JOIN runs_costs rc ON rc.run_id = d.id
       GROUP BY d.root_run_id`
@@ -198,6 +201,8 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
       totalCostInUsdCents: Number(row.total_cost).toFixed(10),
       actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
       provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
+      ownActualPlatformCostInUsdCents: Number(row.own_actual_platform_cost).toFixed(10),
+      ownProvisionedPlatformCostInUsdCents: Number(row.own_provisioned_platform_cost).toFixed(10),
     }));
 
     res.json({ costs });
@@ -390,12 +395,10 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       featureSlug: req.headerFeatureSlug,
     };
 
-    // Deduct: sum actual + platform costs (round up to nearest integer cent for billing)
-    const actualPlatformCents = Math.ceil(
-      costRows
-        .filter((r) => r.status === "actual" && r.costSource === "platform")
-        .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0)
-    );
+    // Deduct: sum actual + platform costs (raw fractional, no rounding)
+    const actualPlatformCents = costRows
+      .filter((r) => r.status === "actual" && r.costSource === "platform")
+      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
 
     if (actualPlatformCents > 0) {
       const deductResult = await deductCredits(
@@ -414,13 +417,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       }
     }
 
-    // Provision: sum provisioned + platform costs
+    // Provision: sum provisioned + platform costs (raw fractional, no rounding)
     const provisionedPlatformItems = costRows
       .filter((r) => r.status === "provisioned" && r.costSource === "platform");
-    const provisionedPlatformCents = Math.ceil(
-      provisionedPlatformItems
-        .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0)
-    );
+    const provisionedPlatformCents = provisionedPlatformItems
+      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
 
     if (provisionedPlatformCents > 0) {
       const provisionResult = await provisionCredits(
@@ -520,10 +521,10 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
       };
 
       if (existing.status === "provisioned" && newStatus === "actual") {
-        // Confirm provision with the actual cost
+        // Confirm provision with the raw fractional actual cost (no rounding)
         await confirmProvision(
           existing.billingProvisionId,
-          Math.ceil(Number(existing.totalCostInUsdCents)),
+          Number(existing.totalCostInUsdCents),
           billingCtx,
         );
       } else if (existing.status === "provisioned" && newStatus === "cancelled") {

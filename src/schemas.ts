@@ -139,6 +139,8 @@ export const BatchCostsEntrySchema = z
     totalCostInUsdCents: z.string(),
     actualCostInUsdCents: z.string(),
     provisionedCostInUsdCents: z.string(),
+    ownActualPlatformCostInUsdCents: z.string(),
+    ownProvisionedPlatformCostInUsdCents: z.string(),
   })
   .openapi("BatchCostsEntry");
 
@@ -462,7 +464,7 @@ registry.registerPath({
   path: "/v1/runs/costs/batch",
   summary: "Batch cost lookup by run IDs",
   description:
-    "Returns aggregated cost totals (including all descendant costs) for a list of run IDs. Runs not found are omitted from the response. Uses a single recursive CTE for efficiency.",
+    "Returns aggregated cost totals (including all descendant costs) for a list of run IDs. Per-row also includes `ownActualPlatformCostInUsdCents` and `ownProvisionedPlatformCostInUsdCents` — own-run-only sums of `cost_source='platform'` items, used by billing-service for reconcile (no rounding, full numeric precision). Runs not found are omitted from the response. Uses a single recursive CTE for efficiency.",
   security: [{ apiKey: [] }],
   request: {
     body: {

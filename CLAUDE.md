@@ -23,9 +23,20 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
+- `src/services/billing.ts` — billing-service client (`deductCredits`, `provisionCredits`, `confirmProvision`, `cancelProvision`)
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
 - `src/index.ts` — Express app setup and server entry point
 - `tests/unit/` — Unit tests
 - `tests/integration/` — Integration tests (supertest)
 - `openapi.json` — Auto-generated, do NOT edit manually
+
+## Cost & billing precision
+
+- `runs_costs.total_cost_in_usd_cents` is `numeric(16,10)` — fractional cents, do NOT round.
+- runs-service passes raw fractional amounts to billing-service (`deductCredits` / `provisionCredits` / `confirmProvision`). billing-service ledger stores fractional too. **Never reintroduce `Math.ceil` / `Math.round` / `Math.floor` on cost values** — per-batch rounding caused the 5.5× over-billing incident (window 2026-04-30 → 2026-05-04).
+- Only `cost_source='platform'` rows are billed. `cost_source='org'` is BYOK tracking — no billing call.
+
+## Deploy ordering with billing-service
+
+Any change to runs-service's billing call shape (amount type/precision, headers, endpoint path) MUST land in billing-service first and deploy to the target env before the runs-service PR merges. Squash-merge to `staging` triggers Railway auto-deploy; merging ahead of billing-service breaks the env. Document the upstream dependency in the PR body under `⚠️ Deployment ordering` and defer merge until billing-service is live in the same env.
