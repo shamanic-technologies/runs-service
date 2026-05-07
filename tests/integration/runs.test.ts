@@ -1656,6 +1656,7 @@ describe("Runs CRUD", () => {
       expect(amountSent).not.toBe(1);
     });
 
+    // 5 sequential billed POSTs against a cold Neon CI branch can exceed the 5s default.
     it("5 sequential POSTs of 0.2¢ each → total billed = exactly 1.0¢ (NOT 5¢)", async () => {
       const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
       const { deductCredits } = await import("../../src/services/billing.js");
@@ -1692,7 +1693,7 @@ describe("Runs CRUD", () => {
       // Real total = 5 × 0.2 = 1.0¢. Old buggy code would've sent 5 × 1¢ = 5¢.
       expect(totalDeducted).toBeCloseTo(1.0, 10);
       expect(totalDeducted).toBeLessThan(2);
-    });
+    }, 30_000);
 
     it("sends raw fractional cents to provisionCredits (NOT Math.ceil)", async () => {
       const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
