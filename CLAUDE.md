@@ -40,3 +40,13 @@ REST API for tracking service execution runs and their associated costs, with hi
 ## Deploy ordering with billing-service
 
 Any change to runs-service's billing call shape (amount type/precision, headers, endpoint path) MUST land in billing-service first and deploy to the target env before the runs-service PR merges. Squash-merge to `staging` triggers Railway auto-deploy; merging ahead of billing-service breaks the env. Document the upstream dependency in the PR body under `⚠️ Deployment ordering` and defer merge until billing-service is live in the same env.
+
+## Build verification gap
+
+CI runs vitest only — `npm run build` (i.e. `tsc`) is NOT in the test workflows. TypeScript-only failures (e.g. drizzle's `PgSelectBase` type narrowing on conditional `.limit()` chains) ship through green CI and break Railway. Until CI runs `npm run build`, run it locally before merging anything that:
+
+- changes a drizzle query builder (`.where`, `.limit`, `.offset`, `.orderBy` reassignments)
+- changes Zod schema generics consumed by the OpenAPI generator
+- adds/removes route handlers wired in `src/index.ts`
+
+The v0.21.1 hotfix exists because a `let query = …; query = query.limit(limit)` pattern passed CI and failed Railway TS build.
