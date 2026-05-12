@@ -39,8 +39,8 @@ jobs:
       - name: Set database URL
         run: echo "DB_URL=${{ steps.neon.outputs.db_url_pooled }}" >> "$GITHUB_ENV"
 
-      - name: Push schema
-        run: npx drizzle-kit push --force
+      - name: Apply migrations
+        run: npx drizzle-kit migrate
         env:
           RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
 
