@@ -15,17 +15,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - run: npm ci
       - run: npm run generate:openapi
       - run: npm run test:unit
 
   test-integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - run: npm ci
 
       - name: Create Neon branch
@@ -33,11 +39,11 @@ jobs:
         uses: neondatabase/create-branch-action@v6
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch_name: ci-${{ github.run_id }}
+          branch_name: ci-${{ github.run_id }}-shard-${{ matrix.shard }}
           api_key: ${{ secrets.NEON_API_KEY }}
 
       - name: Set database URL
-        run: echo "DB_URL=${{ steps.neon.outputs.db_url_pooled }}" >> "$GITHUB_ENV"
+        run: echo "DB_URL=${{ steps.neon.outputs.db_url }}" >> "$GITHUB_ENV"
 
       - name: Apply migrations
         run: npx drizzle-kit migrate
@@ -48,7 +54,7 @@ jobs:
         run: npm run generate:openapi
 
       - name: Run integration tests
-        run: npm run test:integration
+        run: npx vitest run tests/integration --shard=${{ matrix.shard }}/4
         env:
           RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
           RUNS_SERVICE_API_KEY: test-api-key
@@ -60,5 +66,5 @@ jobs:
         uses: neondatabase/delete-branch-action@v3
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch: ci-${{ github.run_id }}
+          branch: ci-${{ github.run_id }}-shard-${{ matrix.shard }}
           api_key: ${{ secrets.NEON_API_KEY }}

@@ -3,19 +3,21 @@ import request from "supertest";
 import { createTestApp, getInternalAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, insertTestRun, insertTestRunCost, closeDb } from "../helpers/test-db.js";
 
+// File-local org ids keep this file isolated from other integration files running in parallel.
 const ORG_ID = "55555555-5555-4555-a555-555555555555";
 const OTHER_ORG_ID = "66666666-6666-4666-a666-666666666666";
+const ORG_IDS = [ORG_ID, OTHER_ORG_ID];
 
 describe("GET /internal/runs-expected-totals", () => {
   const app = createTestApp();
   const headers = getInternalAuthHeaders();
 
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData(ORG_IDS);
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData(ORG_IDS);
     await closeDb();
   });
 

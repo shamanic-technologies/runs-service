@@ -1,25 +1,28 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders, TEST_ORG_ID, TEST_USER_ID, TEST_BRAND_A } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders, TEST_USER_ID, TEST_BRAND_A } from "../helpers/test-app.js";
 import { cleanTestData, insertTestRun, closeDb } from "../helpers/test-db.js";
+
+// File-local org id keeps this file isolated from other integration files running in parallel.
+const ORG_ID = "dddddddd-4444-4444-addd-444444444444";
 
 describe("Run Events", () => {
   const app = createTestApp();
-  const authHeaders = getAuthHeaders();
+  const authHeaders = getAuthHeaders({ orgId: ORG_ID });
 
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData([ORG_ID]);
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData([ORG_ID]);
     await closeDb();
   });
 
   describe("POST /v1/runs/:id/events", () => {
     it("creates an event for an existing run", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -48,7 +51,7 @@ describe("Run Events", () => {
 
     it("stores identity headers in the event row", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "workflow-service",
         taskName: "execute",
       });
@@ -68,7 +71,7 @@ describe("Run Events", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.orgId).toBe(TEST_ORG_ID);
+      expect(res.body.orgId).toBe(ORG_ID);
       expect(res.body.userId).toBe(TEST_USER_ID);
       expect(res.body.brandIds).toBe(TEST_BRAND_A);
       expect(res.body.campaignId).toBe("dddddddd-dddd-4ddd-bddd-dddddddddddd");
@@ -91,7 +94,7 @@ describe("Run Events", () => {
 
     it("returns 400 for invalid body", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -106,7 +109,7 @@ describe("Run Events", () => {
 
     it("defaults level to info when not provided", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -127,7 +130,7 @@ describe("Run Events", () => {
   describe("GET /v1/runs/:id/events", () => {
     it("returns events ordered by created_at ASC", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -161,7 +164,7 @@ describe("Run Events", () => {
 
     it("filters by level", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -202,12 +205,12 @@ describe("Run Events", () => {
   describe("GET /v1/events", () => {
     it("returns events across runs filtered by service", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "workflow-service",
         taskName: "execute",
       });
@@ -234,7 +237,7 @@ describe("Run Events", () => {
     // 7 sequential DB ops on a cold Neon CI branch can exceed the 5s default.
     it("supports pagination with limit and offset", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });
@@ -256,7 +259,7 @@ describe("Run Events", () => {
 
     it("orders by created_at DESC", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "brand-service",
         taskName: "scrape",
       });

@@ -4,8 +4,11 @@ import { createTestApp, getInternalAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, insertTestRun, closeDb } from "../helpers/test-db.js";
 
 // UUIDs that pass Zod v4 strict validation (version [1-8], variant [89abAB])
+// File-local org ids keep this file isolated from other integration files running in parallel.
 const SOURCE_ORG_ID = "11111111-1111-4111-a111-111111111111";
 const TARGET_ORG_ID = "33333333-3333-4333-a333-333333333333";
+const OTHER_ORG_ID = "44444444-4444-4444-a444-444444444444";
+const ORG_IDS = [SOURCE_ORG_ID, TARGET_ORG_ID, OTHER_ORG_ID];
 const BRAND_A = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const BRAND_B = "bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb";
 
@@ -14,11 +17,11 @@ describe("POST /internal/transfer-brand", () => {
   const headers = getInternalAuthHeaders();
 
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData(ORG_IDS);
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData(ORG_IDS);
     await closeDb();
   });
 
@@ -185,7 +188,6 @@ describe("POST /internal/transfer-brand", () => {
 
   it("rewrites brand globally across orgs when targetBrandId is provided", async () => {
     const TARGET_BRAND = "cccccccc-cccc-4ccc-accc-cccccccccccc";
-    const OTHER_ORG_ID = "44444444-4444-4444-a444-444444444444";
 
     // Run in sourceOrg — should move org AND rewrite brand
     const run1 = await insertTestRun({
