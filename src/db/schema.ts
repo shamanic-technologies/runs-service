@@ -45,7 +45,7 @@ export const runsCosts = pgTable(
     unitCostInUsdCents: numeric("unit_cost_in_usd_cents", { precision: 12, scale: 10 }).notNull(),
     totalCostInUsdCents: numeric("total_cost_in_usd_cents", { precision: 16, scale: 10 }).notNull(),
     status: text("status").notNull().default("actual"),
-    billingProvisionId: text("billing_provision_id"),
+    billingTransactionId: text("billing_transaction_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

@@ -29,7 +29,7 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
 
 vi.mock("../../src/services/billing.js", () => ({
   deductCredits: vi.fn().mockResolvedValue({ success: true }),
-  provisionCredits: vi.fn().mockResolvedValue({ provision_id: "prov_test" }),
+  provisionCredits: vi.fn().mockResolvedValue({ transaction_id: "txn_test" }),
   confirmProvision: vi.fn().mockResolvedValue({ success: true }),
   cancelProvision: vi.fn().mockResolvedValue({ success: true }),
   BillingError: class BillingError extends Error {

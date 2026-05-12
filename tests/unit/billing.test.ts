@@ -39,7 +39,8 @@ describe("billing client", () => {
     status: 200,
     json: () =>
       Promise.resolve({
-        provision_id: "prov_abc123",
+        transaction_id: "txn_abc123",
+        provision_id: "txn_abc123",
         balance_cents: 4500,
       }),
   });
@@ -142,36 +143,58 @@ describe("billing client", () => {
   });
 
   describe("provisionCredits", () => {
-    it("calls billing-service /v1/credits/provision", async () => {
+    it("calls billing-service /v1/credits/provision with cost_id in body", async () => {
       const mockFetch = vi.fn().mockResolvedValue(okProvisionResponse());
       vi.stubGlobal("fetch", mockFetch);
 
-      const result = await provisionCredits(500, "run:xyz — 1 provisioned items", TEST_CTX);
+      const result = await provisionCredits(
+        500,
+        "run:xyz cost:cost_42",
+        TEST_CTX,
+        "cost_42",
+      );
 
-      expect(result.provision_id).toBe("prov_abc123");
+      expect(result.transaction_id).toBe("txn_abc123");
       expect(mockFetch).toHaveBeenCalledWith(
         "http://localhost:9998/v1/credits/provision",
         expect.objectContaining({ method: "POST" }),
       );
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.amount_cents).toBe(500);
+      expect(body.description).toBe("run:xyz cost:cost_42");
+      expect(body.cost_id).toBe("cost_42");
+    });
+
+    it("falls back to provision_id alias when transaction_id absent", async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ provision_id: "txn_legacy", balance_cents: 100 }),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await provisionCredits(100, "test", TEST_CTX, "cost_x");
+      expect(result.transaction_id).toBe("txn_legacy");
     });
 
     it("throws BillingError on failure", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
 
-      await expect(provisionCredits(500, "test", TEST_CTX)).rejects.toThrow(BillingError);
+      await expect(provisionCredits(500, "test", TEST_CTX, "cost_x")).rejects.toThrow(BillingError);
     });
   });
 
   describe("confirmProvision", () => {
-    it("calls billing-service /v1/credits/provision/:id/confirm", async () => {
+    it("calls billing-service /v1/credits/provision/by-cost/:costId/confirm", async () => {
       const mockFetch = vi.fn().mockResolvedValue(okConfirmResponse());
       vi.stubGlobal("fetch", mockFetch);
 
-      const result = await confirmProvision("prov_abc123", 480, TEST_CTX);
+      const result = await confirmProvision("cost_42", 480, TEST_CTX);
 
       expect(result.success).toBe(true);
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/provision/prov_abc123/confirm",
+        "http://localhost:9998/v1/credits/provision/by-cost/cost_42/confirm",
         expect.objectContaining({ method: "POST" }),
       );
 
@@ -181,15 +204,15 @@ describe("billing client", () => {
   });
 
   describe("cancelProvision", () => {
-    it("calls billing-service /v1/credits/provision/:id/cancel", async () => {
+    it("calls billing-service /v1/credits/provision/by-cost/:costId/cancel", async () => {
       const mockFetch = vi.fn().mockResolvedValue(okCancelResponse());
       vi.stubGlobal("fetch", mockFetch);
 
-      const result = await cancelProvision("prov_abc123", TEST_CTX);
+      const result = await cancelProvision("cost_42", TEST_CTX);
 
       expect(result.success).toBe(true);
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/provision/prov_abc123/cancel",
+        "http://localhost:9998/v1/credits/provision/by-cost/cost_42/cancel",
         expect.objectContaining({ method: "POST" }),
       );
     });

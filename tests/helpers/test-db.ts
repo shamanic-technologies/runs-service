@@ -45,7 +45,7 @@ export async function insertTestRunCost(data: {
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
   status?: string;
-  billingProvisionId?: string;
+  billingTransactionId?: string;
 }) {
   const [cost] = await db
     .insert(runsCosts)
@@ -53,7 +53,7 @@ export async function insertTestRunCost(data: {
       ...data,
       costSource: data.costSource ?? "platform",
       status: data.status ?? "actual",
-      billingProvisionId: data.billingProvisionId ?? null,
+      billingTransactionId: data.billingTransactionId ?? null,
     })
     .returning();
   return cost;
