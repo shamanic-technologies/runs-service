@@ -417,32 +417,27 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       }
     }
 
-    // Provision: sum provisioned + platform costs (raw fractional, no rounding)
-    const provisionedPlatformItems = costRows
-      .filter((r) => r.status === "provisioned" && r.costSource === "platform");
-    const provisionedPlatformCents = provisionedPlatformItems
-      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+    // Provision: ONE call per provisioned + platform cost row, bound by cost_id
+    // (raw fractional amount — billing-service stores numeric(16,10), no rounding)
+    const provisionedPlatformRows = inserted.filter(
+      (c) => c.status === "provisioned" && c.costSource === "platform",
+    );
 
-    if (provisionedPlatformCents > 0) {
-      const provisionResult = await provisionCredits(
-        provisionedPlatformCents,
-        `run:${id} — ${provisionedPlatformItems.length} provisioned items`,
-        billingCtx,
-      );
-
-      // Store billing_provision_id on all provisioned platform cost rows
-      const provisionedInsertedIds = inserted
-        .filter((c) => c.status === "provisioned" && c.costSource === "platform")
-        .map((c) => c.id);
-
-      if (provisionedInsertedIds.length > 0) {
+    if (provisionedPlatformRows.length > 0) {
+      for (const row of provisionedPlatformRows) {
+        const result = await provisionCredits(
+          Number(row.totalCostInUsdCents),
+          `run:${id} cost:${row.id} (${row.costName})`,
+          billingCtx,
+          row.id,
+        );
         await db
           .update(runsCosts)
-          .set({ billingProvisionId: provisionResult.provision_id })
-          .where(inArray(runsCosts.id, provisionedInsertedIds));
+          .set({ billingTransactionId: result.transaction_id })
+          .where(eq(runsCosts.id, row.id));
       }
 
-      // Re-read to return updated rows with billing_provision_id
+      // Re-read to return updated rows with billing_transaction_id
       const updatedCosts = await db
         .select()
         .from(runsCosts)
@@ -455,16 +450,23 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     res.status(201).json({ costs: inserted });
   } catch (err) {
     if (err instanceof BillingError) {
-      console.error(`[Runs Service] billing-service unavailable (${err.statusCode}):`, err.message);
+      // 4xx from billing-service is a real, actionable status from upstream — propagate.
+      // 5xx / network / timeout signals upstream unavailability — surface as 502.
+      if (err.statusCode >= 400 && err.statusCode < 500) {
+        console.error(`[runs-service] billing-service ${err.statusCode}:`, err.message);
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      console.error(`[runs-service] billing-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
       return;
     }
     if (err instanceof UpstreamError) {
-      console.error(`[Runs Service] costs-service unavailable (${err.statusCode}):`, err.message);
+      console.error(`[runs-service] costs-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
       return;
     }
-    console.error("[Runs Service] Error adding run costs:", err);
+    console.error("[runs-service] Error adding run costs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -501,11 +503,12 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
 
     const newStatus = parsed.data.status;
 
-    // Billing integration for platform costs with a provision
-    if (existing.costSource === "platform" && existing.billingProvisionId) {
+    // Billing integration for platform costs with a provision.
+    // Bound by cost_id (the runs_costs.id natural key), NOT the audit-only billing_transaction_id.
+    if (existing.costSource === "platform" && existing.billingTransactionId) {
       const billingUserId = req.userId || run.userId;
       if (!billingUserId) {
-        console.error(`[Runs Service] Cannot bill for run ${id}: no userId available from request or run record`);
+        console.error(`[runs-service] Cannot bill for run ${id}: no userId available from request or run record`);
         res.status(400).json({ error: "x-user-id header is required when updating platform cost items" });
         return;
       }
@@ -521,15 +524,15 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
       };
 
       if (existing.status === "provisioned" && newStatus === "actual") {
-        // Confirm provision with the raw fractional actual cost (no rounding)
+        // Confirm provision with raw fractional actual cost (no rounding)
         await confirmProvision(
-          existing.billingProvisionId,
+          existing.id,
           Number(existing.totalCostInUsdCents),
           billingCtx,
         );
       } else if (existing.status === "provisioned" && newStatus === "cancelled") {
         // Cancel provision — re-credits the org
-        await cancelProvision(existing.billingProvisionId, billingCtx);
+        await cancelProvision(existing.id, billingCtx);
       }
     }
 
@@ -543,11 +546,16 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     res.json(updated);
   } catch (err) {
     if (err instanceof BillingError) {
-      console.error(`[Runs Service] billing-service error (${err.statusCode}):`, err.message);
+      if (err.statusCode >= 400 && err.statusCode < 500) {
+        console.error(`[runs-service] billing-service ${err.statusCode}:`, err.message);
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      console.error(`[runs-service] billing-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
       return;
     }
-    console.error("[Runs Service] Error updating cost:", err);
+    console.error("[runs-service] Error updating cost:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
