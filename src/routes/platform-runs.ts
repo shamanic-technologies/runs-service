@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requirePlatformAuth } from "../middleware/auth.js";
@@ -98,8 +99,7 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
     // Build cost rows
     const costRows = items.map((item) => {
       const unitCost = costMap.get(item.costName)!;
-      const qty = Number(item.quantity);
-      const total = (qty * Number(unitCost)).toFixed(10);
+      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
       return {
         runId: id,
         costName: item.costName,

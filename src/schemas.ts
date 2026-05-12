@@ -565,6 +565,49 @@ registry.registerPath({
   },
 });
 
+export const RunsExpectedTotalsQuerySchema = z
+  .object({
+    org_id: z.string().uuid(),
+  })
+  .openapi("RunsExpectedTotalsQuery");
+
+export const RunsExpectedTotalsEntrySchema = z
+  .object({
+    run_id: z.string().uuid(),
+    expected_cents: z.string(),
+  })
+  .openapi("RunsExpectedTotalsEntry");
+
+export const RunsExpectedTotalsResponseSchema = z
+  .object({
+    total_expected_cents: z.string(),
+    runs: z.array(RunsExpectedTotalsEntrySchema),
+  })
+  .openapi("RunsExpectedTotalsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/runs-expected-totals",
+  summary: "Per-run expected platform-actual cost totals for an org",
+  description:
+    "Returns, for every completed/failed run in the org, the SUM of runs_costs.total_cost_in_usd_cents over rows where cost_source='platform' AND status='actual'. Runs with zero qualifying total are omitted. The org-level total_expected_cents is the sum of all per-run totals. All values are strings to preserve numeric(16,10) precision — billing-service uses this to detect drift against confirmed transactions.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: RunsExpectedTotalsQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Per-run expected totals + org-level aggregate",
+      content: { "application/json": { schema: RunsExpectedTotalsResponseSchema } },
+    },
+    400: {
+      description: "Invalid query parameters",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Public runs stats schemas ---
 
 export const PublicRunsStatsStatusBreakdownSchema = z
