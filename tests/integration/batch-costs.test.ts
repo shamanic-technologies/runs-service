@@ -10,6 +10,9 @@ import {
 
 // File-local org id keeps this file isolated from other integration files running in parallel.
 const ORG_ID = "cccccccc-3333-4333-accc-333333333333";
+// A second org used by org-isolation test; must be cleaned too.
+const OTHER_ORG_ID = "33333333-3333-3333-3333-333333333333";
+const CLEANUP_ORG_IDS = [ORG_ID, OTHER_ORG_ID];
 
 // Mock cost-resolver for integration tests
 vi.mock("../../src/services/cost-resolver.js", () => ({
@@ -49,11 +52,11 @@ describe("POST /v1/runs/costs/batch", () => {
   const authHeaders = getAuthHeaders({ orgId: ORG_ID });
 
   beforeEach(async () => {
-    await cleanTestData([ORG_ID]);
+    await cleanTestData(CLEANUP_ORG_IDS);
   });
 
   afterAll(async () => {
-    await cleanTestData([ORG_ID]);
+    await cleanTestData(CLEANUP_ORG_IDS);
     await closeDb();
   });
 

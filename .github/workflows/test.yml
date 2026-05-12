@@ -25,7 +25,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          # `/public/*` endpoints aggregate across all orgs and can't be made
+          # immune to other files inserting rows in parallel — keep stats alone.
+          - name: stats
+            files: tests/integration/stats.test.ts
+          # Heaviest file by test count and wall-clock; runs alone.
+          - name: runs
+            files: tests/integration/runs.test.ts
+          - name: writers
+            files: tests/integration/batch-costs.test.ts tests/integration/events.test.ts tests/integration/transfer-brand.test.ts tests/integration/platform-runs.test.ts
+          - name: misc
+            files: tests/integration/runs-expected-totals.test.ts tests/integration/health.test.ts tests/integration/indexes.test.ts tests/integration/openapi.test.ts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,7 +50,7 @@ jobs:
         uses: neondatabase/create-branch-action@v6
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch_name: ci-${{ github.run_id }}-shard-${{ matrix.shard }}
+          branch_name: ci-${{ github.run_id }}-${{ matrix.name }}
           api_key: ${{ secrets.NEON_API_KEY }}
 
       - name: Set database URL
@@ -54,7 +65,7 @@ jobs:
         run: npm run generate:openapi
 
       - name: Run integration tests
-        run: npx vitest run tests/integration --shard=${{ matrix.shard }}/4
+        run: npx vitest run ${{ matrix.files }}
         env:
           RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
           RUNS_SERVICE_API_KEY: test-api-key
@@ -66,5 +77,5 @@ jobs:
         uses: neondatabase/delete-branch-action@v3
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch: ci-${{ github.run_id }}-shard-${{ matrix.shard }}
+          branch: ci-${{ github.run_id }}-${{ matrix.name }}
           api_key: ${{ secrets.NEON_API_KEY }}

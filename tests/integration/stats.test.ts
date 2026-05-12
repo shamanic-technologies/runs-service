@@ -11,13 +11,17 @@ import * as dynastyResolver from "../../src/services/dynasty-resolver.js";
 
 // File-local org id keeps this file isolated from other integration files running in parallel.
 const ORG_ID = "bbbbbbbb-2222-4222-abbb-222222222222";
+// Some tests insert into a second org to assert cross-org filtering/aggregation;
+// it must be cleaned between tests so /public/* tests don't see leftovers.
+const OTHER_ORG_ID = "99999999-9999-9999-9999-999999999999";
+const CLEANUP_ORG_IDS = [ORG_ID, OTHER_ORG_ID];
 
 describe("Stats endpoints", () => {
   const app = createTestApp();
   const authHeaders = getAuthHeaders({ orgId: ORG_ID });
 
   beforeEach(async () => {
-    await cleanTestData([ORG_ID]);
+    await cleanTestData(CLEANUP_ORG_IDS);
   });
 
   afterEach(() => {
@@ -25,7 +29,7 @@ describe("Stats endpoints", () => {
   });
 
   afterAll(async () => {
-    await cleanTestData([ORG_ID]);
+    await cleanTestData(CLEANUP_ORG_IDS);
     await closeDb();
   });
 
