@@ -110,7 +110,7 @@ export async function deductCredits(
 // --- Provision ---
 
 export interface ProvisionResult {
-  provision_id: string;
+  transaction_id: string;
   balance_cents: number | null;
 }
 
@@ -118,16 +118,24 @@ export async function provisionCredits(
   amountCents: number,
   description: string,
   ctx: BillingContext,
+  costId: string,
 ): Promise<ProvisionResult> {
   const res = await billingFetch("/v1/credits/provision", {
     method: "POST",
     headers: buildHeaders(ctx),
-    body: JSON.stringify({ amount_cents: amountCents, description }),
+    body: JSON.stringify({ amount_cents: amountCents, description, cost_id: costId }),
   });
-  return res.json() as Promise<ProvisionResult>;
+  const body = (await res.json()) as { transaction_id?: string; provision_id?: string; balance_cents: number | null };
+  // billing-service returns both `transaction_id` and `provision_id` (deprecated alias).
+  // Prefer `transaction_id`; fall back to alias for transitional compatibility.
+  const transactionId = body.transaction_id ?? body.provision_id;
+  if (!transactionId) {
+    throw new BillingError(502, "billing-service response missing transaction_id");
+  }
+  return { transaction_id: transactionId, balance_cents: body.balance_cents };
 }
 
-// --- Confirm provision ---
+// --- Confirm provision (by cost_id) ---
 
 export interface ConfirmResult {
   success: boolean;
@@ -135,19 +143,22 @@ export interface ConfirmResult {
 }
 
 export async function confirmProvision(
-  provisionId: string,
+  costId: string,
   actualAmountCents: number,
   ctx: BillingContext,
 ): Promise<ConfirmResult> {
-  const res = await billingFetch(`/v1/credits/provision/${encodeURIComponent(provisionId)}/confirm`, {
-    method: "POST",
-    headers: buildHeaders(ctx),
-    body: JSON.stringify({ actual_amount_cents: actualAmountCents }),
-  });
+  const res = await billingFetch(
+    `/v1/credits/provision/by-cost/${encodeURIComponent(costId)}/confirm`,
+    {
+      method: "POST",
+      headers: buildHeaders(ctx),
+      body: JSON.stringify({ actual_amount_cents: actualAmountCents }),
+    },
+  );
   return res.json() as Promise<ConfirmResult>;
 }
 
-// --- Cancel provision ---
+// --- Cancel provision (by cost_id) ---
 
 export interface CancelResult {
   success: boolean;
@@ -155,13 +166,16 @@ export interface CancelResult {
 }
 
 export async function cancelProvision(
-  provisionId: string,
+  costId: string,
   ctx: BillingContext,
 ): Promise<CancelResult> {
-  const res = await billingFetch(`/v1/credits/provision/${encodeURIComponent(provisionId)}/cancel`, {
-    method: "POST",
-    headers: buildHeaders(ctx),
-    body: JSON.stringify({}),
-  });
+  const res = await billingFetch(
+    `/v1/credits/provision/by-cost/${encodeURIComponent(costId)}/cancel`,
+    {
+      method: "POST",
+      headers: buildHeaders(ctx),
+      body: JSON.stringify({}),
+    },
+  );
   return res.json() as Promise<CancelResult>;
 }
