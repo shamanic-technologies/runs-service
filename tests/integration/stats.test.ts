@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders, TEST_ORG_ID } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import {
   cleanTestData,
   insertTestRun,
@@ -9,12 +9,19 @@ import {
 } from "../helpers/test-db.js";
 import * as dynastyResolver from "../../src/services/dynasty-resolver.js";
 
+// File-local org id keeps this file isolated from other integration files running in parallel.
+const ORG_ID = "bbbbbbbb-2222-4222-abbb-222222222222";
+// Some tests insert into a second org to assert cross-org filtering/aggregation;
+// it must be cleaned between tests so /public/* tests don't see leftovers.
+const OTHER_ORG_ID = "99999999-9999-9999-9999-999999999999";
+const CLEANUP_ORG_IDS = [ORG_ID, OTHER_ORG_ID];
+
 describe("Stats endpoints", () => {
   const app = createTestApp();
-  const authHeaders = getAuthHeaders();
+  const authHeaders = getAuthHeaders({ orgId: ORG_ID });
 
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData(CLEANUP_ORG_IDS);
   });
 
   afterEach(() => {
@@ -22,20 +29,20 @@ describe("Stats endpoints", () => {
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData(CLEANUP_ORG_IDS);
     await closeDb();
   });
 
   describe("GET /v1/stats/costs", () => {
     it("groups costs by brandId", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-a"],
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-b"],
@@ -74,7 +81,7 @@ describe("Stats endpoints", () => {
     it("unnests multi-brand runs when grouping by brandId", async () => {
       // A run with two brands should appear in both brand groups
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-m1", "brand-m2"],
@@ -106,7 +113,7 @@ describe("Stats endpoints", () => {
 
     it("groups by multiple dimensions", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
         brandIds: ["brand-x"],
@@ -132,14 +139,14 @@ describe("Stats endpoints", () => {
 
     it("applies filters", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
         brandIds: ["brand-f"],
         workflowSlug: "wf-1",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc-b",
         taskName: "task",
         brandIds: ["brand-f"],
@@ -172,19 +179,19 @@ describe("Stats endpoints", () => {
 
     it("filters by workflowSlugs (comma-separated)", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "wf-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "wf-beta",
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "wf-gamma",
@@ -224,13 +231,13 @@ describe("Stats endpoints", () => {
 
     it("workflowSlugs takes precedence over workflowSlug", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "wf-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "wf-beta",
@@ -275,13 +282,13 @@ describe("Stats endpoints", () => {
 
     it("groups costs by featureSlug", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "lead-gen",
@@ -317,13 +324,13 @@ describe("Stats endpoints", () => {
 
     it("filters by featureSlug", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "lead-gen",
@@ -355,14 +362,14 @@ describe("Stats endpoints", () => {
 
     it("returns minStartedAt and maxStartedAt", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-ts"],
         startedAt: new Date("2025-01-01T00:00:00.000Z"),
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-ts"],
@@ -405,7 +412,7 @@ describe("Stats endpoints", () => {
 
     it("groups by costName with totalQuantity", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -447,12 +454,12 @@ describe("Stats endpoints", () => {
 
     it("groups by costName combined with other dimensions", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc-a",
         taskName: "task",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc-b",
         taskName: "task",
       });
@@ -485,7 +492,7 @@ describe("Stats endpoints", () => {
 
     it("separates actual, provisioned, cancelled costs", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-s"],
@@ -532,7 +539,7 @@ describe("Stats endpoints", () => {
   describe("POST /v1/stats/budget", () => {
     it("returns per-window budget totals", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         campaignId: "campaign-1",
@@ -590,7 +597,7 @@ describe("Stats endpoints", () => {
 
     it("handles temporal window with since", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -627,24 +634,24 @@ describe("Stats endpoints", () => {
   describe("GET /v1/runs/:id/children-summary", () => {
     it("aggregates costs per child including grandchildren", async () => {
       const parent = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "campaign-svc",
         taskName: "run-campaign",
       });
       const child1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "lead-svc",
         taskName: "process-lead",
         parentRunId: parent.id,
       });
       const grandchild = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "email-svc",
         taskName: "send-email",
         parentRunId: child1.id,
       });
       const child2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "lead-svc",
         taskName: "process-lead",
         parentRunId: parent.id,
@@ -692,12 +699,12 @@ describe("Stats endpoints", () => {
 
     it("includes costsByName breakdown", async () => {
       const parent = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       const child = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "child",
         parentRunId: parent.id,
@@ -741,7 +748,7 @@ describe("Stats endpoints", () => {
 
     it("returns empty children for leaf run", async () => {
       const leaf = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -768,7 +775,7 @@ describe("Stats endpoints", () => {
     it("groups costs by brandId across all orgs", async () => {
       const otherOrgId = "99999999-9999-9999-9999-999999999999";
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-pub"],
@@ -808,7 +815,7 @@ describe("Stats endpoints", () => {
 
     it("supports groupBy=campaignId", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         campaignId: "camp-1",
@@ -834,7 +841,7 @@ describe("Stats endpoints", () => {
 
     it("supports groupBy=costName with totalQuantity", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -860,7 +867,7 @@ describe("Stats endpoints", () => {
     it("applies orgId filter", async () => {
       const otherOrgId = "99999999-9999-9999-9999-999999999999";
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         brandIds: ["brand-filter"],
@@ -889,7 +896,7 @@ describe("Stats endpoints", () => {
 
       const res = await request(app)
         .get("/v1/stats/public/costs")
-        .query({ groupBy: "brandId", orgId: TEST_ORG_ID });
+        .query({ groupBy: "brandId", orgId: ORG_ID });
 
       expect(res.status).toBe(200);
       const group = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-filter");
@@ -918,19 +925,19 @@ describe("Stats endpoints", () => {
 
     it("filters by featureSlugs (comma-separated)", async () => {
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "sales-cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "sales-cold-email-v2",
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "unrelated-feature",
@@ -974,13 +981,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "dynasty-resolved-slug",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "direct-slug",
@@ -1024,19 +1031,19 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email-v2",
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "unrelated-workflow",
@@ -1063,19 +1070,19 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha-v2",
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "unrelated-feature",
@@ -1099,7 +1106,7 @@ describe("Stats endpoints", () => {
       vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([]);
 
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "some-wf",
@@ -1120,13 +1127,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "dynasty-wf",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "other-wf",
@@ -1151,14 +1158,14 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a",
         brandIds: ["brand-x"],
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a-v2",
@@ -1186,19 +1193,19 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email-v2",
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "warm-intro",
@@ -1233,13 +1240,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha-v2",
@@ -1265,13 +1272,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "orphan-workflow",
@@ -1298,10 +1305,10 @@ describe("Stats endpoints", () => {
 
   describe("GET /public/stats/runs", () => {
     it("returns byStatus breakdown and monthly array", async () => {
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed" });
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "running" });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "failed" });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "running" });
 
       const res = await request(app).get("/public/stats/runs");
 
@@ -1333,7 +1340,7 @@ describe("Stats endpoints", () => {
 
     it("aggregates across orgs", async () => {
       const otherOrgId = "99999999-9999-9999-9999-999999999999";
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
       await insertTestRun({ organizationId: otherOrgId, serviceName: "svc", taskName: "t", status: "completed" });
 
       const res = await request(app).get("/public/stats/runs");
@@ -1345,9 +1352,9 @@ describe("Stats endpoints", () => {
     it("returns monthly breakdown sorted ascending", async () => {
       const jan = new Date("2026-01-15T12:00:00Z");
       const feb = new Date("2026-02-15T12:00:00Z");
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: jan });
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "failed", startedAt: feb });
-      await insertTestRun({ organizationId: TEST_ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: feb });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: jan });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "failed", startedAt: feb });
+      await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: feb });
 
       const res = await request(app).get("/public/stats/runs");
 
@@ -1369,13 +1376,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         workflowSlug: "cold-email-v2",
@@ -1401,13 +1408,13 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha",
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-alpha-v2",
@@ -1433,21 +1440,21 @@ describe("Stats endpoints", () => {
       ]);
 
       const run1 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a",
         brandIds: ["brand-x"],
       });
       const run2 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "feat-a-v2",
         brandIds: ["brand-x"],
       });
       const run3 = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "unrelated",
@@ -1472,7 +1479,7 @@ describe("Stats endpoints", () => {
       vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([]);
 
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
         featureSlug: "something",

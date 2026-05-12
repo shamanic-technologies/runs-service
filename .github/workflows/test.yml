@@ -15,17 +15,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - run: npm ci
       - run: npm run generate:openapi
       - run: npm run test:unit
 
-  test-integration:
+  test-integration-shard:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `/public/*` endpoints aggregate across all orgs and can't be made
+          # immune to other files inserting rows in parallel — keep stats alone.
+          - name: stats
+            files: tests/integration/stats.test.ts
+          # Heaviest file by test count and wall-clock; runs alone.
+          - name: runs
+            files: tests/integration/runs.test.ts
+          - name: writers
+            files: tests/integration/batch-costs.test.ts tests/integration/events.test.ts tests/integration/transfer-brand.test.ts tests/integration/platform-runs.test.ts
+          - name: misc
+            files: tests/integration/runs-expected-totals.test.ts tests/integration/health.test.ts tests/integration/indexes.test.ts tests/integration/openapi.test.ts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - run: npm ci
 
       - name: Create Neon branch
@@ -33,11 +50,11 @@ jobs:
         uses: neondatabase/create-branch-action@v6
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch_name: ci-${{ github.run_id }}
+          branch_name: ci-${{ github.run_id }}-${{ matrix.name }}
           api_key: ${{ secrets.NEON_API_KEY }}
 
       - name: Set database URL
-        run: echo "DB_URL=${{ steps.neon.outputs.db_url_pooled }}" >> "$GITHUB_ENV"
+        run: echo "DB_URL=${{ steps.neon.outputs.db_url }}" >> "$GITHUB_ENV"
 
       - name: Apply migrations
         run: npx drizzle-kit migrate
@@ -48,7 +65,7 @@ jobs:
         run: npm run generate:openapi
 
       - name: Run integration tests
-        run: npm run test:integration
+        run: npx vitest run ${{ matrix.files }}
         env:
           RUNS_SERVICE_DATABASE_URL: ${{ env.DB_URL }}
           RUNS_SERVICE_API_KEY: test-api-key
@@ -60,5 +77,20 @@ jobs:
         uses: neondatabase/delete-branch-action@v3
         with:
           project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch: ci-${{ github.run_id }}
+          branch: ci-${{ github.run_id }}-${{ matrix.name }}
           api_key: ${{ secrets.NEON_API_KEY }}
+
+  # Aggregator with the literal name `test-integration` so branch protection
+  # (which requires a single status check by that name) is satisfied. Fails
+  # if any shard failed.
+  test-integration:
+    runs-on: ubuntu-latest
+    needs: test-integration-shard
+    if: always()
+    steps:
+      - name: Verify all shards passed
+        run: |
+          if [ "${{ needs.test-integration-shard.result }}" != "success" ]; then
+            echo "One or more test-integration shards failed: ${{ needs.test-integration-shard.result }}"
+            exit 1
+          fi

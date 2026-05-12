@@ -1,12 +1,18 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
-import { createTestApp, getAuthHeaders, TEST_ORG_ID } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import {
   cleanTestData,
   insertTestRun,
   insertTestRunCost,
   closeDb,
 } from "../helpers/test-db.js";
+
+// File-local org id keeps this file isolated from other integration files running in parallel.
+const ORG_ID = "cccccccc-3333-4333-accc-333333333333";
+// A second org used by org-isolation test; must be cleaned too.
+const OTHER_ORG_ID = "33333333-3333-3333-3333-333333333333";
+const CLEANUP_ORG_IDS = [ORG_ID, OTHER_ORG_ID];
 
 // Mock cost-resolver for integration tests
 vi.mock("../../src/services/cost-resolver.js", () => ({
@@ -43,25 +49,25 @@ vi.mock("../../src/services/billing.js", () => ({
 
 describe("POST /v1/runs/costs/batch", () => {
   const app = createTestApp();
-  const authHeaders = getAuthHeaders();
+  const authHeaders = getAuthHeaders({ orgId: ORG_ID });
 
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData(CLEANUP_ORG_IDS);
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData(CLEANUP_ORG_IDS);
     await closeDb();
   });
 
   it("returns cost totals for multiple runs", async () => {
     const run1 = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "generate",
     });
     const run2 = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "edit",
     });
@@ -99,18 +105,18 @@ describe("POST /v1/runs/costs/batch", () => {
 
   it("includes descendant costs in totals", async () => {
     const parent = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "generate",
     });
     const child = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "brand-service",
       taskName: "extract",
       parentRunId: parent.id,
     });
     const grandchild = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "llm-service",
       taskName: "completion",
       parentRunId: child.id,
@@ -154,7 +160,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
   it("omits unknown run IDs silently", async () => {
     const run = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "generate",
     });
@@ -179,7 +185,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
   it("separates actual vs provisioned costs", async () => {
     const run = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "generate",
     });
@@ -247,7 +253,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
     const res = await request(app)
       .post("/v1/runs/costs/batch")
-      .set(authHeaders) // uses TEST_ORG_ID
+      .set(authHeaders) // uses ORG_ID
       .send({ runIds: [run.id] });
 
     expect(res.status).toBe(200);
@@ -256,7 +262,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
   it("returns zero costs for runs with no cost items", async () => {
     const run = await insertTestRun({
-      organizationId: TEST_ORG_ID,
+      organizationId: ORG_ID,
       serviceName: "press-kits",
       taskName: "generate",
     });
@@ -302,7 +308,7 @@ describe("POST /v1/runs/costs/batch", () => {
   describe("platform-split fields (own-run only)", () => {
     it("returns ownActualPlatformCostInUsdCents for platform actuals only (excludes org)", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -343,7 +349,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
     it("returns ownProvisionedPlatformCostInUsdCents for provisioned platform rows", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -370,7 +376,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
     it("excludes cancelled platform rows from platform fields", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -405,7 +411,7 @@ describe("POST /v1/runs/costs/batch", () => {
 
     it("returns 0.0000000000 platform fields for runs with no platform rows", async () => {
       const run = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
@@ -432,12 +438,12 @@ describe("POST /v1/runs/costs/batch", () => {
 
     it("platform fields exclude descendants (own-run only)", async () => {
       const parent = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "parent",
       });
       const child = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "child",
         parentRunId: parent.id,
@@ -478,12 +484,12 @@ describe("POST /v1/runs/costs/batch", () => {
 
     it("returns platform fields per row across multiple runs in one batch", async () => {
       const runA = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "a",
       });
       const runB = await insertTestRun({
-        organizationId: TEST_ORG_ID,
+        organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "b",
       });
