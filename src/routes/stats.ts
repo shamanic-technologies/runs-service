@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -159,10 +160,10 @@ function regroupByDynasty(
       newDimensions[dynastyKey] = dynasty;
       merged.set(dynasty, { ...group, dimensions: newDimensions });
     } else {
-      existing.totalCostInUsdCents = (Number(existing.totalCostInUsdCents) + Number(group.totalCostInUsdCents)).toFixed(10);
-      existing.actualCostInUsdCents = (Number(existing.actualCostInUsdCents) + Number(group.actualCostInUsdCents)).toFixed(10);
-      existing.provisionedCostInUsdCents = (Number(existing.provisionedCostInUsdCents) + Number(group.provisionedCostInUsdCents)).toFixed(10);
-      existing.cancelledCostInUsdCents = (Number(existing.cancelledCostInUsdCents) + Number(group.cancelledCostInUsdCents)).toFixed(10);
+      existing.totalCostInUsdCents = new Decimal(existing.totalCostInUsdCents).plus(group.totalCostInUsdCents).toFixed(10);
+      existing.actualCostInUsdCents = new Decimal(existing.actualCostInUsdCents).plus(group.actualCostInUsdCents).toFixed(10);
+      existing.provisionedCostInUsdCents = new Decimal(existing.provisionedCostInUsdCents).plus(group.provisionedCostInUsdCents).toFixed(10);
+      existing.cancelledCostInUsdCents = new Decimal(existing.cancelledCostInUsdCents).plus(group.cancelledCostInUsdCents).toFixed(10);
       existing.runCount += group.runCount;
 
       if (group.minStartedAt && (!existing.minStartedAt || group.minStartedAt < existing.minStartedAt)) {
@@ -172,13 +173,13 @@ function regroupByDynasty(
         existing.maxStartedAt = group.maxStartedAt;
       }
       if (existing.totalQuantity !== undefined && group.totalQuantity !== undefined) {
-        existing.totalQuantity = (Number(existing.totalQuantity) + Number(group.totalQuantity)).toFixed(6);
+        existing.totalQuantity = new Decimal(existing.totalQuantity).plus(group.totalQuantity).toFixed(6);
       }
     }
   }
 
   return Array.from(merged.values()).sort(
-    (a, b) => Number(b.totalCostInUsdCents) - Number(a.totalCostInUsdCents)
+    (a, b) => new Decimal(b.totalCostInUsdCents).cmp(a.totalCostInUsdCents)
   );
 }
 
@@ -286,16 +287,16 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       }
       const group: AggRow = {
         dimensions,
-        totalCostInUsdCents: Number(row.total_cost).toFixed(10),
-        actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
-        provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
-        cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
+        totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+        actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+        provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+        cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
         runCount: Number(row.run_count),
         minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
         maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
       };
       if (hasCostName) {
-        group.totalQuantity = Number(row.total_quantity).toFixed(6);
+        group.totalQuantity = new Decimal(row.total_quantity).toFixed(6);
       }
       return group;
     });
@@ -363,9 +364,9 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
 
     const responseWindows = windows.map((w, i) => ({
       label: w.label,
-      totalCostInUsdCents: Number(row[`w${i}_total`] ?? 0).toFixed(10),
-      actualCostInUsdCents: Number(row[`w${i}_actual`] ?? 0).toFixed(10),
-      provisionedCostInUsdCents: Number(row[`w${i}_provisioned`] ?? 0).toFixed(10),
+      totalCostInUsdCents: new Decimal(row[`w${i}_total`] ?? 0).toFixed(10),
+      actualCostInUsdCents: new Decimal(row[`w${i}_actual`] ?? 0).toFixed(10),
+      provisionedCostInUsdCents: new Decimal(row[`w${i}_provisioned`] ?? 0).toFixed(10),
     }));
 
     res.json({ windows: responseWindows });
@@ -445,10 +446,10 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
 
     // Aggregate costs by root_child_id and costName
     const childCosts = new Map<string, {
-      total: number;
-      actual: number;
-      provisioned: number;
-      byName: Map<string, { total: number; actual: number; provisioned: number }>;
+      total: Decimal;
+      actual: Decimal;
+      provisioned: Decimal;
+      byName: Map<string, { total: Decimal; actual: Decimal; provisioned: Decimal }>;
     }>();
 
     for (const cost of allCosts) {
@@ -456,36 +457,50 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
       if (!rootChildId) continue;
 
       if (!childCosts.has(rootChildId)) {
-        childCosts.set(rootChildId, { total: 0, actual: 0, provisioned: 0, byName: new Map() });
+        childCosts.set(rootChildId, {
+          total: new Decimal(0),
+          actual: new Decimal(0),
+          provisioned: new Decimal(0),
+          byName: new Map(),
+        });
       }
       const agg = childCosts.get(rootChildId)!;
-      const amount = Number(cost.totalCostInUsdCents);
+      const amount = new Decimal(cost.totalCostInUsdCents);
 
       if (cost.status === "cancelled") continue;
 
       if (cost.status === "provisioned") {
-        agg.provisioned += amount;
+        agg.provisioned = agg.provisioned.plus(amount);
       } else {
-        agg.actual += amount;
+        agg.actual = agg.actual.plus(amount);
       }
-      agg.total += amount;
+      agg.total = agg.total.plus(amount);
 
       // By name
       if (!agg.byName.has(cost.costName)) {
-        agg.byName.set(cost.costName, { total: 0, actual: 0, provisioned: 0 });
+        agg.byName.set(cost.costName, {
+          total: new Decimal(0),
+          actual: new Decimal(0),
+          provisioned: new Decimal(0),
+        });
       }
       const byName = agg.byName.get(cost.costName)!;
       if (cost.status === "provisioned") {
-        byName.provisioned += amount;
+        byName.provisioned = byName.provisioned.plus(amount);
       } else {
-        byName.actual += amount;
+        byName.actual = byName.actual.plus(amount);
       }
-      byName.total += amount;
+      byName.total = byName.total.plus(amount);
     }
 
     // Build response
     const children = Array.from(directChildren.values()).map((child) => {
-      const agg = childCosts.get(child.id) || { total: 0, actual: 0, provisioned: 0, byName: new Map() };
+      const agg = childCosts.get(child.id) || {
+        total: new Decimal(0),
+        actual: new Decimal(0),
+        provisioned: new Decimal(0),
+        byName: new Map<string, { total: Decimal; actual: Decimal; provisioned: Decimal }>(),
+      };
       return {
         id: child.id,
         serviceName: child.serviceName,
@@ -646,16 +661,16 @@ function handlePublicCosts(req: any, res: any) {
       let groups: AggRow[] = rows.map((row) => {
         const group: AggRow = {
           dimensions: { [actualGroupBy]: row[resultCol] ?? null },
-          totalCostInUsdCents: Number(row.total_cost).toFixed(10),
-          actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
-          provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
-          cancelledCostInUsdCents: Number(row.cancelled_cost).toFixed(10),
+          totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+          actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+          provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+          cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
           runCount: Number(row.run_count),
           minStartedAt: null,
           maxStartedAt: null,
         };
         if (hasCostName) {
-          group.totalQuantity = Number(row.total_quantity).toFixed(6);
+          group.totalQuantity = new Decimal(row.total_quantity).toFixed(6);
         }
         return group;
       });

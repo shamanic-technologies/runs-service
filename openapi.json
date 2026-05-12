@@ -701,6 +701,40 @@
           "targetOrgId"
         ]
       },
+      "RunsExpectedTotalsResponse": {
+        "type": "object",
+        "properties": {
+          "total_expected_cents": {
+            "type": "string"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunsExpectedTotalsEntry"
+            }
+          }
+        },
+        "required": [
+          "total_expected_cents",
+          "runs"
+        ]
+      },
+      "RunsExpectedTotalsEntry": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_cents": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "expected_cents"
+        ]
+      },
       "StatsCostsResponse": {
         "type": "object",
         "properties": {
@@ -1775,6 +1809,53 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/runs-expected-totals": {
+      "get": {
+        "summary": "Per-run expected platform-actual cost totals for an org",
+        "description": "Returns, for every completed/failed run in the org, the SUM of runs_costs.total_cost_in_usd_cents over rows where cost_source='platform' AND status='actual'. Runs with zero qualifying total are omitted. The org-level total_expected_cents is the sum of all per-run totals. All values are strings to preserve numeric(16,10) precision — billing-service uses this to detect drift against confirmed transactions.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "org_id",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-run expected totals + org-level aggregate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsExpectedTotalsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
             "content": {
               "application/json": {
                 "schema": {
