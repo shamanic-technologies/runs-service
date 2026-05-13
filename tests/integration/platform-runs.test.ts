@@ -31,12 +31,13 @@ describe("Platform Runs", () => {
   const app = createTestApp();
   const platformHeaders = getPlatformAuthHeaders();
 
+  // Platform runs have organization_id = NULL; cleanup must target null-org rows.
   beforeEach(async () => {
-    await cleanTestData();
+    await cleanTestData([null]);
   });
 
   afterAll(async () => {
-    await cleanTestData();
+    await cleanTestData([null]);
     await closeDb();
   });
 

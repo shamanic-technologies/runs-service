@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { runs } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
-import { TransferBrandRequestSchema } from "../schemas.js";
+import { TransferBrandRequestSchema, RunsExpectedTotalsQuerySchema } from "../schemas.js";
 
 const router = Router();
 
@@ -57,6 +57,50 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
     console.error("[Runs Service] Error in POST /internal/transfer-brand:", err);
     res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// GET /internal/runs-expected-totals — per-run expected platform-actual totals for an org
+router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, res) => {
+  const parsed = RunsExpectedTotalsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  const { org_id } = parsed.data;
+
+  const result = await db.execute(sql`
+    WITH per_run AS (
+      SELECT r.id AS run_id,
+             SUM(rc.total_cost_in_usd_cents) AS sum_cents
+        FROM runs r
+        JOIN runs_costs rc ON rc.run_id = r.id
+       WHERE r.organization_id = ${org_id}
+         AND r.status IN ('completed', 'failed')
+         AND rc.cost_source = 'platform'
+         AND rc.status = 'actual'
+       GROUP BY r.id
+      HAVING SUM(rc.total_cost_in_usd_cents) > 0
+    )
+    SELECT
+      COALESCE((SELECT SUM(sum_cents)::text FROM per_run), '0') AS total_expected_cents,
+      COALESCE(
+        (SELECT json_agg(json_build_object('run_id', run_id, 'expected_cents', sum_cents::text) ORDER BY run_id) FROM per_run),
+        '[]'::json
+      ) AS runs
+  `);
+
+  const row = (result as any[])[0];
+  const response = {
+    total_expected_cents: row.total_expected_cents as string,
+    runs: row.runs as { run_id: string; expected_cents: string }[],
+  };
+
+  console.log(
+    `[runs-service] runs-expected-totals: org=${org_id} count=${response.runs.length} total=$${response.total_expected_cents}`
+  );
+
+  res.json(response);
 });
 
 export default router;

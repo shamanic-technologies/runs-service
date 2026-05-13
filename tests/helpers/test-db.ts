@@ -1,12 +1,25 @@
+import { inArray, isNull, or } from "drizzle-orm";
 import { db, sql } from "../../src/db/index.js";
-import { runs, runsCosts, runEvents } from "../../src/db/schema.js";
+import { runs, runsCosts } from "../../src/db/schema.js";
 
-export async function cleanTestData() {
-  await sql`TRUNCATE run_events, runs_costs, runs CASCADE`;
+// Org-scoped cleanup so integration test files can run in parallel.
+// Pass `null` in the array to also delete platform runs (organization_id IS NULL).
+export async function cleanTestData(orgIds: Array<string | null>) {
+  if (orgIds.length === 0) return;
+
+  const nonNullOrgIds = orgIds.filter((id): id is string => id !== null);
+  const includeNull = orgIds.some((id) => id === null);
+
+  const conditions = [];
+  if (nonNullOrgIds.length > 0) conditions.push(inArray(runs.organizationId, nonNullOrgIds));
+  if (includeNull) conditions.push(isNull(runs.organizationId));
+
+  const where = conditions.length === 1 ? conditions[0] : or(...conditions);
+  await db.delete(runs).where(where);
 }
 
 export async function insertTestRun(data: {
-  organizationId: string;
+  organizationId: string | null;
   serviceName: string;
   taskName: string;
   brandIds?: string[];

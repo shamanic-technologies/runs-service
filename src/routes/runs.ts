@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -29,18 +30,18 @@ const router = Router();
 // --- Cost breakdown helper ---
 
 function computeCostBreakdown(costs: { totalCostInUsdCents: string | number; status: string }[]) {
-  let actual = 0;
-  let provisioned = 0;
+  let actual = new Decimal(0);
+  let provisioned = new Decimal(0);
   for (const c of costs) {
     if (c.status === "cancelled") continue;
-    const amount = Number(c.totalCostInUsdCents);
+    const amount = new Decimal(c.totalCostInUsdCents);
     if (c.status === "provisioned") {
-      provisioned += amount;
+      provisioned = provisioned.plus(amount);
     } else {
-      actual += amount;
+      actual = actual.plus(amount);
     }
   }
-  return { total: actual + provisioned, actual, provisioned };
+  return { total: actual.plus(provisioned), actual, provisioned };
 }
 
 // POST /v1/runs — create a run
@@ -198,11 +199,11 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
     const rows = result as any[];
     const costs = rows.map((row) => ({
       runId: row.root_run_id,
-      totalCostInUsdCents: Number(row.total_cost).toFixed(10),
-      actualCostInUsdCents: Number(row.actual_cost).toFixed(10),
-      provisionedCostInUsdCents: Number(row.provisioned_cost).toFixed(10),
-      ownActualPlatformCostInUsdCents: Number(row.own_actual_platform_cost).toFixed(10),
-      ownProvisionedPlatformCostInUsdCents: Number(row.own_provisioned_platform_cost).toFixed(10),
+      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+      actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+      provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+      ownActualPlatformCostInUsdCents: new Decimal(row.own_actual_platform_cost).toFixed(10),
+      ownProvisionedPlatformCostInUsdCents: new Decimal(row.own_provisioned_platform_cost).toFixed(10),
     }));
 
     res.json({ costs });
@@ -292,9 +293,9 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     res.json({
       ...run,
       costs,
-      totalCostInUsdCents: (ownBreakdown.total + childrenBreakdown.total).toFixed(10),
-      actualCostInUsdCents: (ownBreakdown.actual + childrenBreakdown.actual).toFixed(10),
-      provisionedCostInUsdCents: (ownBreakdown.provisioned + childrenBreakdown.provisioned).toFixed(10),
+      totalCostInUsdCents: ownBreakdown.total.plus(childrenBreakdown.total).toFixed(10),
+      actualCostInUsdCents: ownBreakdown.actual.plus(childrenBreakdown.actual).toFixed(10),
+      provisionedCostInUsdCents: ownBreakdown.provisioned.plus(childrenBreakdown.provisioned).toFixed(10),
       ownCostInUsdCents: ownBreakdown.total.toFixed(10),
       ownActualCostInUsdCents: ownBreakdown.actual.toFixed(10),
       ownProvisionedCostInUsdCents: ownBreakdown.provisioned.toFixed(10),
@@ -361,8 +362,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     // Build cost rows
     const costRows = items.map((item) => {
       const unitCost = costMap.get(item.costName)!;
-      const qty = Number(item.quantity);
-      const total = (qty * Number(unitCost)).toFixed(10);
+      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
       return {
         runId: id,
         costName: item.costName,
@@ -398,11 +398,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     // Deduct: sum actual + platform costs (raw fractional, no rounding)
     const actualPlatformCents = costRows
       .filter((r) => r.status === "actual" && r.costSource === "platform")
-      .reduce((sum, r) => sum + Number(r.totalCostInUsdCents), 0);
+      .reduce((sum, r) => sum.plus(r.totalCostInUsdCents), new Decimal(0));
 
-    if (actualPlatformCents > 0) {
+    if (actualPlatformCents.gt(0)) {
       const deductResult = await deductCredits(
-        actualPlatformCents,
+        actualPlatformCents.toNumber(),
         `run:${id} — ${costRows.filter((r) => r.status === "actual" && r.costSource === "platform").length} cost items`,
         billingCtx,
       );
@@ -426,7 +426,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     if (provisionedPlatformRows.length > 0) {
       for (const row of provisionedPlatformRows) {
         const result = await provisionCredits(
-          Number(row.totalCostInUsdCents),
+          new Decimal(row.totalCostInUsdCents).toNumber(),
           `run:${id} cost:${row.id} (${row.costName})`,
           billingCtx,
           row.id,
@@ -527,7 +527,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         // Confirm provision with raw fractional actual cost (no rounding)
         await confirmProvision(
           existing.id,
-          Number(existing.totalCostInUsdCents),
+          new Decimal(existing.totalCostInUsdCents).toNumber(),
           billingCtx,
         );
       } else if (existing.status === "provisioned" && newStatus === "cancelled") {
@@ -687,9 +687,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     // Format cost fields to fixed decimal
     const formattedRuns = result.map((r) => ({
       ...r,
-      ownCostInUsdCents: Number(r.ownCostInUsdCents).toFixed(10),
-      ownActualCostInUsdCents: Number(r.ownActualCostInUsdCents).toFixed(10),
-      ownProvisionedCostInUsdCents: Number(r.ownProvisionedCostInUsdCents).toFixed(10),
+      ownCostInUsdCents: new Decimal(r.ownCostInUsdCents).toFixed(10),
+      ownActualCostInUsdCents: new Decimal(r.ownActualCostInUsdCents).toFixed(10),
+      ownProvisionedCostInUsdCents: new Decimal(r.ownProvisionedCostInUsdCents).toFixed(10),
     }));
 
     res.json({ runs: formattedRuns, ...(limit !== undefined && { limit }), offset });
