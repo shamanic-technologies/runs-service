@@ -38,33 +38,9 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
   },
 }));
 
-// Mock billing client for integration tests
+// Mock billing client — notifyUsage is fire-and-forget and never throws.
 vi.mock("../../src/services/billing.js", () => ({
-  deductCredits: vi.fn().mockResolvedValue({
-    success: true,
-    balance_cents: 5000,
-    billing_mode: "payg",
-    depleted: false,
-  }),
-  provisionCredits: vi.fn().mockResolvedValue({
-    transaction_id: "txn_test_123",
-    balance_cents: 4500,
-  }),
-  confirmProvision: vi.fn().mockResolvedValue({
-    success: true,
-    balance_cents: 4500,
-  }),
-  cancelProvision: vi.fn().mockResolvedValue({
-    success: true,
-    balance_cents: 5500,
-  }),
-  BillingError: class BillingError extends Error {
-    statusCode: number;
-    constructor(statusCode: number, message: string) {
-      super(message);
-      this.statusCode = statusCode;
-    }
-  },
+  notifyUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("Runs CRUD", () => {
@@ -1388,11 +1364,11 @@ describe("Runs CRUD", () => {
     });
   });
 
-  describe("Billing integration", () => {
-    it("calls deductCredits for actual + platform cost items", async () => {
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedDeduct = vi.mocked(deductCredits);
-      mockedDeduct.mockClear();
+  describe("Usage notification (notifyUsage)", () => {
+    it("fires notifyUsage after POST with platform actual costs — spent_total_cents reflects org SUM", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
+      mockedNotify.mockClear();
 
       const run = await insertTestRun({
         organizationId: ORG_ID,
@@ -1411,186 +1387,19 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(mockedDeduct).toHaveBeenCalledTimes(1);
-      expect(mockedDeduct).toHaveBeenCalledWith(
-        expect.any(Number),
-        expect.stringContaining(`run:${run.id}`),
-        expect.objectContaining({ orgId: ORG_ID }),
-      );
+      expect(mockedNotify).toHaveBeenCalledTimes(1);
+
+      // 1000 * 0.0003 + 200 * 0.0012 = 0.3 + 0.24 = 0.54
+      const [ctx, payload] = mockedNotify.mock.calls[0];
+      expect(ctx.orgId).toBe(ORG_ID);
+      expect(ctx.runId).toBe(run.id);
+      expect(payload.spentTotalCents).toBe("0.5400000000");
     });
 
-    it("does NOT call deductCredits for org (BYOK) cost items", async () => {
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedDeduct = vi.mocked(deductCredits);
-      mockedDeduct.mockClear();
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "gpt-4o-input-token", costSource: "org", quantity: 1000 },
-          ],
-        });
-
-      expect(res.status).toBe(201);
-      expect(mockedDeduct).not.toHaveBeenCalled();
-    });
-
-    it("calls provisionCredits for provisioned + platform items and stores transaction_id", async () => {
-      const { provisionCredits } = await import("../../src/services/billing.js");
-      const mockedProvision = vi.mocked(provisionCredits);
-      mockedProvision.mockClear();
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000, status: "provisioned" },
-          ],
-        });
-
-      expect(res.status).toBe(201);
-      expect(mockedProvision).toHaveBeenCalledTimes(1);
-      // provisionCredits signature: (amount, description, ctx, costId)
-      const provisionCall = mockedProvision.mock.calls[0];
-      expect(provisionCall[3]).toBe(res.body.costs[0].id);
-      expect(res.body.costs[0].billingTransactionId).toBe("txn_test_123");
-    });
-
-    it("opens ONE provision per provisioned platform cost row (no shared provision)", async () => {
-      const { provisionCredits } = await import("../../src/services/billing.js");
-      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
-      const mockedProvision = vi.mocked(provisionCredits);
-      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
-
-      mockedProvision.mockClear();
-      mockedResolve.mockResolvedValueOnce(
-        new Map([
-          ["cost-a", "0.0003000000"],
-          ["cost-b", "0.0005000000"],
-          ["cost-c", "0.0007000000"],
-        ])
-      );
-      // Distinct transaction_id per call
-      mockedProvision
-        .mockResolvedValueOnce({ transaction_id: "txn_a", balance_cents: 999 })
-        .mockResolvedValueOnce({ transaction_id: "txn_b", balance_cents: 998 })
-        .mockResolvedValueOnce({ transaction_id: "txn_c", balance_cents: 997 });
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "cost-a", costSource: "platform", quantity: 1000, status: "provisioned" },
-            { costName: "cost-b", costSource: "platform", quantity: 1000, status: "provisioned" },
-            { costName: "cost-c", costSource: "platform", quantity: 1000, status: "provisioned" },
-          ],
-        });
-
-      expect(res.status).toBe(201);
-      expect(mockedProvision).toHaveBeenCalledTimes(3);
-
-      // Each call: (amount, description, ctx, costId)
-      const calls = mockedProvision.mock.calls;
-      const costIds = calls.map((c) => c[3]);
-      expect(new Set(costIds).size).toBe(3);
-
-      // Each costId must equal the inserted row's id
-      const insertedIds = res.body.costs.map((c: any) => c.id);
-      for (const id of costIds) {
-        expect(insertedIds).toContain(id);
-      }
-
-      // Each row carries its own transaction_id
-      const txnByCostId = new Map<string, string>();
-      for (let i = 0; i < calls.length; i++) {
-        txnByCostId.set(calls[i][3]!, ["txn_a", "txn_b", "txn_c"][i]);
-      }
-      for (const cost of res.body.costs) {
-        expect(cost.billingTransactionId).toBe(txnByCostId.get(cost.id));
-      }
-    });
-
-    it("propagates billing 4xx as same status (NOT 502)", async () => {
-      const { provisionCredits, BillingError } = await import("../../src/services/billing.js");
-      const mockedProvision = vi.mocked(provisionCredits);
-      mockedProvision.mockClear();
-      mockedProvision.mockRejectedValueOnce(new BillingError(409, "Provision already cancelled"));
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000, status: "provisioned" },
-          ],
-        });
-
-      expect(res.status).toBe(409);
-      expect(res.body.error).toContain("Provision already cancelled");
-    });
-
-    it("returns 502 when billing returns 5xx (real upstream unavailability)", async () => {
-      const { provisionCredits, BillingError } = await import("../../src/services/billing.js");
-      const mockedProvision = vi.mocked(provisionCredits);
-      mockedProvision.mockClear();
-      mockedProvision.mockRejectedValueOnce(new BillingError(503, "billing-service returned 503"));
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000, status: "provisioned" },
-          ],
-        });
-
-      expect(res.status).toBe(502);
-      expect(res.body.error).toContain("billing-service");
-    });
-
-    it("returns 402 when deduction fails (success: false)", async () => {
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedDeduct = vi.mocked(deductCredits);
-      mockedDeduct.mockResolvedValueOnce({
-        success: false,
-        balance_cents: 0,
-        billing_mode: "payg",
-        depleted: true,
-      });
+    it("excludes BYOK (cost_source='org') rows from spent_total_cents", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
+      mockedNotify.mockClear();
 
       const run = await insertTestRun({
         organizationId: ORG_ID,
@@ -1604,19 +1413,22 @@ describe("Runs CRUD", () => {
         .send({
           items: [
             { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+            { costName: "gpt-4o-output-token", costSource: "org", quantity: 500 },
           ],
         });
 
-      expect(res.status).toBe(402);
-      expect(res.body.error).toContain("Credit deduction failed");
-      // Costs should still be in the response (persisted in DB)
-      expect(res.body.costs).toHaveLength(1);
+      expect(res.status).toBe(201);
+      expect(mockedNotify).toHaveBeenCalledTimes(1);
+
+      // Platform-only sum: 1000 * 0.0003 = 0.3 (org row excluded)
+      const [, payload] = mockedNotify.mock.calls[0];
+      expect(payload.spentTotalCents).toBe("0.3000000000");
     });
 
-    it("returns 502 when billing-service is down", async () => {
-      const { deductCredits, BillingError } = await import("../../src/services/billing.js");
-      const mockedDeduct = vi.mocked(deductCredits);
-      mockedDeduct.mockRejectedValueOnce(new BillingError(502, "billing-service returned 502"));
+    it("includes provisioned rows in spent_total_cents", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
+      mockedNotify.mockClear();
 
       const run = await insertTestRun({
         organizationId: ORG_ID,
@@ -1629,18 +1441,25 @@ describe("Runs CRUD", () => {
         .set(authHeaders)
         .send({
           items: [
-            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 1000 },
+            {
+              costName: "gpt-4o-input-token",
+              costSource: "platform",
+              quantity: 1000,
+              status: "provisioned",
+            },
           ],
         });
 
-      expect(res.status).toBe(502);
-      expect(res.body.error).toContain("billing-service");
+      expect(res.status).toBe(201);
+      expect(res.body.costs[0].status).toBe("provisioned");
+
+      const [, payload] = mockedNotify.mock.calls[0];
+      expect(payload.spentTotalCents).toBe("0.3000000000");
     });
 
-    it("calls confirmProvision with costId when PATCH changes provisioned → actual", async () => {
-      const { confirmProvision } = await import("../../src/services/billing.js");
-      const mockedConfirm = vi.mocked(confirmProvision);
-      mockedConfirm.mockClear();
+    it("PATCH provisioned → actual fires notifyUsage with current SUM", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
 
       const run = await insertTestRun({
         organizationId: ORG_ID,
@@ -1656,8 +1475,9 @@ describe("Runs CRUD", () => {
         unitCostInUsdCents: "0.0003000000",
         totalCostInUsdCents: "0.3000000000",
         status: "provisioned",
-        billingTransactionId: "txn_xyz",
       });
+
+      mockedNotify.mockClear();
 
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
@@ -1666,19 +1486,15 @@ describe("Runs CRUD", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("actual");
-      expect(mockedConfirm).toHaveBeenCalledTimes(1);
-      // Bound by cost_id (= the runs_costs row id), NOT the audit-only billing_transaction_id
-      expect(mockedConfirm).toHaveBeenCalledWith(
-        cost.id,
-        expect.any(Number),
-        expect.objectContaining({ orgId: ORG_ID }),
-      );
+      expect(mockedNotify).toHaveBeenCalledTimes(1);
+
+      const [, payload] = mockedNotify.mock.calls[0];
+      expect(payload.spentTotalCents).toBe("0.3000000000");
     });
 
-    it("calls cancelProvision with costId when PATCH changes provisioned → cancelled", async () => {
-      const { cancelProvision } = await import("../../src/services/billing.js");
-      const mockedCancel = vi.mocked(cancelProvision);
-      mockedCancel.mockClear();
+    it("PATCH provisioned → cancelled fires notifyUsage; cancelled row excluded from SUM", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
 
       const run = await insertTestRun({
         organizationId: ORG_ID,
@@ -1694,8 +1510,9 @@ describe("Runs CRUD", () => {
         unitCostInUsdCents: "0.0003000000",
         totalCostInUsdCents: "0.3000000000",
         status: "provisioned",
-        billingTransactionId: "txn_xyz",
       });
+
+      mockedNotify.mockClear();
 
       const res = await request(app)
         .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
@@ -1704,258 +1521,39 @@ describe("Runs CRUD", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("cancelled");
-      expect(mockedCancel).toHaveBeenCalledTimes(1);
-      expect(mockedCancel).toHaveBeenCalledWith(
-        cost.id,
-        expect.objectContaining({ orgId: ORG_ID }),
-      );
+      expect(mockedNotify).toHaveBeenCalledTimes(1);
+
+      const [, payload] = mockedNotify.mock.calls[0];
+      expect(payload.spentTotalCents).toBe("0.0000000000");
     });
 
-    it("PATCH propagates billing 4xx (e.g. 404) as same status (NOT 502)", async () => {
-      const { confirmProvision, BillingError } = await import("../../src/services/billing.js");
-      const mockedConfirm = vi.mocked(confirmProvision);
-      mockedConfirm.mockClear();
-      mockedConfirm.mockRejectedValueOnce(new BillingError(404, "Provision not found for cost_id"));
+    it("POST succeeds even when no userId available (notifyUsage skipped)", async () => {
+      const { notifyUsage } = await import("../../src/services/billing.js");
+      const mockedNotify = vi.mocked(notifyUsage);
+      mockedNotify.mockClear();
 
+      // Run with no userId; request without x-user-id header
       const run = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
       });
 
-      const cost = await insertTestRunCost({
-        runId: run.id,
-        costName: "gpt-4o-input-token",
-        costSource: "platform",
-        quantity: "1000",
-        unitCostInUsdCents: "0.0003000000",
-        totalCostInUsdCents: "0.3000000000",
-        status: "provisioned",
-        billingTransactionId: "txn_xyz",
-      });
+      const headersWithoutUser = { ...authHeaders };
+      delete (headersWithoutUser as Record<string, string>)["x-user-id"];
 
-      const res = await request(app)
-        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
-        .set(authHeaders)
-        .send({ status: "actual" });
-
-      expect(res.status).toBe(404);
-      expect(res.body.error).toContain("Provision not found");
-    });
-
-    it("does NOT call billing when PATCH updates a non-platform cost", async () => {
-      const { confirmProvision, cancelProvision } = await import("../../src/services/billing.js");
-      vi.mocked(confirmProvision).mockClear();
-      vi.mocked(cancelProvision).mockClear();
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const cost = await insertTestRunCost({
-        runId: run.id,
-        costName: "gpt-4o-input-token",
-        costSource: "org",
-        quantity: "1000",
-        unitCostInUsdCents: "0.0003000000",
-        totalCostInUsdCents: "0.3000000000",
-        status: "provisioned",
-      });
-
-      const res = await request(app)
-        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
-        .set(authHeaders)
-        .send({ status: "actual" });
-
-      expect(res.status).toBe(200);
-      expect(vi.mocked(confirmProvision)).not.toHaveBeenCalled();
-      expect(vi.mocked(cancelProvision)).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("Billing precision (drop Math.ceil)", () => {
-    it("sends raw fractional cents to deductCredits (NOT Math.ceil)", async () => {
-      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
-      const mockedDeduct = vi.mocked(deductCredits);
-
-      mockedDeduct.mockClear();
-      mockedResolve.mockResolvedValueOnce(
-        new Map([["test-cost", "0.0005000000"]])
-      );
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      // 1000 × 0.0005 = 0.5¢ — strictly less than 1¢
       const res = await request(app)
         .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [{ costName: "test-cost", costSource: "platform", quantity: 1000 }],
-        });
-
-      expect(res.status).toBe(201);
-      expect(mockedDeduct).toHaveBeenCalledTimes(1);
-      const amountSent = mockedDeduct.mock.calls[0][0];
-      // Must NOT be Math.ceil(0.5) = 1
-      expect(amountSent).toBeCloseTo(0.5, 10);
-      expect(amountSent).not.toBe(1);
-    });
-
-    // 5 sequential billed POSTs against a cold Neon CI branch can exceed the 5s default.
-    it("5 sequential POSTs of 0.2¢ each → total billed = exactly 1.0¢ (NOT 5¢)", async () => {
-      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
-      const mockedDeduct = vi.mocked(deductCredits);
-
-      mockedDeduct.mockClear();
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      // 1000 × 0.0002 = 0.2¢ per POST
-      for (let i = 0; i < 5; i++) {
-        mockedResolve.mockResolvedValueOnce(
-          new Map([["sub-cent-token", "0.0002000000"]])
-        );
-        const res = await request(app)
-          .post(`/v1/runs/${run.id}/costs`)
-          .set(authHeaders)
-          .send({
-            items: [{ costName: "sub-cent-token", costSource: "platform", quantity: 1000 }],
-          });
-        expect(res.status).toBe(201);
-      }
-
-      expect(mockedDeduct).toHaveBeenCalledTimes(5);
-      const totalDeducted = mockedDeduct.mock.calls.reduce(
-        (sum, call) => sum + Number(call[0]),
-        0
-      );
-      // Real total = 5 × 0.2 = 1.0¢. Old buggy code would've sent 5 × 1¢ = 5¢.
-      expect(totalDeducted).toBeCloseTo(1.0, 10);
-      expect(totalDeducted).toBeLessThan(2);
-    }, 30_000);
-
-    it("sends raw fractional cents to provisionCredits (NOT Math.ceil)", async () => {
-      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
-      const { provisionCredits } = await import("../../src/services/billing.js");
-      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
-      const mockedProvision = vi.mocked(provisionCredits);
-
-      mockedProvision.mockClear();
-      mockedResolve.mockResolvedValueOnce(
-        new Map([["test-cost", "0.0003000000"]])
-      );
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      // 1000 × 0.0003 = 0.3¢
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
+        .set(headersWithoutUser)
         .send({
           items: [
-            { costName: "test-cost", costSource: "platform", quantity: 1000, status: "provisioned" },
+            { costName: "gpt-4o-input-token", costSource: "platform", quantity: 100 },
           ],
         });
 
       expect(res.status).toBe(201);
-      expect(mockedProvision).toHaveBeenCalledTimes(1);
-      const amountSent = mockedProvision.mock.calls[0][0];
-      expect(amountSent).toBeCloseTo(0.3, 10);
-      expect(amountSent).not.toBe(1);
+      expect(mockedNotify).not.toHaveBeenCalled();
     });
 
-    it("mixed org+platform single POST: only platform sum sent to deductCredits", async () => {
-      const { resolveMultipleUnitCosts } = await import("../../src/services/cost-resolver.js");
-      const { deductCredits } = await import("../../src/services/billing.js");
-      const mockedResolve = vi.mocked(resolveMultipleUnitCosts);
-      const mockedDeduct = vi.mocked(deductCredits);
-
-      mockedDeduct.mockClear();
-      mockedResolve.mockResolvedValueOnce(
-        new Map([
-          ["platform-cost", "0.0004000000"],
-          ["org-cost", "0.0010000000"],
-        ])
-      );
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      // platform: 1000 × 0.0004 = 0.4¢
-      // org: 1000 × 0.0010 = 1.0¢ (must NOT be billed)
-      const res = await request(app)
-        .post(`/v1/runs/${run.id}/costs`)
-        .set(authHeaders)
-        .send({
-          items: [
-            { costName: "platform-cost", costSource: "platform", quantity: 1000 },
-            { costName: "org-cost", costSource: "org", quantity: 1000 },
-          ],
-        });
-
-      expect(res.status).toBe(201);
-      expect(mockedDeduct).toHaveBeenCalledTimes(1);
-      const amountSent = mockedDeduct.mock.calls[0][0];
-      // Only platform 0.4¢, NOT 1.4¢ (mixed) and NOT 1¢ (ceil)
-      expect(amountSent).toBeCloseTo(0.4, 10);
-      expect(amountSent).not.toBe(1);
-      expect(amountSent).toBeLessThan(1);
-    });
-
-    it("PATCH provisioned → actual: confirmProvision receives raw fractional (NOT Math.ceil)", async () => {
-      const { confirmProvision } = await import("../../src/services/billing.js");
-      const mockedConfirm = vi.mocked(confirmProvision);
-      mockedConfirm.mockClear();
-
-      const run = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-      });
-
-      const cost = await insertTestRunCost({
-        runId: run.id,
-        costName: "gpt-4o-input-token",
-        costSource: "platform",
-        quantity: "1000",
-        unitCostInUsdCents: "0.0003000000",
-        totalCostInUsdCents: "0.3000000000",
-        status: "provisioned",
-        billingTransactionId: "txn_xyz",
-      });
-
-      const res = await request(app)
-        .patch(`/v1/runs/${run.id}/costs/${cost.id}`)
-        .set(authHeaders)
-        .send({ status: "actual" });
-
-      expect(res.status).toBe(200);
-      expect(mockedConfirm).toHaveBeenCalledTimes(1);
-      const amountSent = mockedConfirm.mock.calls[0][1];
-      // Must NOT be Math.ceil(0.3) = 1
-      expect(amountSent).toBeCloseTo(0.3, 10);
-      expect(amountSent).not.toBe(1);
-    });
   });
 });
