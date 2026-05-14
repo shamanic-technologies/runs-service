@@ -336,7 +336,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "List runs",
   description:
-    "Lists runs for the organization identified by x-org-id header. Each run includes ownCostInUsdCents.",
+    "Lists runs for the organization identified by x-org-id header. Returns one item per run, ordered by startedAt DESC (most recent first). Each item is a `RunWithOwnCost` — the full `Run` (via allOf, so the stable `id` UUID is on the embedded base schema) plus own-cost totals (`ownCostInUsdCents`, `ownActualCostInUsdCents`, `ownProvisionedCostInUsdCents`) summed across the run's own `runs_costs` rows. There is no per-cost-name breakdown at this level; for that call `GET /v1/runs/{id}` and read `RunWithCosts.costs[]`. Suitable for an org-wide ledger UI: use `id` as the row key and `taskName` (or `serviceName.taskName`) as the row label.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
