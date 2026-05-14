@@ -735,6 +735,27 @@
           "expected_cents"
         ]
       },
+      "OrgUsageTotalResponse": {
+        "type": "object",
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "spent_cents": {
+            "type": "string"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "org_id",
+          "spent_cents",
+          "as_of"
+        ]
+      },
       "StatsCostsResponse": {
         "type": "object",
         "properties": {
@@ -1850,6 +1871,53 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunsExpectedTotalsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/org-usage-total": {
+      "get": {
+        "summary": "Org-level platform usage spend total",
+        "description": "Returns the total platform usage spend for one org as SUM(runs_costs.total_cost_in_usd_cents) over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is a decimal string with numeric(16,10) precision for billing-service authorize.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "org_id",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org-level platform spend total",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgUsageTotalResponse"
                 }
               }
             }

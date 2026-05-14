@@ -8,8 +8,11 @@ export default defineConfig({
     globalSetup: ["./tests/global-setup.ts"],
     include: ["tests/**/*.test.ts"],
     exclude: ["node_modules", "dist"],
-    fileParallelism: true,
-    maxWorkers: 4,
+    // Integration files share one database, and several public/internal endpoints
+    // intentionally read across orgs. Run files serially so cleanup hooks do not
+    // delete rows another file is asserting against.
+    fileParallelism: false,
+    maxWorkers: 1,
     // Neon cold-start + parallel file contention can push individual ops past
     // vitest's 5s/10s defaults. 30s matches the precedent set by PR #100.
     testTimeout: 30000,
