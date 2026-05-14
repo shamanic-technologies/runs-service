@@ -9,14 +9,7 @@ import {
   CostNotFoundError,
   UpstreamError,
 } from "../services/cost-resolver.js";
-import {
-  deductCredits,
-  provisionCredits,
-  confirmProvision,
-  cancelProvision,
-  BillingError,
-} from "../services/billing.js";
-import type { BillingContext } from "../services/billing.js";
+import { notifyUsage } from "../services/billing.js";
 import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
@@ -26,6 +19,21 @@ import {
 } from "../schemas.js";
 
 const router = Router();
+
+// --- Org-level platform spend (matches /internal/org-usage-total) ---
+// All math in Postgres to preserve numeric(16,10) precision (zero JS arithmetic).
+async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
+  const result = await db.execute(sql`
+    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
+      FROM runs r
+      JOIN runs_costs rc ON rc.run_id = r.id
+     WHERE r.organization_id = ${orgId}
+       AND rc.cost_source = 'platform'
+       AND rc.status IN ('actual', 'provisioned')
+  `);
+  const row = (result as any[])[0];
+  return new Decimal(row.spent_cents).toFixed(10);
+}
 
 // --- Cost breakdown helper ---
 
@@ -374,93 +382,30 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       };
     });
 
-    // Insert costs
+    // Insert costs — runs_costs is the source of truth for run-level platform spend.
     const inserted = await db.insert(runsCosts).values(costRows).returning();
 
-    // --- Billing integration ---
+    // Fire-and-forget cache-invalidation hint to billing-service. Failures log to
+    // Railway via notifyUsage's internal catch; lifecycle continues regardless.
     const billingUserId = req.userId || run.userId;
-    if (!billingUserId && costRows.some((r) => r.costSource === "platform")) {
-      console.error(`[Runs Service] Cannot bill for run ${id}: no userId available from request or run record`);
-      res.status(400).json({ error: "x-user-id header is required when adding platform cost items" });
-      return;
-    }
-
-    const billingCtx: BillingContext = {
-      orgId: req.orgId,
-      userId: billingUserId!,
-      runId: id,
-      brandIds: req.headerBrandIds,
-      campaignId: req.headerCampaignId,
-      workflowSlug: req.headerWorkflowSlug,
-      featureSlug: req.headerFeatureSlug,
-    };
-
-    // Deduct: sum actual + platform costs (raw fractional, no rounding)
-    const actualPlatformCents = costRows
-      .filter((r) => r.status === "actual" && r.costSource === "platform")
-      .reduce((sum, r) => sum.plus(r.totalCostInUsdCents), new Decimal(0));
-
-    if (actualPlatformCents.gt(0)) {
-      const deductResult = await deductCredits(
-        actualPlatformCents.toNumber(),
-        `run:${id} — ${costRows.filter((r) => r.status === "actual" && r.costSource === "platform").length} cost items`,
-        billingCtx,
+    if (billingUserId) {
+      const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
+      await notifyUsage(
+        {
+          orgId: req.orgId,
+          userId: billingUserId,
+          runId: id,
+          brandIds: req.headerBrandIds,
+          campaignId: req.headerCampaignId,
+          workflowSlug: req.headerWorkflowSlug,
+          featureSlug: req.headerFeatureSlug,
+        },
+        { spentTotalCents },
       );
-      if (!deductResult.success) {
-        console.error(`[Runs Service] Billing deduction failed for run ${id}: depleted=${deductResult.depleted}`);
-        res.status(402).json({
-          error: "Credit deduction failed",
-          costs: inserted,
-          billing: deductResult,
-        });
-        return;
-      }
-    }
-
-    // Provision: ONE call per provisioned + platform cost row, bound by cost_id
-    // (raw fractional amount — billing-service stores numeric(16,10), no rounding)
-    const provisionedPlatformRows = inserted.filter(
-      (c) => c.status === "provisioned" && c.costSource === "platform",
-    );
-
-    if (provisionedPlatformRows.length > 0) {
-      for (const row of provisionedPlatformRows) {
-        const result = await provisionCredits(
-          new Decimal(row.totalCostInUsdCents).toNumber(),
-          `run:${id} cost:${row.id} (${row.costName})`,
-          billingCtx,
-          row.id,
-        );
-        await db
-          .update(runsCosts)
-          .set({ billingTransactionId: result.transaction_id })
-          .where(eq(runsCosts.id, row.id));
-      }
-
-      // Re-read to return updated rows with billing_transaction_id
-      const updatedCosts = await db
-        .select()
-        .from(runsCosts)
-        .where(inArray(runsCosts.id, inserted.map((c) => c.id)));
-
-      res.status(201).json({ costs: updatedCosts });
-      return;
     }
 
     res.status(201).json({ costs: inserted });
   } catch (err) {
-    if (err instanceof BillingError) {
-      // 4xx from billing-service is a real, actionable status from upstream — propagate.
-      // 5xx / network / timeout signals upstream unavailability — surface as 502.
-      if (err.statusCode >= 400 && err.statusCode < 500) {
-        console.error(`[runs-service] billing-service ${err.statusCode}:`, err.message);
-        res.status(err.statusCode).json({ error: err.message });
-        return;
-      }
-      console.error(`[runs-service] billing-service unavailable (${err.statusCode}):`, err.message);
-      res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
-      return;
-    }
     if (err instanceof UpstreamError) {
       console.error(`[runs-service] costs-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
@@ -503,58 +448,33 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
 
     const newStatus = parsed.data.status;
 
-    // Billing integration for platform costs with a provision.
-    // Bound by cost_id (the runs_costs.id natural key), NOT the audit-only billing_transaction_id.
-    if (existing.costSource === "platform" && existing.billingTransactionId) {
-      const billingUserId = req.userId || run.userId;
-      if (!billingUserId) {
-        console.error(`[runs-service] Cannot bill for run ${id}: no userId available from request or run record`);
-        res.status(400).json({ error: "x-user-id header is required when updating platform cost items" });
-        return;
-      }
-
-      const billingCtx: BillingContext = {
-        orgId: req.orgId,
-        userId: billingUserId,
-        runId: id,
-        brandIds: req.headerBrandIds,
-        campaignId: req.headerCampaignId,
-        workflowSlug: req.headerWorkflowSlug,
-        featureSlug: req.headerFeatureSlug,
-      };
-
-      if (existing.status === "provisioned" && newStatus === "actual") {
-        // Confirm provision with raw fractional actual cost (no rounding)
-        await confirmProvision(
-          existing.id,
-          new Decimal(existing.totalCostInUsdCents).toNumber(),
-          billingCtx,
-        );
-      } else if (existing.status === "provisioned" && newStatus === "cancelled") {
-        // Cancel provision — re-credits the org
-        await cancelProvision(existing.id, billingCtx);
-      }
-    }
-
-    // Update the cost row
+    // Update the cost row — runs_costs is the source of truth.
     const [updated] = await db
       .update(runsCosts)
       .set({ status: newStatus })
       .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
       .returning();
 
+    // Fire-and-forget cache-invalidation hint to billing-service.
+    const billingUserId = req.userId || run.userId;
+    if (billingUserId) {
+      const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
+      await notifyUsage(
+        {
+          orgId: req.orgId,
+          userId: billingUserId,
+          runId: id,
+          brandIds: req.headerBrandIds,
+          campaignId: req.headerCampaignId,
+          workflowSlug: req.headerWorkflowSlug,
+          featureSlug: req.headerFeatureSlug,
+        },
+        { spentTotalCents },
+      );
+    }
+
     res.json(updated);
   } catch (err) {
-    if (err instanceof BillingError) {
-      if (err.statusCode >= 400 && err.statusCode < 500) {
-        console.error(`[runs-service] billing-service ${err.statusCode}:`, err.message);
-        res.status(err.statusCode).json({ error: err.message });
-        return;
-      }
-      console.error(`[runs-service] billing-service unavailable (${err.statusCode}):`, err.message);
-      res.status(502).json({ error: `billing-service unavailable: ${err.message}` });
-      return;
-    }
     console.error("[runs-service] Error updating cost:", err);
     res.status(500).json({ error: "Internal server error" });
   }

@@ -23,7 +23,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
-- `src/services/billing.ts` — billing-service client (`deductCredits`, `provisionCredits`, `confirmProvision`, `cancelProvision`)
+- `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
 - `src/index.ts` — Express app setup and server entry point
@@ -34,8 +34,8 @@ REST API for tracking service execution runs and their associated costs, with hi
 ## Cost & billing precision
 
 - `runs_costs.total_cost_in_usd_cents` is `numeric(16,10)` — fractional cents, do NOT round.
-- runs-service passes raw fractional amounts to billing-service (`deductCredits` / `provisionCredits` / `confirmProvision`). billing-service ledger stores fractional too. **Never reintroduce `Math.ceil` / `Math.round` / `Math.floor` on cost values** — per-batch rounding caused the 5.5× over-billing incident (window 2026-04-30 → 2026-05-04).
-- Only `cost_source='platform'` rows are billed. `cost_source='org'` is BYOK tracking — no billing call.
+- runs-service no longer calls billing-service for run-level deduct/provision/confirm/cancel — `runs_costs` is the source of truth, billing-service re-derives via `GET /internal/org-usage-total`. **Never reintroduce `Math.ceil` / `Math.round` / `Math.floor` on cost values** — per-batch rounding caused the 5.5× over-billing incident (window 2026-04-30 → 2026-05-04).
+- Only `cost_source='platform'` rows count toward billing. `cost_source='org'` is BYOK tracking — excluded from `/internal/org-usage-total` and from `notifyUsage` `spent_total_cents`.
 - **Never use `Number(x)` on a cost-value string**, even inside `Number(x).toFixed(10)`. IEEE 754 double has ~15-17 sig digits; `numeric(16,10)` max value `999999.9999999999` has 16 → round-trip drops digits, and SUM of many rows compounds float drift. Use `new Decimal(x)` from `decimal.js` for any JS arithmetic on cost values; convert to `number` ONLY at the billing-service boundary (`.toNumber()`), where the upstream API still accepts `number`. For PG aggregations, prefer `SUM(...)::text` and pass the string through unchanged, or wrap in `new Decimal(...).toFixed(10)` for normalized scale.
 - For reconciliation/drift-detection endpoints that diff against billing-service totals, run all math in Postgres (CTE + `::text` cast) — handler does zero JS arithmetic so `numeric(16,10)` precision survives byte-for-byte (see `GET /internal/runs-expected-totals`).
 

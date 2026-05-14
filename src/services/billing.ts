@@ -85,97 +85,23 @@ async function billingFetch(
   throw lastError;
 }
 
-// --- Deduct ---
-
-export interface DeductResult {
-  success: boolean;
-  balance_cents: number | null;
-  billing_mode: string;
-  depleted: boolean;
-}
-
-export async function deductCredits(
-  amountCents: number,
-  description: string,
+// --- Usage notification (fire-and-forget cache-invalidation hint) ---
+//
+// runs_costs is the source of truth for run-level platform spend. billing-service
+// re-derives the truth on every authorize via GET /internal/org-usage-total.
+// This notify call is a hint that allows billing-service to invalidate any cache
+// proactively. Failures are logged to Railway and do NOT block the run lifecycle.
+export async function notifyUsage(
   ctx: BillingContext,
-): Promise<DeductResult> {
-  const res = await billingFetch("/v1/credits/deduct", {
-    method: "POST",
-    headers: buildHeaders(ctx),
-    body: JSON.stringify({ amount_cents: amountCents, description }),
-  });
-  return res.json() as Promise<DeductResult>;
-}
-
-// --- Provision ---
-
-export interface ProvisionResult {
-  transaction_id: string;
-  balance_cents: number | null;
-}
-
-export async function provisionCredits(
-  amountCents: number,
-  description: string,
-  ctx: BillingContext,
-  costId: string,
-): Promise<ProvisionResult> {
-  const res = await billingFetch("/v1/credits/provision", {
-    method: "POST",
-    headers: buildHeaders(ctx),
-    body: JSON.stringify({ amount_cents: amountCents, description, cost_id: costId }),
-  });
-  const body = (await res.json()) as { transaction_id?: string; provision_id?: string; balance_cents: number | null };
-  // billing-service returns both `transaction_id` and `provision_id` (deprecated alias).
-  // Prefer `transaction_id`; fall back to alias for transitional compatibility.
-  const transactionId = body.transaction_id ?? body.provision_id;
-  if (!transactionId) {
-    throw new BillingError(502, "billing-service response missing transaction_id");
+  payload: { spentTotalCents: string },
+): Promise<void> {
+  try {
+    await billingFetch("/v1/credits/usage-notify", {
+      method: "POST",
+      headers: buildHeaders(ctx),
+      body: JSON.stringify({ spent_total_cents: payload.spentTotalCents }),
+    });
+  } catch (err) {
+    console.error("[runs-service] notifyUsage failed:", err);
   }
-  return { transaction_id: transactionId, balance_cents: body.balance_cents };
-}
-
-// --- Confirm provision (by cost_id) ---
-
-export interface ConfirmResult {
-  success: boolean;
-  balance_cents: number | null;
-}
-
-export async function confirmProvision(
-  costId: string,
-  actualAmountCents: number,
-  ctx: BillingContext,
-): Promise<ConfirmResult> {
-  const res = await billingFetch(
-    `/v1/credits/provision/by-cost/${encodeURIComponent(costId)}/confirm`,
-    {
-      method: "POST",
-      headers: buildHeaders(ctx),
-      body: JSON.stringify({ actual_amount_cents: actualAmountCents }),
-    },
-  );
-  return res.json() as Promise<ConfirmResult>;
-}
-
-// --- Cancel provision (by cost_id) ---
-
-export interface CancelResult {
-  success: boolean;
-  balance_cents: number | null;
-}
-
-export async function cancelProvision(
-  costId: string,
-  ctx: BillingContext,
-): Promise<CancelResult> {
-  const res = await billingFetch(
-    `/v1/credits/provision/by-cost/${encodeURIComponent(costId)}/cancel`,
-    {
-      method: "POST",
-      headers: buildHeaders(ctx),
-      body: JSON.stringify({}),
-    },
-  );
-  return res.json() as Promise<CancelResult>;
 }
