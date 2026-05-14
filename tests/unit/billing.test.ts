@@ -1,11 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  deductCredits,
-  provisionCredits,
-  confirmProvision,
-  cancelProvision,
-  BillingError,
-} from "../../src/services/billing.js";
+import { notifyUsage } from "../../src/services/billing.js";
 import type { BillingContext } from "../../src/services/billing.js";
 
 const TEST_CTX: BillingContext = {
@@ -14,207 +8,82 @@ const TEST_CTX: BillingContext = {
   runId: "33333333-3333-3333-3333-333333333333",
 };
 
-describe("billing client", () => {
+describe("billing client — notifyUsage", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.useFakeTimers();
     process.env.BILLING_SERVICE_URL = "http://localhost:9998";
     process.env.BILLING_SERVICE_API_KEY = "test-billing-key";
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  const okDeductResponse = () => ({
+  const okResponse = () => ({
     ok: true,
-    status: 200,
-    json: () =>
-      Promise.resolve({
-        success: true,
-        balance_cents: 5000,
-        billing_mode: "payg",
-        depleted: false,
-      }),
+    status: 202,
+    json: () => Promise.resolve({ acknowledged: true, reload_triggered: true }),
   });
 
-  const okProvisionResponse = () => ({
-    ok: true,
-    status: 200,
-    json: () =>
-      Promise.resolve({
-        transaction_id: "txn_abc123",
-        provision_id: "txn_abc123",
-        balance_cents: 4500,
-      }),
-  });
+  it("POSTs /v1/credits/usage-notify with spent_total_cents and identity headers", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(okResponse());
+    vi.stubGlobal("fetch", mockFetch);
 
-  const okConfirmResponse = () => ({
-    ok: true,
-    status: 200,
-    json: () =>
-      Promise.resolve({
-        success: true,
-        balance_cents: 4500,
-      }),
-  });
+    await notifyUsage(TEST_CTX, { spentTotalCents: "1234.5678901234" });
 
-  const okCancelResponse = () => ({
-    ok: true,
-    status: 200,
-    json: () =>
-      Promise.resolve({
-        success: true,
-        balance_cents: 5500,
-      }),
-  });
-
-  describe("deductCredits", () => {
-    it("calls billing-service /v1/credits/deduct with correct payload", async () => {
-      const mockFetch = vi.fn().mockResolvedValue(okDeductResponse());
-      vi.stubGlobal("fetch", mockFetch);
-
-      const result = await deductCredits(150, "run:abc — 2 cost items", TEST_CTX);
-
-      expect(result.success).toBe(true);
-      expect(result.balance_cents).toBe(5000);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/deduct",
-        expect.objectContaining({
-          method: "POST",
-          headers: expect.objectContaining({
-            "x-api-key": "test-billing-key",
-            "x-org-id": TEST_CTX.orgId,
-            "x-user-id": TEST_CTX.userId,
-            "x-run-id": TEST_CTX.runId,
-          }),
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:9998/v1/credits/usage-notify",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "x-api-key": "test-billing-key",
+          "x-org-id": TEST_CTX.orgId,
+          "x-user-id": TEST_CTX.userId,
+          "x-run-id": TEST_CTX.runId,
         }),
-      );
+      }),
+    );
 
-      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(body.amount_cents).toBe(150);
-      expect(body.description).toBe("run:abc — 2 cost items");
-    });
-
-    it("throws BillingError on non-ok response", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 400 }));
-
-      await expect(deductCredits(100, "test", TEST_CTX)).rejects.toThrow(BillingError);
-    });
-
-    it("retries on 502 and succeeds", async () => {
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: false, status: 502 })
-        .mockResolvedValueOnce(okDeductResponse());
-      vi.stubGlobal("fetch", mockFetch);
-
-      const promise = deductCredits(100, "test", TEST_CTX);
-      await vi.advanceTimersByTimeAsync(1_000);
-
-      const result = await promise;
-      expect(result.success).toBe(true);
-      expect(mockFetch).toHaveBeenCalledTimes(2);
-    });
-
-    it("gives up after max retries", async () => {
-      const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502 });
-      vi.stubGlobal("fetch", mockFetch);
-
-      const promise = deductCredits(100, "test", TEST_CTX);
-      promise.catch(() => {});
-
-      await vi.advanceTimersByTimeAsync(1_000);
-      await vi.advanceTimersByTimeAsync(2_000);
-      await vi.advanceTimersByTimeAsync(4_000);
-
-      await expect(promise).rejects.toThrow(BillingError);
-      expect(mockFetch).toHaveBeenCalledTimes(4);
-    });
-
-    it("always sends required identity headers", async () => {
-      const mockFetch = vi.fn().mockResolvedValue(okDeductResponse());
-      vi.stubGlobal("fetch", mockFetch);
-
-      await deductCredits(100, "test", { orgId: TEST_CTX.orgId, userId: TEST_CTX.userId, runId: TEST_CTX.runId });
-
-      const callHeaders = mockFetch.mock.calls[0][1].headers;
-      expect(callHeaders["x-org-id"]).toBe(TEST_CTX.orgId);
-      expect(callHeaders["x-user-id"]).toBe(TEST_CTX.userId);
-      expect(callHeaders["x-run-id"]).toBe(TEST_CTX.runId);
-    });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.spent_total_cents).toBe("1234.5678901234");
   });
 
-  describe("provisionCredits", () => {
-    it("calls billing-service /v1/credits/provision with cost_id in body", async () => {
-      const mockFetch = vi.fn().mockResolvedValue(okProvisionResponse());
-      vi.stubGlobal("fetch", mockFetch);
+  it("swallows non-2xx and logs to console.error, never throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
 
-      const result = await provisionCredits(
-        500,
-        "run:xyz cost:cost_42",
-        TEST_CTX,
-        "cost_42",
-      );
-
-      expect(result.transaction_id).toBe("txn_abc123");
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/provision",
-        expect.objectContaining({ method: "POST" }),
-      );
-
-      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(body.amount_cents).toBe(500);
-      expect(body.description).toBe("run:xyz cost:cost_42");
-      expect(body.cost_id).toBe("cost_42");
-    });
-
-    it("falls back to provision_id alias when transaction_id absent", async () => {
-      const mockFetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ provision_id: "txn_legacy", balance_cents: 100 }),
-      });
-      vi.stubGlobal("fetch", mockFetch);
-
-      const result = await provisionCredits(100, "test", TEST_CTX, "cost_x");
-      expect(result.transaction_id).toBe("txn_legacy");
-    });
-
-    it("throws BillingError on failure", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
-
-      await expect(provisionCredits(500, "test", TEST_CTX, "cost_x")).rejects.toThrow(BillingError);
-    });
+    await expect(notifyUsage(TEST_CTX, { spentTotalCents: "0" })).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[runs-service] notifyUsage failed:",
+      expect.objectContaining({ statusCode: 404 }),
+    );
   });
 
-  describe("confirmProvision", () => {
-    it("calls billing-service /v1/credits/provision/by-cost/:costId/confirm", async () => {
-      const mockFetch = vi.fn().mockResolvedValue(okConfirmResponse());
-      vi.stubGlobal("fetch", mockFetch);
+  it("retries on 502 then succeeds without logging error", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 502 })
+      .mockResolvedValueOnce(okResponse());
+    vi.stubGlobal("fetch", mockFetch);
 
-      const result = await confirmProvision("cost_42", 480, TEST_CTX);
+    const promise = notifyUsage(TEST_CTX, { spentTotalCents: "0" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await promise;
 
-      expect(result.success).toBe(true);
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/provision/by-cost/cost_42/confirm",
-        expect.objectContaining({ method: "POST" }),
-      );
-
-      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(body.actual_amount_cents).toBe(480);
-    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  describe("cancelProvision", () => {
-    it("calls billing-service /v1/credits/provision/by-cost/:costId/cancel", async () => {
-      const mockFetch = vi.fn().mockResolvedValue(okCancelResponse());
-      vi.stubGlobal("fetch", mockFetch);
+  it("gives up after max retries and logs once", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502 });
+    vi.stubGlobal("fetch", mockFetch);
 
-      const result = await cancelProvision("cost_42", TEST_CTX);
+    const promise = notifyUsage(TEST_CTX, { spentTotalCents: "0" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await promise;
 
-      expect(result.success).toBe(true);
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:9998/v1/credits/provision/by-cost/cost_42/cancel",
-        expect.objectContaining({ method: "POST" }),
-      );
-    });
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -34,17 +34,7 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
 }));
 
 vi.mock("../../src/services/billing.js", () => ({
-  deductCredits: vi.fn().mockResolvedValue({ success: true }),
-  provisionCredits: vi.fn().mockResolvedValue({ transaction_id: "txn_test" }),
-  confirmProvision: vi.fn().mockResolvedValue({ success: true }),
-  cancelProvision: vi.fn().mockResolvedValue({ success: true }),
-  BillingError: class BillingError extends Error {
-    statusCode: number;
-    constructor(statusCode: number, message: string) {
-      super(message);
-      this.statusCode = statusCode;
-    }
-  },
+  notifyUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("POST /v1/runs/costs/batch", () => {
