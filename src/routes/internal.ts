@@ -1,9 +1,14 @@
 import { Router } from "express";
 import { and, eq, sql } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
-import { TransferBrandRequestSchema, RunsExpectedTotalsQuerySchema } from "../schemas.js";
+import {
+  TransferBrandRequestSchema,
+  RunsExpectedTotalsQuerySchema,
+  OrgUsageTotalQuerySchema,
+} from "../schemas.js";
 
 const router = Router();
 
@@ -99,6 +104,35 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
   console.log(
     `[runs-service] runs-expected-totals: org=${org_id} count=${response.runs.length} total=$${response.total_expected_cents}`
   );
+
+  res.json(response);
+});
+
+// GET /internal/org-usage-total — org-level platform spend total for billing authorize
+router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) => {
+  const parsed = OrgUsageTotalQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  const { org_id } = parsed.data;
+
+  const result = await db.execute(sql`
+    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
+      FROM runs r
+      JOIN runs_costs rc ON rc.run_id = r.id
+     WHERE r.organization_id = ${org_id}
+       AND rc.cost_source = 'platform'
+       AND rc.status IN ('actual', 'provisioned')
+  `);
+
+  const row = (result as any[])[0];
+  const response = {
+    org_id,
+    spent_cents: new Decimal(row.spent_cents).toFixed(10),
+    as_of: new Date().toISOString(),
+  };
 
   res.json(response);
 });
