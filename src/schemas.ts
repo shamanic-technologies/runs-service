@@ -585,6 +585,20 @@ export const RunsExpectedTotalsResponseSchema = z
   })
   .openapi("RunsExpectedTotalsResponse");
 
+export const OrgUsageTotalQuerySchema = z
+  .object({
+    org_id: z.string().uuid(),
+  })
+  .openapi("OrgUsageTotalQuery");
+
+export const OrgUsageTotalResponseSchema = z
+  .object({
+    org_id: z.string().uuid(),
+    spent_cents: z.string(),
+    as_of: z.string().datetime(),
+  })
+  .openapi("OrgUsageTotalResponse");
+
 registry.registerPath({
   method: "get",
   path: "/internal/runs-expected-totals",
@@ -599,6 +613,29 @@ registry.registerPath({
     200: {
       description: "Per-run expected totals + org-level aggregate",
       content: { "application/json": { schema: RunsExpectedTotalsResponseSchema } },
+    },
+    400: {
+      description: "Invalid query parameters",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/org-usage-total",
+  summary: "Org-level platform usage spend total",
+  description:
+    "Returns the total platform usage spend for one org as SUM(runs_costs.total_cost_in_usd_cents) over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is a decimal string with numeric(16,10) precision for billing-service authorize.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: OrgUsageTotalQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Org-level platform spend total",
+      content: { "application/json": { schema: OrgUsageTotalResponseSchema } },
     },
     400: {
       description: "Invalid query parameters",
