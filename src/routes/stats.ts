@@ -696,23 +696,36 @@ function handlePublicCosts(req: any, res: any) {
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
 
-// GET /public/stats/runs — public run counts by status + monthly breakdown
+// GET /public/stats/runs — public run counts by status + monthly breakdown + cumulative cost
 router.get("/public/stats/runs", async (_req, res) => {
   try {
-    const [statusResult, monthlyResult] = await Promise.all([
+    const [statusResult, monthlyResult, totalCostResult] = await Promise.all([
       db.execute(sql`
         SELECT status, COUNT(*)::int as count
         FROM runs
         GROUP BY status
       `),
       db.execute(sql`
-        SELECT TO_CHAR(DATE_TRUNC('month', started_at), 'YYYY-MM') as month,
-          COUNT(*) FILTER (WHERE status = 'completed')::int as completed,
-          COUNT(*) FILTER (WHERE status = 'failed')::int as failed,
-          COUNT(*) FILTER (WHERE status = 'running')::int as running
-        FROM runs
-        GROUP BY DATE_TRUNC('month', started_at)
+        SELECT TO_CHAR(DATE_TRUNC('month', r.started_at), 'YYYY-MM') as month,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
+          COALESCE(SUM(
+            CASE
+              WHEN rc.cost_source = 'platform' AND rc.status != 'cancelled'
+                THEN rc.total_cost_in_usd_cents::numeric
+              ELSE 0
+            END
+          ), 0)::text as total_cost
+        FROM runs r
+        LEFT JOIN runs_costs rc ON rc.run_id = r.id
+        GROUP BY DATE_TRUNC('month', r.started_at)
         ORDER BY month ASC
+      `),
+      db.execute(sql`
+        SELECT COALESCE(SUM(rc.total_cost_in_usd_cents::numeric), 0)::text as total_cost
+        FROM runs_costs rc
+        WHERE rc.cost_source = 'platform' AND rc.status != 'cancelled'
       `),
     ]);
 
@@ -729,9 +742,13 @@ router.get("/public/stats/runs", async (_req, res) => {
       completed: row.completed,
       failed: row.failed,
       running: row.running,
+      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
     }));
 
-    res.json({ byStatus, monthly });
+    const totalCostRow = (totalCostResult as any[])[0];
+    const totalCostInUsdCents = new Decimal(totalCostRow.total_cost).toFixed(10);
+
+    res.json({ byStatus, monthly, totalCostInUsdCents });
   } catch (err) {
     console.error("[Runs Service] Error in GET /public/stats/runs:", err);
     res.status(500).json({ error: "Internal server error" });
