@@ -995,11 +995,17 @@
             "items": {
               "$ref": "#/components/schemas/PublicRunsStatsMonthlyEntry"
             }
+          },
+          "totalCostInUsdCents": {
+            "type": "string",
+            "description": "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status != 'cancelled' (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
+            "example": "1234.5678901234"
           }
         },
         "required": [
           "byStatus",
-          "monthly"
+          "monthly",
+          "totalCostInUsdCents"
         ]
       },
       "PublicRunsStatsStatusBreakdown": {
@@ -1037,13 +1043,19 @@
           },
           "running": {
             "type": "number"
+          },
+          "totalCostInUsdCents": {
+            "type": "string",
+            "description": "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this month, restricted to cost_source='platform' AND status != 'cancelled'. 10-decimal string to preserve numeric(16,10) precision.",
+            "example": "0.4500000000"
           }
         },
         "required": [
           "month",
           "completed",
           "failed",
-          "running"
+          "running",
+          "totalCostInUsdCents"
         ]
       },
       "RunEvent": {
@@ -2301,7 +2313,7 @@
     "/public/stats/runs": {
       "get": {
         "summary": "Public run stats (no auth)",
-        "description": "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",
+        "description": "Returns run counts by status, a monthly breakdown with per-status counts and per-month cumulative cost, and an all-time top-level cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status != 'cancelled' (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
         "responses": {
           "200": {
             "description": "Run stats",

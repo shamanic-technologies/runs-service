@@ -661,6 +661,13 @@ export const PublicRunsStatsMonthlyEntrySchema = z
     completed: z.number(),
     failed: z.number(),
     running: z.number(),
+    totalCostInUsdCents: z
+      .string()
+      .openapi({
+        description:
+          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this month, restricted to cost_source='platform' AND status != 'cancelled'. 10-decimal string to preserve numeric(16,10) precision.",
+        example: "0.4500000000",
+      }),
   })
   .openapi("PublicRunsStatsMonthlyEntry");
 
@@ -668,6 +675,13 @@ export const PublicRunsStatsResponseSchema = z
   .object({
     byStatus: PublicRunsStatsStatusBreakdownSchema,
     monthly: z.array(PublicRunsStatsMonthlyEntrySchema),
+    totalCostInUsdCents: z
+      .string()
+      .openapi({
+        description:
+          "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status != 'cancelled' (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
+        example: "1234.5678901234",
+      }),
   })
   .openapi("PublicRunsStatsResponse");
 
@@ -880,7 +894,7 @@ registry.registerPath({
   path: "/public/stats/runs",
   summary: "Public run stats (no auth)",
   description:
-    "Returns run counts by status and a monthly breakdown with per-status counts. No authentication required. Cross-tenant aggregate.",
+    "Returns run counts by status, a monthly breakdown with per-status counts and per-month cumulative cost, and an all-time top-level cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status != 'cancelled' (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
   responses: {
     200: {
       description: "Run stats",

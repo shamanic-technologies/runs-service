@@ -1367,6 +1367,108 @@ describe("Stats endpoints", () => {
       expect(res.body.monthly[1].completed).toBe(1);
       expect(res.body.monthly[1].failed).toBe(1);
     });
+
+    it("returns top-level totalCostInUsdCents summing platform non-cancelled rows", async () => {
+      const run1 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      const run2 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.5000000000" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("1.5000000000");
+    });
+
+    it("excludes cancelled cost rows from totalCostInUsdCents", async () => {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000", status: "actual" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "9.9999999999", status: "cancelled" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("1.0000000000");
+    });
+
+    it("excludes BYOK (cost_source='org') rows from totalCostInUsdCents", async () => {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000", costSource: "platform" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "8.0000000000", costSource: "org" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("1.0000000000");
+    });
+
+    it("includes provisioned platform rows in totalCostInUsdCents", async () => {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "running" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.5000000000", status: "actual" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2500000000", status: "provisioned" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("0.7500000000");
+    });
+
+    it("returns totalCostInUsdCents per monthly entry", async () => {
+      const jan = new Date("2026-01-15T12:00:00Z");
+      const feb = new Date("2026-02-15T12:00:00Z");
+      const runJan = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: jan });
+      const runFeb = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: feb });
+
+      await insertTestRunCost({ runId: runJan.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: runFeb.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+      await insertTestRunCost({ runId: runFeb.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.0500000000" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.monthly).toHaveLength(2);
+      expect(res.body.monthly[0].month).toBe("2026-01");
+      expect(res.body.monthly[0].totalCostInUsdCents).toBe("0.1000000000");
+      expect(res.body.monthly[1].month).toBe("2026-02");
+      expect(res.body.monthly[1].totalCostInUsdCents).toBe("0.3500000000");
+      expect(res.body.totalCostInUsdCents).toBe("0.4500000000");
+    });
+
+    it("returns zero totalCostInUsdCents when no runs exist", async () => {
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("0.0000000000");
+      expect(res.body.monthly).toEqual([]);
+    });
+
+    it("does not over-count monthly run statuses when a run has multiple cost rows", async () => {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run.id, costName: "compute", quantity: "10", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: run.id, costName: "bandwidth", quantity: "5", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1500000000" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.byStatus.completed).toBe(1);
+      expect(res.body.monthly).toHaveLength(1);
+      expect(res.body.monthly[0].completed).toBe(1);
+      expect(res.body.monthly[0].totalCostInUsdCents).toBe("0.4500000000");
+      expect(res.body.totalCostInUsdCents).toBe("0.4500000000");
+    });
+
+    it("preserves 10-decimal precision in totalCostInUsdCents", async () => {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "1", unitCostInUsdCents: "0.0000000123", totalCostInUsdCents: "0.0000000123" });
+
+      const res = await request(app).get("/public/stats/runs");
+
+      expect(res.status).toBe(200);
+      expect(res.body.totalCostInUsdCents).toBe("0.0000000123");
+      expect(res.body.monthly[0].totalCostInUsdCents).toBe("0.0000000123");
+    });
   });
 
   describe("Dynasty slug — GET /v1/stats/public/costs", () => {
