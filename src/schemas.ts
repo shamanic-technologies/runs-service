@@ -671,10 +671,33 @@ export const PublicRunsStatsMonthlyEntrySchema = z
   })
   .openapi("PublicRunsStatsMonthlyEntry");
 
+export const PublicRunsStatsWeeklyEntrySchema = z
+  .object({
+    period: z
+      .string()
+      .openapi({
+        description:
+          "ISO week start (Monday, UTC) in YYYY-MM-DD format. Buckets are computed as DATE_TRUNC('week', started_at AT TIME ZONE 'UTC').",
+        example: "2026-01-05",
+      }),
+    completed: z.number(),
+    failed: z.number(),
+    running: z.number(),
+    totalCostInUsdCents: z
+      .string()
+      .openapi({
+        description:
+          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this ISO week, restricted to cost_source='platform' AND status != 'cancelled'. 10-decimal string to preserve numeric(16,10) precision.",
+        example: "0.4500000000",
+      }),
+  })
+  .openapi("PublicRunsStatsWeeklyEntry");
+
 export const PublicRunsStatsResponseSchema = z
   .object({
     byStatus: PublicRunsStatsStatusBreakdownSchema,
     monthly: z.array(PublicRunsStatsMonthlyEntrySchema),
+    weekly: z.array(PublicRunsStatsWeeklyEntrySchema),
     totalCostInUsdCents: z
       .string()
       .openapi({
@@ -894,7 +917,7 @@ registry.registerPath({
   path: "/public/stats/runs",
   summary: "Public run stats (no auth)",
   description:
-    "Returns run counts by status, a monthly breakdown with per-status counts and per-month cumulative cost, and an all-time top-level cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status != 'cancelled' (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
+    "Returns run counts by status, a monthly breakdown, a weekly breakdown (ISO week, Monday UTC start), and an all-time top-level cumulative cost. Each monthly/weekly entry includes per-status counts and per-bucket cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status != 'cancelled' (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. Monthly and weekly arrays are ordered ascending (oldest first) and include the current in-progress bucket. No authentication required. Cross-tenant aggregate.",
   responses: {
     200: {
       description: "Run stats",

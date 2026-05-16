@@ -1469,6 +1469,106 @@ describe("Stats endpoints", () => {
       expect(res.body.totalCostInUsdCents).toBe("0.0000000123");
       expect(res.body.monthly[0].totalCostInUsdCents).toBe("0.0000000123");
     });
+
+    describe("weekly bucketing", () => {
+      it("returns empty weekly array when no runs exist", async () => {
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toEqual([]);
+      });
+
+      it("buckets a single run into the Monday-anchored ISO week (UTC)", async () => {
+        const wed = new Date("2026-01-07T12:00:00Z");
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wed });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toHaveLength(1);
+        expect(res.body.weekly[0].period).toBe("2026-01-05");
+        expect(res.body.weekly[0].completed).toBe(1);
+        expect(res.body.weekly[0].failed).toBe(0);
+        expect(res.body.weekly[0].running).toBe(0);
+      });
+
+      it("anchors a Monday-00:00:00Z run to its own week, not the previous one", async () => {
+        const mon = new Date("2026-01-12T00:00:00Z");
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: mon });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toHaveLength(1);
+        expect(res.body.weekly[0].period).toBe("2026-01-12");
+      });
+
+      it("splits runs in different weeks into separate buckets, ordered ascending", async () => {
+        const wk1 = new Date("2026-01-07T12:00:00Z"); // week of 2026-01-05
+        const wk2 = new Date("2026-01-12T12:00:00Z"); // week of 2026-01-12
+        const wk3 = new Date("2026-01-21T12:00:00Z"); // week of 2026-01-19
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wk1 });
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "failed", startedAt: wk2 });
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "running", startedAt: wk3 });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toHaveLength(3);
+        expect(res.body.weekly[0].period).toBe("2026-01-05");
+        expect(res.body.weekly[0].completed).toBe(1);
+        expect(res.body.weekly[1].period).toBe("2026-01-12");
+        expect(res.body.weekly[1].failed).toBe(1);
+        expect(res.body.weekly[2].period).toBe("2026-01-19");
+        expect(res.body.weekly[2].running).toBe(1);
+      });
+
+      it("sums totalCostInUsdCents per week, excluding cancelled and BYOK rows", async () => {
+        const wk1 = new Date("2026-01-07T12:00:00Z");
+        const wk2 = new Date("2026-01-14T12:00:00Z");
+        const run1 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wk1 });
+        const run2 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wk2 });
+
+        await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000", costSource: "platform", status: "actual" });
+        await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "9.9999999999", costSource: "platform", status: "cancelled" });
+        await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "8.0000000000", costSource: "org", status: "actual" });
+        await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3500000000", costSource: "platform", status: "actual" });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toHaveLength(2);
+        expect(res.body.weekly[0].period).toBe("2026-01-05");
+        expect(res.body.weekly[0].totalCostInUsdCents).toBe("0.1000000000");
+        expect(res.body.weekly[1].period).toBe("2026-01-12");
+        expect(res.body.weekly[1].totalCostInUsdCents).toBe("0.3500000000");
+      });
+
+      it("does not over-count week status when a run has multiple cost rows", async () => {
+        const wk = new Date("2026-01-07T12:00:00Z");
+        const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wk });
+        await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+        await insertTestRunCost({ runId: run.id, costName: "compute", quantity: "10", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly).toHaveLength(1);
+        expect(res.body.weekly[0].completed).toBe(1);
+        expect(res.body.weekly[0].totalCostInUsdCents).toBe("0.3000000000");
+      });
+
+      it("preserves 10-decimal precision in weekly totalCostInUsdCents", async () => {
+        const wk = new Date("2026-01-07T12:00:00Z");
+        const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt: wk });
+        await insertTestRunCost({ runId: run.id, costName: "token", quantity: "1", unitCostInUsdCents: "0.0000000123", totalCostInUsdCents: "0.0000000123" });
+
+        const res = await request(app).get("/public/stats/runs");
+
+        expect(res.status).toBe(200);
+        expect(res.body.weekly[0].totalCostInUsdCents).toBe("0.0000000123");
+      });
+    });
   });
 
   describe("Dynasty slug — GET /v1/stats/public/costs", () => {
