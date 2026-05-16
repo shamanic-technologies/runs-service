@@ -696,10 +696,10 @@ function handlePublicCosts(req: any, res: any) {
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
 
-// GET /public/stats/runs — public run counts by status + monthly breakdown + cumulative cost
+// GET /public/stats/runs — public run counts by status + monthly/weekly breakdown + cumulative cost
 router.get("/public/stats/runs", async (_req, res) => {
   try {
-    const [statusResult, monthlyResult, totalCostResult] = await Promise.all([
+    const [statusResult, monthlyResult, weeklyResult, totalCostResult] = await Promise.all([
       db.execute(sql`
         SELECT status, COUNT(*)::int as count
         FROM runs
@@ -721,6 +721,23 @@ router.get("/public/stats/runs", async (_req, res) => {
         LEFT JOIN runs_costs rc ON rc.run_id = r.id
         GROUP BY DATE_TRUNC('month', r.started_at)
         ORDER BY month ASC
+      `),
+      db.execute(sql`
+        SELECT TO_CHAR(DATE_TRUNC('week', r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') as period,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
+          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
+          COALESCE(SUM(
+            CASE
+              WHEN rc.cost_source = 'platform' AND rc.status != 'cancelled'
+                THEN rc.total_cost_in_usd_cents::numeric
+              ELSE 0
+            END
+          ), 0)::text as total_cost
+        FROM runs r
+        LEFT JOIN runs_costs rc ON rc.run_id = r.id
+        GROUP BY DATE_TRUNC('week', r.started_at AT TIME ZONE 'UTC')
+        ORDER BY period ASC
       `),
       db.execute(sql`
         SELECT COALESCE(SUM(rc.total_cost_in_usd_cents::numeric), 0)::text as total_cost
@@ -745,10 +762,18 @@ router.get("/public/stats/runs", async (_req, res) => {
       totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
     }));
 
+    const weekly = (weeklyResult as any[]).map((row) => ({
+      period: row.period,
+      completed: row.completed,
+      failed: row.failed,
+      running: row.running,
+      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+    }));
+
     const totalCostRow = (totalCostResult as any[])[0];
     const totalCostInUsdCents = new Decimal(totalCostRow.total_cost).toFixed(10);
 
-    res.json({ byStatus, monthly, totalCostInUsdCents });
+    res.json({ byStatus, monthly, weekly, totalCostInUsdCents });
   } catch (err) {
     console.error("[Runs Service] Error in GET /public/stats/runs:", err);
     res.status(500).json({ error: "Internal server error" });
