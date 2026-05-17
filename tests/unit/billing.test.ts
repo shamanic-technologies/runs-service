@@ -25,14 +25,14 @@ describe("billing client — notifyUsage", () => {
     json: () => Promise.resolve({ acknowledged: true, reload_triggered: true }),
   });
 
-  it("POSTs /v1/credits/usage-notify with spent_total_cents and identity headers", async () => {
+  it("POSTs /v1/customer_balance/usage_apply with spent_total_cents and identity headers", async () => {
     const mockFetch = vi.fn().mockResolvedValue(okResponse());
     vi.stubGlobal("fetch", mockFetch);
 
     await notifyUsage(TEST_CTX, { spentTotalCents: "1234.5678901234" });
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://localhost:9998/v1/credits/usage-notify",
+      "http://localhost:9998/v1/customer_balance/usage_apply",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
