@@ -96,7 +96,7 @@ export async function notifyUsage(
   payload: { spentTotalCents: string },
 ): Promise<void> {
   try {
-    await billingFetch("/v1/credits/usage-notify", {
+    await billingFetch("/v1/customer_balance/usage_apply", {
       method: "POST",
       headers: buildHeaders(ctx),
       body: JSON.stringify({ spent_total_cents: payload.spentTotalCents }),
