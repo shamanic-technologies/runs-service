@@ -102,6 +102,24 @@ export function requirePlatformAuth(req: Request, res: Response, next: NextFunct
   }
   req.platformServiceName = serviceName;
 
+  const orgId = req.headers["x-org-id"] as string | undefined;
+  if (orgId) {
+    if (!UUID_RE.test(orgId)) {
+      res.status(400).json({ error: "x-org-id header must be a valid UUID" });
+      return;
+    }
+    req.orgId = orgId;
+  }
+
+  const userId = req.headers["x-user-id"] as string | undefined;
+  if (userId) {
+    if (!UUID_RE.test(userId)) {
+      res.status(400).json({ error: "x-user-id header must be a valid UUID" });
+      return;
+    }
+    req.userId = userId;
+  }
+
   if (!extractWorkflowHeaders(req, res)) return;
 
   next();

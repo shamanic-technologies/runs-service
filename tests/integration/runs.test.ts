@@ -1556,4 +1556,134 @@ describe("Runs CRUD", () => {
     });
 
   });
+
+  describe("idempotencyKey on /v1/runs", () => {
+    it("returns 200 with the existing run on replay with same idempotencyKey", async () => {
+      const key = "idem-run-1";
+      const first = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "test-service",
+          taskName: "idem-replay",
+          idempotencyKey: key,
+        });
+
+      expect(first.status).toBe(201);
+      const originalId = first.body.id;
+
+      const second = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "test-service",
+          taskName: "idem-replay",
+          idempotencyKey: key,
+        });
+
+      expect(second.status).toBe(200);
+      expect(second.body.id).toBe(originalId);
+    });
+
+    it("returns 409 on idempotencyKey reuse with different (serviceName, taskName)", async () => {
+      const key = "idem-run-2";
+      await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "test-service",
+          taskName: "first-task",
+          idempotencyKey: key,
+        });
+
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "test-service",
+          taskName: "different-task",
+          idempotencyKey: key,
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/idempotencyKey/);
+    });
+
+    it("rejects idempotencyKey longer than 256 chars with 400", async () => {
+      const tooLong = "x".repeat(257);
+      const res = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({
+          serviceName: "test-service",
+          taskName: "too-long-key",
+          idempotencyKey: tooLong,
+        });
+
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("idempotencyKey on /v1/runs/:id/costs", () => {
+    it("dedupes per-item idempotencyKey within a single run", async () => {
+      const createRes = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({ serviceName: "test-service", taskName: "cost-idem" });
+      const runId = createRes.body.id;
+
+      const item = {
+        costName: "gpt-4o-input-token",
+        costSource: "platform" as const,
+        quantity: 1000,
+        idempotencyKey: "idem-cost-run-1",
+      };
+
+      const first = await request(app)
+        .post(`/v1/runs/${runId}/costs`)
+        .set(authHeaders)
+        .send({ items: [item] });
+      const second = await request(app)
+        .post(`/v1/runs/${runId}/costs`)
+        .set(authHeaders)
+        .send({ items: [item] });
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(first.body.costs).toHaveLength(1);
+      expect(second.body.costs).toHaveLength(1);
+      expect(second.body.costs[0].id).toBe(first.body.costs[0].id);
+    });
+
+    it("allows the same idempotencyKey across different runs", async () => {
+      const r1 = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({ serviceName: "test-service", taskName: "cost-cross-1" });
+      const r2 = await request(app)
+        .post("/v1/runs")
+        .set(authHeaders)
+        .send({ serviceName: "test-service", taskName: "cost-cross-2" });
+
+      const item = {
+        costName: "gpt-4o-input-token",
+        costSource: "platform" as const,
+        quantity: 1000,
+        idempotencyKey: "idem-cost-run-shared",
+      };
+
+      const c1 = await request(app)
+        .post(`/v1/runs/${r1.body.id}/costs`)
+        .set(authHeaders)
+        .send({ items: [item] });
+      const c2 = await request(app)
+        .post(`/v1/runs/${r2.body.id}/costs`)
+        .set(authHeaders)
+        .send({ items: [item] });
+
+      expect(c1.status).toBe(201);
+      expect(c2.status).toBe(201);
+      expect(c1.body.costs[0].id).not.toBe(c2.body.costs[0].id);
+    });
+  });
 });

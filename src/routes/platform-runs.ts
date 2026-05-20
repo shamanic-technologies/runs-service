@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
@@ -17,7 +17,8 @@ import {
 
 const router = Router();
 
-// POST /v1/platform-runs — create a platform-level run (no org/user)
+// POST /v1/platform-runs — create a run for a system-originated caller (cron, webhook, internal worker).
+// x-org-id and x-user-id are optional — when provided, the run is attributed to that org/user.
 router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
   try {
     const parsed = CreateRunRequestSchema.safeParse(req.body);
@@ -27,12 +28,32 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       return;
     }
 
-    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName } = parsed.data;
+    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
 
-    // Priority: header > body (deprecated)
+    // Idempotency pre-check: global uniqueness on runs.idempotency_key.
+    if (idempotencyKey) {
+      const [existing] = await db
+        .select()
+        .from(runs)
+        .where(eq(runs.idempotencyKey, idempotencyKey))
+        .limit(1);
+      if (existing) {
+        if (existing.serviceName !== serviceName || existing.taskName !== taskName) {
+          res.status(409).json({
+            error: "idempotencyKey collision with different (serviceName, taskName)",
+            existing: { id: existing.id, serviceName: existing.serviceName, taskName: existing.taskName },
+          });
+          return;
+        }
+        res.status(200).json(existing);
+        return;
+      }
+    }
+
+    // Priority: header > body (deprecated). Org and user come from middleware (optional).
     const values = {
-      organizationId: null,
-      userId: null,
+      organizationId: req.orgId ?? null,
+      userId: req.userId ?? null,
       brandIds: req.headerBrandIds || brandIds || null,
       campaignId: req.headerCampaignId || campaignId || null,
       workflowSlug: req.headerWorkflowSlug || workflowSlug || null,
@@ -40,9 +61,34 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       serviceName,
       taskName,
       parentRunId: null,
+      idempotencyKey: idempotencyKey ?? null,
     };
 
-    const [created] = await db.insert(runs).values(values).returning();
+    let created;
+    try {
+      [created] = await db.insert(runs).values(values).returning();
+    } catch (insertErr: any) {
+      // Race-condition handling: concurrent request inserted same idempotencyKey between pre-check and insert.
+      if (insertErr?.code === "23505" && idempotencyKey) {
+        const [raceWinner] = await db
+          .select()
+          .from(runs)
+          .where(eq(runs.idempotencyKey, idempotencyKey))
+          .limit(1);
+        if (raceWinner) {
+          if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
+            res.status(409).json({
+              error: "idempotencyKey collision with different (serviceName, taskName)",
+              existing: { id: raceWinner.id, serviceName: raceWinner.serviceName, taskName: raceWinner.taskName },
+            });
+            return;
+          }
+          res.status(200).json(raceWinner);
+          return;
+        }
+      }
+      throw insertErr;
+    }
 
     res.status(201).json(created);
   } catch (err) {
@@ -51,7 +97,11 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
   }
 });
 
-// POST /v1/platform-runs/:id/costs — add cost line items to a platform run
+// POST /v1/platform-runs/:id/costs — add cost line items to a platform run.
+// Per-item idempotencyKey deduped via partial unique idx (run_id, idempotency_key).
+// No notifyUsage call: billing-service /v1/customer_balance/usage_apply requires
+// x-user-id + x-run-id headers, which platform-runs callers may not have. Truth still
+// flows via GET /internal/org-usage-total on the next authorize.
 router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -108,11 +158,26 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
         status: item.status ?? "actual",
+        idempotencyKey: item.idempotencyKey ?? null,
       };
     });
 
-    // Insert costs
-    const inserted = await db.insert(runsCosts).values(costRows).returning();
+    // Insert with ON CONFLICT DO NOTHING — partial unique idx on (run_id, idempotency_key).
+    const insertedRows = await db.insert(runsCosts).values(costRows).onConflictDoNothing().returning();
+
+    // Fetch existing rows for items whose idempotencyKey conflicted.
+    const insertedKeys = new Set(insertedRows.filter((r) => r.idempotencyKey).map((r) => r.idempotencyKey!));
+    const missingKeys = costRows
+      .filter((r) => r.idempotencyKey && !insertedKeys.has(r.idempotencyKey))
+      .map((r) => r.idempotencyKey!);
+    let existingByKey: typeof insertedRows = [];
+    if (missingKeys.length > 0) {
+      existingByKey = await db
+        .select()
+        .from(runsCosts)
+        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, missingKeys)));
+    }
+    const inserted = [...insertedRows, ...existingByKey];
 
     res.status(201).json({ costs: inserted });
   } catch (err) {

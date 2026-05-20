@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, numeric, index, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, numeric, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const runs = pgTable(
   "runs",
@@ -14,6 +15,7 @@ export const runs = pgTable(
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
     status: text("status").notNull().default("running"),
+    idempotencyKey: text("idempotency_key"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -26,6 +28,9 @@ export const runs = pgTable(
     index("idx_runs_campaign").on(table.campaignId),
     index("idx_runs_feature_slug").on(table.featureSlug),
     index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
+    uniqueIndex("idx_runs_idempotency_key")
+      .on(table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );
 
@@ -45,13 +50,16 @@ export const runsCosts = pgTable(
     unitCostInUsdCents: numeric("unit_cost_in_usd_cents", { precision: 12, scale: 10 }).notNull(),
     totalCostInUsdCents: numeric("total_cost_in_usd_cents", { precision: 16, scale: 10 }).notNull(),
     status: text("status").notNull().default("actual"),
-    billingTransactionId: text("billing_transaction_id"),
+    idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("idx_runs_costs_run_agg").on(table.runId, table.status, table.totalCostInUsdCents, table.quantity),
     index("idx_runs_costs_status").on(table.runId, table.status),
     index("idx_runs_costs_created_at").on(table.createdAt),
+    uniqueIndex("idx_runs_costs_idempotency_key")
+      .on(table.runId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ]
 );
 
