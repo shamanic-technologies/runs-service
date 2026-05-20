@@ -113,6 +113,13 @@
       "when": 1778630400000,
       "tag": "0015_rename_billing_provision_to_transaction",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1779580800000,
+      "tag": "0016_add_idempotency_key",
+      "breakpoints": true
     }
   ]
 }

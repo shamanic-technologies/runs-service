@@ -62,8 +62,28 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName } = parsed.data;
+    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
     const parentRunId = req.runId || null;
+
+    // Idempotency pre-check: if a run with this key already exists, short-circuit.
+    if (idempotencyKey) {
+      const [existing] = await db
+        .select()
+        .from(runs)
+        .where(eq(runs.idempotencyKey, idempotencyKey))
+        .limit(1);
+      if (existing) {
+        if (existing.serviceName !== serviceName || existing.taskName !== taskName) {
+          res.status(409).json({
+            error: "idempotencyKey collision with different (serviceName, taskName)",
+            existing: { id: existing.id, serviceName: existing.serviceName, taskName: existing.taskName },
+          });
+          return;
+        }
+        res.status(200).json(existing);
+        return;
+      }
+    }
 
     // Priority: header > body (deprecated) > parent inheritance
     // If parent has a different non-null value than the resolved one, reject with 409
@@ -142,6 +162,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       serviceName,
       taskName,
       parentRunId,
+      idempotencyKey: idempotencyKey ?? null,
     };
 
     let created;
@@ -156,6 +177,25 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           error: `parentRunId ${values.parentRunId} does not exist`,
         });
         return;
+      }
+      // Race-condition handling: concurrent request inserted same idempotencyKey between pre-check and insert.
+      if (insertErr?.code === "23505" && idempotencyKey) {
+        const [raceWinner] = await db
+          .select()
+          .from(runs)
+          .where(eq(runs.idempotencyKey, idempotencyKey))
+          .limit(1);
+        if (raceWinner) {
+          if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
+            res.status(409).json({
+              error: "idempotencyKey collision with different (serviceName, taskName)",
+              existing: { id: raceWinner.id, serviceName: raceWinner.serviceName, taskName: raceWinner.taskName },
+            });
+            return;
+          }
+          res.status(200).json(raceWinner);
+          return;
+        }
       }
       throw insertErr;
     }
@@ -379,11 +419,29 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
         unitCostInUsdCents: unitCost,
         totalCostInUsdCents: total,
         status: item.status ?? "actual",
+        idempotencyKey: item.idempotencyKey ?? null,
       };
     });
 
     // Insert costs — runs_costs is the source of truth for run-level platform spend.
-    const inserted = await db.insert(runsCosts).values(costRows).returning();
+    // Per-item idempotencyKey deduped via partial unique idx (run_id, idempotency_key).
+    // ON CONFLICT DO NOTHING skips duplicates; returning() only contains successfully inserted rows.
+    const insertedRows = await db.insert(runsCosts).values(costRows).onConflictDoNothing().returning();
+
+    // Restore caller-visible 1-to-1 mapping: for items with idempotencyKey that conflicted,
+    // fetch the original row so the response shape matches the request.
+    const insertedKeys = new Set(insertedRows.filter((r) => r.idempotencyKey).map((r) => r.idempotencyKey!));
+    const missingKeys = costRows
+      .filter((r) => r.idempotencyKey && !insertedKeys.has(r.idempotencyKey))
+      .map((r) => r.idempotencyKey!);
+    let existingByKey: typeof insertedRows = [];
+    if (missingKeys.length > 0) {
+      existingByKey = await db
+        .select()
+        .from(runsCosts)
+        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, missingKeys)));
+    }
+    const inserted = [...insertedRows, ...existingByKey];
 
     // Fire-and-forget cache-invalidation hint to billing-service. Failures log to
     // Railway via notifyUsage's internal catch; lifecycle continues regardless.
