@@ -30,6 +30,7 @@ export async function insertTestRun(data: {
   parentRunId?: string;
   status?: string;
   startedAt?: Date;
+  idempotencyKey?: string;
 }) {
   const [run] = await db
     .insert(runs)
@@ -44,6 +45,7 @@ export async function insertTestRun(data: {
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",
+      idempotencyKey: data.idempotencyKey || null,
       ...(data.startedAt ? { startedAt: data.startedAt } : {}),
     })
     .returning();
@@ -58,7 +60,7 @@ export async function insertTestRunCost(data: {
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
   status?: string;
-  billingTransactionId?: string;
+  idempotencyKey?: string;
 }) {
   const [cost] = await db
     .insert(runsCosts)
@@ -66,7 +68,7 @@ export async function insertTestRunCost(data: {
       ...data,
       costSource: data.costSource ?? "platform",
       status: data.status ?? "actual",
-      billingTransactionId: data.billingTransactionId ?? null,
+      idempotencyKey: data.idempotencyKey ?? null,
     })
     .returning();
   return cost;

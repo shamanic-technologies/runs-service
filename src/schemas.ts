@@ -46,6 +46,7 @@ export const RunSchema = z
     taskName: z.string(),
     status: z.string(),
     parentRunId: z.string().uuid().nullable(),
+    idempotencyKey: z.string().nullable(),
     startedAt: z.string().datetime(),
     completedAt: z.string().datetime().nullable(),
     createdAt: z.string().datetime(),
@@ -67,6 +68,11 @@ export const CreateRunRequestSchema = z
     featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
+    idempotencyKey: z.string().min(1).max(256).optional().openapi({
+      description:
+        "Caller-supplied dedup key. Optional. Uniqueness is GLOBAL across all runs in the table — callers MUST self-namespace (e.g. `stripe:txn_abc`, `workflow:run_xyz`) to avoid colliding with other services. On retry with the same key, the original run is returned with HTTP 200. If a different (serviceName, taskName) is requested with the same key, the request is rejected with HTTP 409. Max 256 chars.",
+      example: "stripe:txn_3MV8nL2eZvKYlo2C1lE9ZmKj",
+    }),
   })
   .openapi("CreateRunRequest");
 
@@ -96,6 +102,7 @@ export const CostSchema = z
     unitCostInUsdCents: z.string(),
     totalCostInUsdCents: z.string(),
     status: CostStatusEnum,
+    idempotencyKey: z.string().nullable(),
     createdAt: z.string().datetime(),
   })
   .openapi("Cost");
@@ -106,6 +113,11 @@ export const CostItemSchema = z
     costSource: CostSourceEnum,
     quantity: z.number().positive(),
     status: CostStatusEnum.default("actual"),
+    idempotencyKey: z.string().min(1).max(256).optional().openapi({
+      description:
+        "Caller-supplied per-item dedup key. Optional. Uniqueness is PER-RUN — two items inside the same run may not share an idempotencyKey, but two different runs may use the same key independently. Callers should still self-namespace to keep cross-run audit clean. On retry, the original cost row is returned and no duplicate row is created. Max 256 chars.",
+      example: "stripe:txn_3MV8nL2eZvKYlo2C1lE9ZmKj",
+    }),
   })
   .openapi("CostItem");
 
@@ -185,6 +197,7 @@ export const RunWithCostsSchema = z
     taskName: z.string(),
     status: z.string(),
     parentRunId: z.string().uuid().nullable(),
+    idempotencyKey: z.string().nullable(),
     startedAt: z.string().datetime(),
     completedAt: z.string().datetime().nullable(),
     createdAt: z.string().datetime(),
@@ -306,7 +319,7 @@ registry.registerPath({
   path: "/v1/runs",
   summary: "Create a run",
   description:
-    "Creates a new execution run. Organization and user are identified via x-org-id and x-user-id headers. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Returns 409 if orgId, userId, brandId, campaignId, or workflowSlug differ from the parent run.",
+    "Creates a new execution run. Organization is required via x-org-id; user is optional via x-user-id. Pass x-run-id header to set the parent run (the caller's run ID becomes parentRunId). Field resolution priority: header > body (deprecated) > parent inheritance. If a field conflicts with the parent run value, the request is rejected with 409. Idempotency: pass body.idempotencyKey for safe retries — repeated calls return the original run with HTTP 200. The key is globally unique across the runs table, so callers MUST self-namespace (e.g. `stripe:<txn_id>`, `workflow:<run_id>`). A mismatched (serviceName, taskName) on the same key returns 409.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -315,6 +328,10 @@ registry.registerPath({
     },
   },
   responses: {
+    200: {
+      description: "Idempotent replay — existing run returned",
+      content: { "application/json": { schema: RunSchema } },
+    },
     201: {
       description: "Run created",
       content: { "application/json": { schema: RunSchema } },
@@ -325,7 +342,7 @@ registry.registerPath({
     },
     401: { description: "Unauthorized" },
     409: {
-      description: "Parent-child field conflict — request values differ from parent run",
+      description: "Parent-child field conflict OR idempotencyKey collides with a run of different (serviceName, taskName)",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
   },
@@ -394,7 +411,7 @@ registry.registerPath({
   path: "/v1/runs/{id}/costs",
   summary: "Add costs to a run",
   description:
-    "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-slug headers are forwarded to downstream services.",
+    "Adds cost line items. Unit costs are resolved automatically from the costs-service. Optional x-brand-id, x-campaign-id, x-workflow-slug headers are forwarded to downstream services. Idempotency: each item may carry an optional idempotencyKey scoped to the run — repeated submissions with the same key for the same run do not create duplicate rows; the original row is returned. Two different runs may use the same per-item key independently.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -933,7 +950,7 @@ registry.registerPath({
   path: "/v1/platform-runs",
   summary: "Create a platform-level run",
   description:
-    "Creates a run for a platform-level system operation (no org or user). Requires x-service-name header to identify the calling service. Field resolution priority: header > body (deprecated).",
+    "Creates a run originating from a system-level caller (cron job, webhook handler, internal worker). Requires x-service-name. Accepts optional x-org-id and x-user-id headers — when provided, the values are stored on the row so the run can be attributed to an organization (e.g. a Stripe webhook charging a specific org's account). Both default to null when absent. Idempotency: pass body.idempotencyKey for safe retries (Stripe webhook redelivery, queue replay, etc.). Repeated calls return the original run with HTTP 200. The key is globally unique across the runs table — callers MUST self-namespace (e.g. `stripe:<txn_id>`). A mismatched (serviceName, taskName) on the same key returns 409.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
@@ -942,15 +959,23 @@ registry.registerPath({
     },
   },
   responses: {
+    200: {
+      description: "Idempotent replay — existing run returned",
+      content: { "application/json": { schema: RunSchema } },
+    },
     201: {
       description: "Platform run created",
       content: { "application/json": { schema: RunSchema } },
     },
     400: {
-      description: "Invalid request or missing x-service-name",
+      description: "Invalid request, missing x-service-name, or invalid x-org-id / x-user-id (must be UUID when present)",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
     401: { description: "Unauthorized" },
+    409: {
+      description: "idempotencyKey collides with a run of different (serviceName, taskName)",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
   },
 });
 
@@ -959,7 +984,7 @@ registry.registerPath({
   path: "/v1/platform-runs/{id}/costs",
   summary: "Add costs to a platform run",
   description:
-    "Adds cost line items to a platform-level run. Unit costs are resolved automatically from the costs-service.",
+    "Adds cost line items to a platform-level run. Unit costs are resolved automatically from the costs-service. Idempotency: each item may carry an optional idempotencyKey scoped to the run — safe for webhook redelivery. Repeated submissions with the same key for the same run do not create duplicates.",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
