@@ -72,6 +72,40 @@ Integration tests run with `fileParallelism: true, maxWorkers: 4` and a 4-way ma
 - **Race handler:** insert wrapped in `try { ... } catch (e) { if e.code==='23505' && idempotencyKey) re-fetch }`. Don't remove without understanding why concurrent retries are possible.
 - **No notifyUsage on `/v1/platform-runs/:id/costs`.** billing-service's `requireOrgHeaders` middleware still requires `x-user-id` + `x-run-id`, which platform callers may not have. Truth re-derives via `GET /internal/org-usage-total` on next authorize. Relax billing-service first if real-time invalidation becomes a hard requirement.
 
+## Data layering (B/S/G — γ migration plan)
+
+Industry-standard event-sourcing + projection layout per Kleppmann (log = source of truth), Young (domain events, not property sourcing), Richardson (projection cache for fast reads). Migration follows Fowler's expand-contract (γ variant): expand → dual-write → backfill → swap reads → stop legacy writes → rename old → drop.
+
+### Current state — Phase 1 (substrate only)
+
+| Layer | Tables / Views | Status |
+|-------|---------------|--------|
+| **Bronze** | `run_lifecycle_events`, `cost_lifecycle_events` (migration 0018) | Created. Empty. No handlers write yet. |
+| **Silver** | `runs`, `runs_costs`, `run_events` | Unchanged. Still the live write path. Status columns still mutated via `PATCH` handlers. |
+| **Gold** | `v_runs_with_descendants`, `v_run_cost_rollup`, `v_org_platform_spend` (migration 0019) | Created. No consumer reads yet. |
+| **Semantic predicates** | `runs_costs.is_platform_projected`, `runs_costs.is_platform_committed` (migration 0017) | Generated boolean columns. Indexed. Source of truth for the platform-billable definition. |
+
+### Doctrine
+
+- **Bronze tables are append-only.** No FK to `runs` / `runs_costs` (bronze must survive cascade-deletes). Cross-reference via `run_id` / `cost_id` UUID columns.
+- **Domain events, not property sourcing.** Event types: `run.created | run.completed | run.failed | cost.added | cost.materialized | cost.cancelled`. Not `field_updated(field='status')`.
+- **Events store delta + reason in `payload`, never the full aggregate** (avoid the "fat event" anti-pattern).
+- **All cost math stays in Postgres.** Generated columns + views encode the semantic predicates once. **Never** copy `cost_source='platform' AND status IN ('actual','provisioned')` as an inline literal in new code — use `is_platform_projected` or the view that already does. Same for `cost_source='platform' AND status='actual'` → `is_platform_committed`.
+- **Gold views are read-only.** Never INSERT/UPDATE/DELETE through them.
+- **Phase 2+ wiring:** every silver write/update will be preceded by a bronze insert in the same transaction. Idempotent replays (the HTTP 200 path) do NOT write bronze — bronze captures state changes, not HTTP traffic.
+
+### Future phases
+
+| Phase | Scope | Contract impact |
+|-------|-------|-----------------|
+| 1 (this PR) | Bronze tables + generated cols + gold views | None (additive only) |
+| 2 | Dual-write — handlers insert into bronze before silver write, same txn | None |
+| 3 | Backfill — synthesize historical events for pre-Phase-2 rows | None |
+| 4 | Migrate readers — route consumers swap to gold views one by one | None (shapes preserved) |
+| 5 | Stop writing silver directly; project current-state via trigger from bronze | None (trigger maintains the cached columns) |
+| 6 | `ALTER TABLE runs RENAME TO runs_old` etc. when no writer touches the old shape | None |
+| 7 | Drop `_old` tables (manual, days/weeks after Phase 6) | None |
+
 ## CI status checks ↔ branch protection
 
 Branch protection on `staging` requires status checks named exactly `test-integration` and `test-unit`. The `test-integration` matrix job produces context names like `test-integration (stats, …)` which do NOT match the required name. A separate aggregator job named `test-integration` (depends on `test-integration-shard`, fails if any shard failed) provides the required context. When changing the matrix structure, keep the aggregator job name intact or PRs will sit in `BLOCKED` despite green shards.

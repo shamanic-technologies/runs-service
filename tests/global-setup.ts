@@ -12,7 +12,7 @@ export async function setup() {
   if (!url) return;
   const sql = postgres(url, { max: 1, idle_timeout: 1, connect_timeout: 10 });
   try {
-    await sql`TRUNCATE run_events, runs_costs, runs CASCADE`;
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs CASCADE`;
   } finally {
     await sql.end();
   }
