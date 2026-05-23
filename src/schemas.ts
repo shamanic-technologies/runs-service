@@ -129,9 +129,13 @@ export const AddCostsRequestSchema = z
 
 export type AddCostsRequest = z.infer<typeof AddCostsRequestSchema>;
 
+// PATCH /v1/runs/:id/costs/:costId only supports forward transitions out of `provisioned`.
+// Phase 5 of γ migration plan: each silver mutation maps to a domain event
+// (`cost.materialized` for actual, `cost.cancelled` for cancelled). Re-provisioning
+// an already-actual row has no domain meaning and is rejected with 400.
 export const UpdateCostRequestSchema = z
   .object({
-    status: CostStatusEnum,
+    status: z.enum(["actual", "cancelled"]),
   })
   .openapi("UpdateCostRequest");
 

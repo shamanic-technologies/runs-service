@@ -10,6 +10,13 @@ import {
   UpstreamError,
 } from "../services/cost-resolver.js";
 import {
+  logRunLifecycle,
+  logCostLifecycle,
+  newRunId,
+  newCostId,
+  type Identity,
+} from "../services/bronze.js";
+import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
@@ -17,12 +24,10 @@ import {
 
 const router = Router();
 
-// POST /v1/platform-runs — create a run for a system-originated caller (cron, webhook, internal worker).
-// x-org-id and x-user-id are optional — when provided, the run is attributed to that org/user.
+// Phase 2+5 — POST /v1/platform-runs. App writes only to bronze; trigger projects silver.
 router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
   try {
     const parsed = CreateRunRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
@@ -30,13 +35,8 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
 
     const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
 
-    // Idempotency pre-check: global uniqueness on runs.idempotency_key.
     if (idempotencyKey) {
-      const [existing] = await db
-        .select()
-        .from(runs)
-        .where(eq(runs.idempotencyKey, idempotencyKey))
-        .limit(1);
+      const [existing] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
       if (existing) {
         if (existing.serviceName !== serviceName || existing.taskName !== taskName) {
           res.status(409).json({
@@ -50,31 +50,46 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       }
     }
 
-    // Priority: header > body (deprecated). Org and user come from middleware (optional).
-    const values = {
+    const id = newRunId();
+    const identity: Identity = {
+      orgId: req.orgId ?? null,
+      userId: req.userId ?? null,
+      brandIds: req.headerBrandIds ?? brandIds ?? null,
+      campaignId: req.headerCampaignId ?? campaignId ?? null,
+      workflowSlug: req.headerWorkflowSlug ?? workflowSlug ?? null,
+      featureSlug: req.headerFeatureSlug ?? featureSlug ?? null,
+    };
+    const payload = {
+      runId: id,
+      parentRunId: null,
       organizationId: req.orgId ?? null,
       userId: req.userId ?? null,
-      brandIds: req.headerBrandIds || brandIds || null,
-      campaignId: req.headerCampaignId || campaignId || null,
-      workflowSlug: req.headerWorkflowSlug || workflowSlug || null,
-      featureSlug: req.headerFeatureSlug || featureSlug || null,
+      brandIds: req.headerBrandIds ?? brandIds ?? null,
+      campaignId: req.headerCampaignId ?? campaignId ?? null,
+      workflowSlug: req.headerWorkflowSlug ?? workflowSlug ?? null,
+      featureSlug: req.headerFeatureSlug ?? featureSlug ?? null,
       serviceName,
       taskName,
-      parentRunId: null,
       idempotencyKey: idempotencyKey ?? null,
     };
 
-    let created;
     try {
-      [created] = await db.insert(runs).values(values).returning();
-    } catch (insertErr: any) {
-      // Race-condition handling: concurrent request inserted same idempotencyKey between pre-check and insert.
-      if (insertErr?.code === "23505" && idempotencyKey) {
-        const [raceWinner] = await db
-          .select()
-          .from(runs)
-          .where(eq(runs.idempotencyKey, idempotencyKey))
-          .limit(1);
+      const created = await db.transaction(async (tx) => {
+        await logRunLifecycle(tx, {
+          runId: id,
+          eventType: "run.created",
+          payload,
+          identity,
+          sourceService: req.platformServiceName ?? null,
+          idempotencyKey: idempotencyKey ?? null,
+        });
+        const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+        return silver;
+      });
+      res.status(201).json(created);
+    } catch (err: any) {
+      if (err?.code === "23505" && idempotencyKey) {
+        const [raceWinner] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
         if (raceWinner) {
           if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
             res.status(409).json({
@@ -87,27 +102,22 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
           return;
         }
       }
-      throw insertErr;
+      throw err;
     }
-
-    res.status(201).json(created);
   } catch (err) {
-    console.error("[Runs Service] Error creating platform run:", err);
+    console.error("[runs-service] Error creating platform run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// POST /v1/platform-runs/:id/costs — add cost line items to a platform run.
-// Per-item idempotencyKey deduped via partial unique idx (run_id, idempotency_key).
-// No notifyUsage call: billing-service /v1/customer_balance/usage_apply requires
-// x-user-id + x-run-id headers, which platform-runs callers may not have. Truth still
-// flows via GET /internal/org-usage-total on the next authorize.
+// Phase 2+5 — POST /v1/platform-runs/:id/costs. Bronze-only writes; trigger projects silver.
+// No notifyUsage per CLAUDE.md "Idempotency on silver writes" — billing-service re-derives
+// via GET /internal/org-usage-total on next authorize.
 router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
     const parsed = AddCostsRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
@@ -115,19 +125,12 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
 
     const { items } = parsed.data;
 
-    // Verify run exists
-    const [run] = await db
-      .select()
-      .from(runs)
-      .where(eq(runs.id, id))
-      .limit(1);
-
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    // Resolve unit costs from costs-service (use run record for identity context)
     const names = items.map((i) => i.costName);
     let costMap: Map<string, string>;
     try {
@@ -138,91 +141,119 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
       });
     } catch (err) {
       if (err instanceof CostNotFoundError) {
-        res
-          .status(422)
-          .json({ error: `Unknown cost: ${err.costName}` });
+        res.status(422).json({ error: `Unknown cost: ${err.costName}` });
         return;
       }
       throw err;
     }
 
-    // Build cost rows
-    const costRows = items.map((item) => {
-      const unitCost = costMap.get(item.costName)!;
-      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
-      return {
-        runId: id,
-        costName: item.costName,
-        costSource: item.costSource,
-        quantity: String(item.quantity),
-        unitCostInUsdCents: unitCost,
-        totalCostInUsdCents: total,
-        status: item.status ?? "actual",
-        idempotencyKey: item.idempotencyKey ?? null,
-      };
-    });
-
-    // Insert with ON CONFLICT DO NOTHING — partial unique idx on (run_id, idempotency_key).
-    const insertedRows = await db.insert(runsCosts).values(costRows).onConflictDoNothing().returning();
-
-    // Fetch existing rows for items whose idempotencyKey conflicted.
-    const insertedKeys = new Set(insertedRows.filter((r) => r.idempotencyKey).map((r) => r.idempotencyKey!));
-    const missingKeys = costRows
-      .filter((r) => r.idempotencyKey && !insertedKeys.has(r.idempotencyKey))
-      .map((r) => r.idempotencyKey!);
-    let existingByKey: typeof insertedRows = [];
-    if (missingKeys.length > 0) {
-      existingByKey = await db
+    const keyed = items.filter((i) => i.idempotencyKey);
+    const existingByKey = new Map<string, any>();
+    if (keyed.length > 0) {
+      const existing = await db
         .select()
         .from(runsCosts)
-        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, missingKeys)));
+        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, keyed.map((i) => i.idempotencyKey!))));
+      for (const row of existing) existingByKey.set(row.idempotencyKey!, row);
     }
-    const inserted = [...insertedRows, ...existingByKey];
+
+    const itemsToCreate: Array<{ item: typeof items[number]; costId: string; total: string }> = [];
+    for (const item of items) {
+      if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) continue;
+      const unitCost = costMap.get(item.costName)!;
+      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
+      itemsToCreate.push({ item, costId: newCostId(), total });
+    }
+
+    const newRows = await db.transaction(async (tx) => {
+      for (const { item, costId, total } of itemsToCreate) {
+        const unitCost = costMap.get(item.costName)!;
+        await logCostLifecycle(tx, {
+          runId: id,
+          costId,
+          eventType: "cost.added",
+          payload: {
+            costId,
+            costName: item.costName,
+            costSource: item.costSource,
+            quantity: String(item.quantity),
+            unitCostInUsdCents: unitCost,
+            totalCostInUsdCents: total,
+            status: item.status ?? "actual",
+            idempotencyKey: item.idempotencyKey ?? null,
+          },
+          identity: {
+            orgId: run.organizationId,
+            userId: run.userId,
+          },
+          idempotencyKey: item.idempotencyKey ?? null,
+        });
+      }
+      if (itemsToCreate.length === 0) return [] as any[];
+      return await tx
+        .select()
+        .from(runsCosts)
+        .where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
+    });
+
+    const inserted: any[] = [];
+    let createdIdx = 0;
+    for (const item of items) {
+      if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) {
+        inserted.push(existingByKey.get(item.idempotencyKey));
+      } else {
+        inserted.push(newRows[createdIdx]);
+        createdIdx++;
+      }
+    }
 
     res.status(201).json({ costs: inserted });
   } catch (err) {
     if (err instanceof UpstreamError) {
-      console.error(`[Runs Service] costs-service unavailable (${err.statusCode}):`, err.message);
+      console.error(`[runs-service] costs-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
       return;
     }
-    console.error("[Runs Service] Error adding platform run costs:", err);
+    console.error("[runs-service] Error adding platform run costs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// PATCH /v1/platform-runs/:id — update platform run status
+// Phase 2+5 — PATCH /v1/platform-runs/:id.
 router.patch("/v1/platform-runs/:id", requirePlatformAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
     const parsed = UpdateRunRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
 
     const { status } = parsed.data;
+    const eventType = status === "completed" ? "run.completed" : "run.failed";
 
-    const [updated] = await db
-      .update(runs)
-      .set({
-        status,
-        completedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(runs.id, id))
-      .returning();
+    const updated = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+      if (!existing) return null;
+      await logRunLifecycle(tx, {
+        runId: id,
+        eventType,
+        payload: { from: existing.status, to: status },
+        identity: { orgId: existing.organizationId, userId: existing.userId },
+        sourceService: req.platformServiceName ?? null,
+      });
+      const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+      return row;
+    });
 
     if (!updated) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
-
     res.json(updated);
   } catch (err) {
-    console.error("[Runs Service] Error updating platform run:", err);
+    console.error("[runs-service] Error updating platform run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
