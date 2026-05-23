@@ -12,7 +12,10 @@ export async function setup() {
   if (!url) return;
   const sql = postgres(url, { max: 1, idle_timeout: 1, connect_timeout: 10 });
   try {
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs CASCADE`;
+    // Post Phase 6 (view shim): `runs` and `runs_costs` are auto-updatable
+    // views over `runs_old` / `runs_costs_old`. TRUNCATE only works on base
+    // tables — target the *_old tables directly.
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs_old, runs_old CASCADE`;
   } finally {
     await sql.end();
   }
