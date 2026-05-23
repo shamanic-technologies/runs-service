@@ -594,7 +594,11 @@
         "type": "object",
         "properties": {
           "status": {
-            "$ref": "#/components/schemas/CostStatus"
+            "type": "string",
+            "enum": [
+              "actual",
+              "cancelled"
+            ]
           }
         },
         "required": [

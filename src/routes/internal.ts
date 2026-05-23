@@ -12,7 +12,10 @@ import {
 
 const router = Router();
 
-// POST /internal/transfer-brand — re-assign solo-brand runs to a different org
+// POST /internal/transfer-brand — re-assign solo-brand runs to a different org.
+// Unchanged from prior PR — silver-table direct mutation is the audit gap that
+// Phase 5 doctrine WOULD ideally close (transfer-brand should also emit a
+// `run.org_transferred` domain event), tracked as a follow-up.
 router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) => {
   try {
     const parsed = TransferBrandRequestSchema.safeParse(req.body);
@@ -23,7 +26,6 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
 
     const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
-    // Step 1: Move org — solo-brand runs from sourceOrgId to targetOrgId
     const step1 = await db
       .update(runs)
       .set({ organizationId: targetOrgId, updatedAt: new Date() })
@@ -36,7 +38,6 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
       )
       .returning({ id: runs.id });
 
-    // Step 2: Rewrite brand reference globally (no org filter) when targetBrandId is present
     let rewriteCount = 0;
     if (targetBrandId) {
       const step2 = await db
@@ -53,18 +54,18 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
     }
 
     const totalUpdated = Math.max(step1.length, rewriteCount);
-    console.log(`[Runs Service] transfer-brand: moved ${step1.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${sourceBrandId}${targetBrandId ? `, rewrote ${rewriteCount} brand refs → ${targetBrandId}` : ""}`);
+    console.log(`[runs-service] transfer-brand: moved ${step1.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${sourceBrandId}${targetBrandId ? `, rewrote ${rewriteCount} brand refs → ${targetBrandId}` : ""}`);
 
-    res.json({
-      updatedTables: [{ tableName: "runs", count: totalUpdated }],
-    });
+    res.json({ updatedTables: [{ tableName: "runs", count: totalUpdated }] });
   } catch (err) {
-    console.error("[Runs Service] Error in POST /internal/transfer-brand:", err);
+    console.error("[runs-service] Error in POST /internal/transfer-brand:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /internal/runs-expected-totals — per-run expected platform-actual totals for an org
+// Phase 4 — GET /internal/runs-expected-totals uses is_platform_committed generated column.
+// Inline literal `cost_source='platform' AND status='actual'` replaced with schema-level
+// predicate definition. New status enum value → ONE column-def change propagates.
 router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, res) => {
   const parsed = RunsExpectedTotalsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -82,8 +83,7 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
         JOIN runs_costs rc ON rc.run_id = r.id
        WHERE r.organization_id = ${org_id}
          AND r.status IN ('completed', 'failed')
-         AND rc.cost_source = 'platform'
-         AND rc.status = 'actual'
+         AND rc.is_platform_committed
        GROUP BY r.id
       HAVING SUM(rc.total_cost_in_usd_cents) > 0
     )
@@ -108,7 +108,8 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
   res.json(response);
 });
 
-// GET /internal/org-usage-total — org-level platform spend total for billing authorize
+// Phase 4 — GET /internal/org-usage-total reads from v_org_platform_spend.
+// Single source of truth for the platform-projected predicate.
 router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) => {
   const parsed = OrgUsageTotalQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -119,18 +120,16 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
   const { org_id } = parsed.data;
 
   const result = await db.execute(sql`
-    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
-      FROM runs r
-      JOIN runs_costs rc ON rc.run_id = r.id
-     WHERE r.organization_id = ${org_id}
-       AND rc.cost_source = 'platform'
-       AND rc.status IN ('actual', 'provisioned')
+    SELECT COALESCE(projected_spent_cents, 0) AS spent_cents
+      FROM v_org_platform_spend
+     WHERE organization_id = ${org_id}
   `);
 
-  const row = (result as any[])[0];
+  const rows = result as any[];
+  const spentCents = rows[0]?.spent_cents ?? 0;
   const response = {
     org_id,
-    spent_cents: new Decimal(row.spent_cents).toFixed(10),
+    spent_cents: new Decimal(spentCents).toFixed(10),
     as_of: new Date().toISOString(),
   };
 

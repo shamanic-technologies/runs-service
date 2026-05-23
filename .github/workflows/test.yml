@@ -36,7 +36,7 @@ jobs:
           - name: writers
             files: tests/integration/batch-costs.test.ts tests/integration/events.test.ts tests/integration/transfer-brand.test.ts tests/integration/platform-runs.test.ts
           - name: misc
-            files: tests/integration/runs-expected-totals.test.ts tests/integration/health.test.ts tests/integration/indexes.test.ts tests/integration/openapi.test.ts tests/integration/bsg-substrate.test.ts
+            files: tests/integration/runs-expected-totals.test.ts tests/integration/health.test.ts tests/integration/indexes.test.ts tests/integration/openapi.test.ts tests/integration/bsg-substrate.test.ts tests/integration/bsg-phase2-5.test.ts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
