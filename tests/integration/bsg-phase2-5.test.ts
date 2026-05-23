@@ -20,8 +20,8 @@ import { cleanTestData, insertTestRun, closeDb } from "../helpers/test-db.js";
 // suppresses bronze writes on replay, read endpoints return correct shapes
 // against the gold views.
 
-const ORG_ID = "eeeeeeee-1111-4eee-1eee-111111111111";
-const USER_ID = "eeeeeeee-2222-4eee-2eee-222222222222";
+const ORG_ID = "eeeeeeee-1111-4eee-8eee-111111111111";
+const USER_ID = "eeeeeeee-2222-4eee-8eee-222222222222";
 const CLEANUP_ORG_IDS = [ORG_ID, null];
 
 vi.mock("../../src/services/cost-resolver.js", () => ({
@@ -374,7 +374,7 @@ describe("B/S/G substrate — Phase 2-5", () => {
 
   describe("trigger semantics — direct bronze insert projects silver", () => {
     it("direct INSERT into run_lifecycle_events with run.created creates silver row", async () => {
-      const id = "ffffffff-1111-4fff-1fff-111111111111";
+      const id = "ffffffff-1111-4fff-8fff-111111111111";
       await db.insert(runLifecycleEvents).values({
         runId: id,
         eventType: "run.created",
@@ -401,7 +401,7 @@ describe("B/S/G substrate — Phase 2-5", () => {
     });
 
     it("subsequent run.completed event flips silver status to completed", async () => {
-      const id = "ffffffff-2222-4fff-2fff-222222222222";
+      const id = "ffffffff-2222-4fff-8fff-222222222222";
       await db.insert(runLifecycleEvents).values({
         runId: id,
         eventType: "run.created",

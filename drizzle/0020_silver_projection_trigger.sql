@@ -50,6 +50,13 @@ $$ LANGUAGE plpgsql;--> statement-breakpoint
 
 CREATE OR REPLACE FUNCTION project_cost_lifecycle_to_silver() RETURNS trigger AS $$
 BEGIN
+  -- Trigger requires NEW.cost_id for any state mutation. Direct bronze
+  -- inserts with NULL cost_id (audit-only, no silver projection desired)
+  -- are silently skipped — caller must populate cost_id when they want
+  -- silver to materialize.
+  IF NEW.cost_id IS NULL THEN
+    RETURN NEW;
+  END IF;
   IF NEW.event_type = 'cost.added' THEN
     INSERT INTO runs_costs (
       id, run_id, cost_name, cost_source, quantity,
