@@ -72,6 +72,63 @@ Integration tests run with `fileParallelism: true, maxWorkers: 4` and a 4-way ma
 - **Race handler:** insert wrapped in `try { ... } catch (e) { if e.code==='23505' && idempotencyKey) re-fetch }`. Don't remove without understanding why concurrent retries are possible.
 - **No notifyUsage on `/v1/platform-runs/:id/costs`.** billing-service's `requireOrgHeaders` middleware still requires `x-user-id` + `x-run-id`, which platform callers may not have. Truth re-derives via `GET /internal/org-usage-total` on next authorize. Relax billing-service first if real-time invalidation becomes a hard requirement.
 
+## Data layering (B/S/G — γ migration plan)
+
+Industry-standard event-sourcing + projection layout per Kleppmann (log = source of truth), Young (domain events, not property sourcing), Richardson (projection cache for fast reads). Migration follows Fowler's expand-contract (γ variant): expand → dual-write → backfill → swap reads → stop legacy writes → rename old → drop.
+
+### Current state — Phases 1-5 LIVE
+
+| Layer | Tables / Views | Status |
+|-------|---------------|--------|
+| **Bronze** | `run_lifecycle_events`, `cost_lifecycle_events` (migration 0018) | Live source of truth. Every mutating handler writes here. |
+| **Silver** | `runs`, `runs_costs`, `run_events` | Projection cache. Maintained by `project_run_lifecycle_to_silver` and `project_cost_lifecycle_to_silver` triggers (migration 0020). **App code MUST NOT INSERT/UPDATE these tables directly** (except `tests/helpers/test-db.ts` for test setup, and `POST /internal/transfer-brand` which is tracked as a follow-up). |
+| **Gold** | `v_runs_with_descendants`, `v_run_cost_rollup`, `v_org_platform_spend` (migration 0019) | Read by `POST /v1/runs/costs/batch`, `GET /v1/runs/:id`, `GET /internal/org-usage-total`. |
+| **Semantic predicates** | `runs_costs.is_platform_projected`, `runs_costs.is_platform_committed` (migration 0017) | Generated boolean columns. Used by `GET /internal/runs-expected-totals` and `v_org_platform_spend`. |
+
+### Doctrine
+
+- **Bronze is source of truth, append-only.** No FK to silver (bronze must survive cascade-deletes). Cross-reference via `run_id` / `cost_id` columns.
+- **Domain events, not property sourcing.** Event types: `run.created | run.completed | run.failed | cost.added | cost.materialized | cost.cancelled`. Not `field_updated(field='status')`.
+- **Events store delta + reason in `payload`, never the full aggregate** (avoid the "fat event" anti-pattern). `run.created` and `cost.added` carry the canonical row spec so the projection trigger can populate silver.
+- **Idempotent HTTP replays (200 path) do NOT write bronze** — bronze captures state changes, not HTTP traffic. Dedupe happens BEFORE the bronze write via the existing idempotency-key pre-check.
+- **All cost math stays in Postgres.** Generated columns + views encode the semantic predicates once. **Never** copy `cost_source='platform' AND status IN ('actual','provisioned')` as an inline literal — use `is_platform_projected` or the view that already does. Same for `cost_source='platform' AND status='actual'` → `is_platform_committed`.
+- **Gold views are read-only.** Never INSERT/UPDATE/DELETE through them.
+- **`UpdateCostRequestSchema` only accepts `actual | cancelled`.** Re-provisioning an actual row has no domain meaning. Phase 5 narrowed the PATCH cost contract.
+- **`POST /internal/transfer-brand` still mutates silver directly** (no domain event yet). Tracked as a follow-up.
+
+### Backfill
+
+Run once after deploy:
+
+```bash
+RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/backfill-bronze-events.ts
+```
+
+Idempotent. DISABLES projection triggers during execution so synthetic events don't re-mutate the (already-canonical) silver rows. Pre-Phase-2 rows are marked `payload->>'backfilled' = 'true'`.
+
+### Phase roadmap
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Generated cols + bronze tables + gold views | ✅ Merged (#129) |
+| 2 | Bronze writes from handlers | ✅ Merged (#130) |
+| 3 | Backfill script | ✅ Merged (#130) (manual invocation post-deploy) |
+| 4 | Read swap to gold views | ✅ Merged (#130) |
+| 5 | Trigger projects silver from bronze | ✅ Merged (#130) |
+| 6 | Rename silver to `_old` + auto-updatable view shim | ✅ This PR |
+| 7 | Drop `_old` tables + view shim | ⏳ Deferred (user-driven, days/weeks later) |
+
+### Phase 6 specifics — view shim, not naked rename
+
+`runs` and `runs_costs` are now **auto-updatable PG views** passing through to the renamed base tables `runs_old` / `runs_costs_old`. Reasons this beat the naked-rename:
+
+- **Zero code change.** Drizzle schema target stays `runs` / `runs_costs`. ~17 raw-SQL references in routes + ~9 in tests keep working.
+- **Trigger function bodies stay intact.** `INSERT INTO runs` from `project_run_lifecycle_to_silver` forwards through the view to `runs_old` because auto-updatable views support write-through including `ON CONFLICT (id) DO NOTHING`.
+- **Gold views auto-follow via OID.** No view recreation needed.
+- **Visible sunset signal in psql / Drizzle Studio.** `\d+ runs` shows VIEW (deprecated wrapper). `\d+ runs_old` shows BASE TABLE (live). Anyone connecting directly knows where the action is.
+
+Auto-updatability requires: single-table reference, no aggregates / joins / DISTINCT / GROUP BY / LIMIT. `SELECT * FROM runs_old` qualifies.
+
 ## CI status checks ↔ branch protection
 
 Branch protection on `staging` requires status checks named exactly `test-integration` and `test-unit`. The `test-integration` matrix job produces context names like `test-integration (stats, …)` which do NOT match the required name. A separate aggregator job named `test-integration` (depends on `test-integration-shard`, fails if any shard failed) provides the required context. When changing the matrix structure, keep the aggregator job name intact or PRs will sit in `BLOCKED` despite green shards.

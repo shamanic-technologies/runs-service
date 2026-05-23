@@ -120,6 +120,41 @@
       "when": 1779580800000,
       "tag": "0016_add_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1779667200000,
+      "tag": "0017_billable_generated_cols",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1779753600000,
+      "tag": "0018_bronze_lifecycle_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1779840000000,
+      "tag": "0019_gold_views",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1779926400000,
+      "tag": "0020_silver_projection_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1780012800000,
+      "tag": "0021_rename_silver_to_old",
+      "breakpoints": true
     }
   ]
 }

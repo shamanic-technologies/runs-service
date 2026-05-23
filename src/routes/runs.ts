@@ -11,6 +11,13 @@ import {
 } from "../services/cost-resolver.js";
 import { notifyUsage } from "../services/billing.js";
 import {
+  logRunLifecycle,
+  logCostLifecycle,
+  newRunId,
+  newCostId,
+  type Identity,
+} from "../services/bronze.js";
+import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
@@ -20,43 +27,31 @@ import {
 
 const router = Router();
 
-// --- Org-level platform spend (matches /internal/org-usage-total) ---
-// All math in Postgres to preserve numeric(16,10) precision (zero JS arithmetic).
+// ---------------------------------------------------------------------------
+// Phase 4 — Org-level platform spend reads from v_org_platform_spend gold view.
+// All math in Postgres. Single source of truth for the platform-projected
+// predicate (uses runs_costs.is_platform_projected generated column).
+// ---------------------------------------------------------------------------
 async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
   const result = await db.execute(sql`
-    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
-      FROM runs r
-      JOIN runs_costs rc ON rc.run_id = r.id
-     WHERE r.organization_id = ${orgId}
-       AND rc.cost_source = 'platform'
-       AND rc.status IN ('actual', 'provisioned')
+    SELECT COALESCE(projected_spent_cents, 0)::text AS spent_cents
+      FROM v_org_platform_spend
+     WHERE organization_id = ${orgId}
   `);
-  const row = (result as any[])[0];
-  return new Decimal(row.spent_cents).toFixed(10);
+  const rows = result as any[];
+  return new Decimal(rows[0]?.spent_cents ?? 0).toFixed(10);
 }
 
-// --- Cost breakdown helper ---
-
-function computeCostBreakdown(costs: { totalCostInUsdCents: string | number; status: string }[]) {
-  let actual = new Decimal(0);
-  let provisioned = new Decimal(0);
-  for (const c of costs) {
-    if (c.status === "cancelled") continue;
-    const amount = new Decimal(c.totalCostInUsdCents);
-    if (c.status === "provisioned") {
-      provisioned = provisioned.plus(amount);
-    } else {
-      actual = actual.plus(amount);
-    }
-  }
-  return { total: actual.plus(provisioned), actual, provisioned };
-}
-
-// POST /v1/runs — create a run
+// ---------------------------------------------------------------------------
+// Phase 2+5 — POST /v1/runs.
+// App writes ONLY to bronze (run_lifecycle_events). Trigger
+// project_run_lifecycle_to_silver projects to runs in same txn.
+// Idempotent replay (200 path) does NOT write bronze — bronze captures state
+// changes, not HTTP traffic.
+// ---------------------------------------------------------------------------
 router.post("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const parsed = CreateRunRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
@@ -65,7 +60,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
     const parentRunId = req.runId || null;
 
-    // Idempotency pre-check: if a run with this key already exists, short-circuit.
+    // Idempotency pre-check
     if (idempotencyKey) {
       const [existing] = await db
         .select()
@@ -85,8 +80,6 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       }
     }
 
-    // Priority: header > body (deprecated) > parent inheritance
-    // If parent has a different non-null value than the resolved one, reject with 409
     let resolvedBrandIds = req.headerBrandIds || brandIds || null;
     let resolvedCampaignId = req.headerCampaignId || campaignId || null;
     let resolvedWorkflowSlug = req.headerWorkflowSlug || workflowSlug || null;
@@ -108,51 +101,61 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
         .where(eq(runs.id, parentRunId))
         .limit(1);
 
-      if (parentRun) {
-        // Conflict detection: if both parent and resolved value are non-null and differ, reject
-        const conflicts: string[] = [];
-        if (resolvedBrandIds && parentRun.brandIds) {
-          const sortedResolved = [...resolvedBrandIds].sort().join(",");
-          const sortedParent = [...parentRun.brandIds].sort().join(",");
-          if (sortedResolved !== sortedParent) {
-            conflicts.push(`brandIds: request="${resolvedBrandIds.join(",")}" vs parent="${parentRun.brandIds.join(",")}"`);
-          }
-        }
-        if (resolvedCampaignId && parentRun.campaignId && resolvedCampaignId !== parentRun.campaignId) {
-          conflicts.push(`campaignId: request="${resolvedCampaignId}" vs parent="${parentRun.campaignId}"`);
-        }
-        if (resolvedWorkflowSlug && parentRun.workflowSlug && resolvedWorkflowSlug !== parentRun.workflowSlug) {
-          conflicts.push(`workflowSlug: request="${resolvedWorkflowSlug}" vs parent="${parentRun.workflowSlug}"`);
-        }
-        if (resolvedFeatureSlug && parentRun.featureSlug && resolvedFeatureSlug !== parentRun.featureSlug) {
-          conflicts.push(`featureSlug: request="${resolvedFeatureSlug}" vs parent="${parentRun.featureSlug}"`);
-        }
-        if (parentRun.organizationId && resolvedOrgId !== parentRun.organizationId) {
-          conflicts.push(`orgId: request="${resolvedOrgId}" vs parent="${parentRun.organizationId}"`);
-        }
-        if (resolvedUserId && parentRun.userId && resolvedUserId !== parentRun.userId) {
-          conflicts.push(`userId: request="${resolvedUserId}" vs parent="${parentRun.userId}"`);
-        }
-
-        if (conflicts.length > 0) {
-          console.error(`[Runs Service] Parent-child conflict on run ${parentRunId}: ${conflicts.join(", ")}`);
-          res.status(409).json({
-            error: "Parent-child field conflict",
-            conflicts,
-          });
-          return;
-        }
-
-        // Inherit from parent when resolved value is absent
-        if (!resolvedBrandIds) resolvedBrandIds = parentRun.brandIds;
-        if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
-        if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
-        if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
-        if (!resolvedUserId) resolvedUserId = parentRun.userId;
+      if (!parentRun) {
+        res.status(400).json({ error: `parentRunId ${parentRunId} does not exist` });
+        return;
       }
+
+      const conflicts: string[] = [];
+      if (resolvedBrandIds && parentRun.brandIds) {
+        const sortedResolved = [...resolvedBrandIds].sort().join(",");
+        const sortedParent = [...parentRun.brandIds].sort().join(",");
+        if (sortedResolved !== sortedParent) {
+          conflicts.push(`brandIds: request="${resolvedBrandIds.join(",")}" vs parent="${parentRun.brandIds.join(",")}"`);
+        }
+      }
+      if (resolvedCampaignId && parentRun.campaignId && resolvedCampaignId !== parentRun.campaignId) {
+        conflicts.push(`campaignId: request="${resolvedCampaignId}" vs parent="${parentRun.campaignId}"`);
+      }
+      if (resolvedWorkflowSlug && parentRun.workflowSlug && resolvedWorkflowSlug !== parentRun.workflowSlug) {
+        conflicts.push(`workflowSlug: request="${resolvedWorkflowSlug}" vs parent="${parentRun.workflowSlug}"`);
+      }
+      if (resolvedFeatureSlug && parentRun.featureSlug && resolvedFeatureSlug !== parentRun.featureSlug) {
+        conflicts.push(`featureSlug: request="${resolvedFeatureSlug}" vs parent="${parentRun.featureSlug}"`);
+      }
+      if (parentRun.organizationId && resolvedOrgId !== parentRun.organizationId) {
+        conflicts.push(`orgId: request="${resolvedOrgId}" vs parent="${parentRun.organizationId}"`);
+      }
+      if (resolvedUserId && parentRun.userId && resolvedUserId !== parentRun.userId) {
+        conflicts.push(`userId: request="${resolvedUserId}" vs parent="${parentRun.userId}"`);
+      }
+
+      if (conflicts.length > 0) {
+        console.error(`[runs-service] Parent-child conflict on run ${parentRunId}: ${conflicts.join(", ")}`);
+        res.status(409).json({ error: "Parent-child field conflict", conflicts });
+        return;
+      }
+
+      if (!resolvedBrandIds) resolvedBrandIds = parentRun.brandIds;
+      if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
+      if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
+      if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
+      if (!resolvedUserId) resolvedUserId = parentRun.userId;
     }
 
-    const values = {
+    const identity: Identity = {
+      orgId: resolvedOrgId,
+      userId: resolvedUserId,
+      brandIds: resolvedBrandIds,
+      campaignId: resolvedCampaignId,
+      workflowSlug: resolvedWorkflowSlug,
+      featureSlug: resolvedFeatureSlug,
+    };
+
+    const id = newRunId();
+    const payload = {
+      runId: id,
+      parentRunId,
       organizationId: resolvedOrgId,
       userId: resolvedUserId,
       brandIds: resolvedBrandIds,
@@ -161,30 +164,29 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       featureSlug: resolvedFeatureSlug,
       serviceName,
       taskName,
-      parentRunId,
       idempotencyKey: idempotencyKey ?? null,
     };
 
-    let created;
     try {
-      [created] = await db.insert(runs).values(values).returning();
-    } catch (insertErr: any) {
-      if (insertErr?.code === "23503" && values.parentRunId) {
-        console.error(
-          `[Runs Service] Foreign key violation: parentRunId ${values.parentRunId} does not exist in runs table`
-        );
-        res.status(400).json({
-          error: `parentRunId ${values.parentRunId} does not exist`,
+      const created = await db.transaction(async (tx) => {
+        await logRunLifecycle(tx, {
+          runId: id,
+          eventType: "run.created",
+          payload,
+          identity,
+          idempotencyKey: idempotencyKey ?? null,
         });
-        return;
-      }
-      // Race-condition handling: concurrent request inserted same idempotencyKey between pre-check and insert.
-      if (insertErr?.code === "23505" && idempotencyKey) {
-        const [raceWinner] = await db
-          .select()
-          .from(runs)
-          .where(eq(runs.idempotencyKey, idempotencyKey))
-          .limit(1);
+        // Trigger project_run_lifecycle_to_silver fires AFTER the bronze insert
+        // and creates the silver row synchronously. Read it back for the response.
+        const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+        return silver;
+      });
+      res.status(201).json(created);
+    } catch (err: any) {
+      // Race-condition handling on idempotency_key — concurrent retry inserted
+      // the silver row between pre-check and the trigger's insert. Re-fetch.
+      if (err?.code === "23505" && idempotencyKey) {
+        const [raceWinner] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
         if (raceWinner) {
           if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
             res.status(409).json({
@@ -197,17 +199,19 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           return;
         }
       }
-      throw insertErr;
+      throw err;
     }
-
-    res.status(201).json(created);
   } catch (err) {
-    console.error("[Runs Service] Error creating run:", err);
+    console.error("[runs-service] Error creating run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// POST /v1/runs/costs/batch — batch cost lookup by run IDs
+// ---------------------------------------------------------------------------
+// Phase 4 — POST /v1/runs/costs/batch reads from v_run_cost_rollup.
+// Single recursive walk codified in the view (was 3 ad-hoc CTEs).
+// Response shape unchanged — billing-service consumer sees same fields.
+// ---------------------------------------------------------------------------
 router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
   try {
     const parsed = BatchCostsRequestSchema.safeParse(req.body);
@@ -218,31 +222,18 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 
     const { runIds } = parsed.data;
 
-    // Single recursive CTE: find each requested run + all its descendants,
-    // tracking which root run ID each row belongs to.
-    // Platform-only own-row aggregations gate on `d.id = d.root_run_id` to exclude descendants.
-    const result = await db.execute(
-      sql`WITH RECURSIVE descendants AS (
-        SELECT id, id as root_run_id
-        FROM runs
-        WHERE id IN (${sql.join(runIds.map((id) => sql`${id}`), sql`, `)})
-          AND organization_id = ${req.orgId}
-        UNION ALL
-        SELECT r.id, d.root_run_id
-        FROM runs r
-        INNER JOIN descendants d ON r.parent_run_id = d.id
-      )
+    const result = await db.execute(sql`
       SELECT
-        d.root_run_id,
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'actual' AND rc.cost_source = 'platform' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as own_actual_platform_cost,
-        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'provisioned' AND rc.cost_source = 'platform' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as own_provisioned_platform_cost
-      FROM descendants d
-      LEFT JOIN runs_costs rc ON rc.run_id = d.id
-      GROUP BY d.root_run_id`
-    );
+        root_run_id,
+        total_cost::text             AS total_cost,
+        actual_cost::text            AS actual_cost,
+        provisioned_cost::text       AS provisioned_cost,
+        own_actual_platform_cost::text AS own_actual_platform_cost,
+        own_provisioned_platform_cost::text AS own_provisioned_platform_cost
+      FROM v_run_cost_rollup
+      WHERE root_run_id IN (${sql.join(runIds.map((id) => sql`${id}`), sql`, `)})
+        AND organization_id = ${req.orgId}
+    `);
 
     const rows = result as any[];
     const costs = rows.map((row) => ({
@@ -256,36 +247,51 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 
     res.json({ costs });
   } catch (err) {
-    console.error("[Runs Service] Error in POST /v1/runs/costs/batch:", err);
+    console.error("[runs-service] Error in POST /v1/runs/costs/batch:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /v1/runs/:id — get run with costs and descendant runs
+// ---------------------------------------------------------------------------
+// Phase 4 — GET /v1/runs/:id reads aggregates from v_run_cost_rollup.
+// computeCostBreakdown JS helper removed; all math in Postgres per
+// CLAUDE.md "Cost & billing precision" rule.
+// ---------------------------------------------------------------------------
 router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [run] = await db
-      .select()
-      .from(runs)
-      .where(eq(runs.id, id))
-      .limit(1);
-
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    // Get own costs
-    const costs = await db
-      .select()
-      .from(runsCosts)
-      .where(eq(runsCosts.runId, id));
+    const costs = await db.select().from(runsCosts).where(eq(runsCosts.runId, id));
 
-    const ownBreakdown = computeCostBreakdown(costs);
+    // All cost aggregates derive from v_run_cost_rollup (rolled up across descendants).
+    const rollupResult = await db.execute(sql`
+      SELECT
+        total_cost::text       AS total_cost,
+        actual_cost::text      AS actual_cost,
+        provisioned_cost::text AS provisioned_cost
+      FROM v_run_cost_rollup
+      WHERE root_run_id = ${id}
+    `);
+    const rollup = (rollupResult as any[])[0] ?? { total_cost: "0", actual_cost: "0", provisioned_cost: "0" };
 
-    // Get all descendant run IDs using recursive CTE
+    // Own-row aggregates (depth=0 only) — separate SQL to keep view single-purpose.
+    const ownResult = await db.execute(sql`
+      SELECT
+        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
+        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
+        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+      FROM runs_costs
+      WHERE run_id = ${id}
+    `);
+    const own = (ownResult as any[])[0];
+
+    // Descendant rows for the response shape (parent's view of children).
     const descendantResult = await db.execute(
       sql`WITH RECURSIVE descendants AS (
         SELECT id, parent_run_id, service_name, task_name, status, started_at, completed_at
@@ -296,20 +302,29 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       )
       SELECT * FROM descendants`
     );
-
     const descendantRows = descendantResult as any[];
     const descendantIds = descendantRows.map((r: any) => r.id);
 
-    // Get all descendant costs in one query
     let allDescendantCosts: any[] = [];
     if (descendantIds.length > 0) {
-      allDescendantCosts = await db
-        .select()
-        .from(runsCosts)
-        .where(inArray(runsCosts.runId, descendantIds));
+      allDescendantCosts = await db.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
     }
 
-    // Group costs by runId
+    // Per-descendant own-cost via SQL aggregation.
+    const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
+      SELECT
+        run_id,
+        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
+        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
+        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+      FROM runs_costs
+      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      GROUP BY run_id
+    `);
+    const ownByRunId = new Map<string, any>(
+      (descendantOwnResult as any[]).map((r) => [r.run_id, r])
+    );
+
     const costsByRunId = new Map<string, any[]>();
     for (const cost of allDescendantCosts) {
       const list = costsByRunId.get(cost.runId) || [];
@@ -317,10 +332,9 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       costsByRunId.set(cost.runId, list);
     }
 
-    // Build descendant runs with costs
     const descendantRuns = descendantRows.map((r: any) => {
       const runCosts = costsByRunId.get(r.id) || [];
-      const breakdown = computeCostBreakdown(runCosts);
+      const ownAgg = ownByRunId.get(r.id) ?? { own_total: "0", own_actual: "0", own_provisioned: "0" };
       return {
         id: r.id,
         parentRunId: r.parent_run_id,
@@ -330,41 +344,47 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         startedAt: r.started_at,
         completedAt: r.completed_at,
         costs: runCosts,
-        ownCostInUsdCents: breakdown.total.toFixed(10),
-        ownActualCostInUsdCents: breakdown.actual.toFixed(10),
-        ownProvisionedCostInUsdCents: breakdown.provisioned.toFixed(10),
+        ownCostInUsdCents: new Decimal(ownAgg.own_total).toFixed(10),
+        ownActualCostInUsdCents: new Decimal(ownAgg.own_actual).toFixed(10),
+        ownProvisionedCostInUsdCents: new Decimal(ownAgg.own_provisioned).toFixed(10),
       };
     });
 
-    const childrenBreakdown = computeCostBreakdown(allDescendantCosts);
+    // children = total - own (numeric subtraction in Decimal, no JS float drift)
+    const childrenTotal = new Decimal(rollup.total_cost).minus(own.own_total);
+    const childrenActual = new Decimal(rollup.actual_cost).minus(own.own_actual);
+    const childrenProvisioned = new Decimal(rollup.provisioned_cost).minus(own.own_provisioned);
 
     res.json({
       ...run,
       costs,
-      totalCostInUsdCents: ownBreakdown.total.plus(childrenBreakdown.total).toFixed(10),
-      actualCostInUsdCents: ownBreakdown.actual.plus(childrenBreakdown.actual).toFixed(10),
-      provisionedCostInUsdCents: ownBreakdown.provisioned.plus(childrenBreakdown.provisioned).toFixed(10),
-      ownCostInUsdCents: ownBreakdown.total.toFixed(10),
-      ownActualCostInUsdCents: ownBreakdown.actual.toFixed(10),
-      ownProvisionedCostInUsdCents: ownBreakdown.provisioned.toFixed(10),
-      childrenCostInUsdCents: childrenBreakdown.total.toFixed(10),
-      childrenActualCostInUsdCents: childrenBreakdown.actual.toFixed(10),
-      childrenProvisionedCostInUsdCents: childrenBreakdown.provisioned.toFixed(10),
+      totalCostInUsdCents: new Decimal(rollup.total_cost).toFixed(10),
+      actualCostInUsdCents: new Decimal(rollup.actual_cost).toFixed(10),
+      provisionedCostInUsdCents: new Decimal(rollup.provisioned_cost).toFixed(10),
+      ownCostInUsdCents: new Decimal(own.own_total).toFixed(10),
+      ownActualCostInUsdCents: new Decimal(own.own_actual).toFixed(10),
+      ownProvisionedCostInUsdCents: new Decimal(own.own_provisioned).toFixed(10),
+      childrenCostInUsdCents: childrenTotal.toFixed(10),
+      childrenActualCostInUsdCents: childrenActual.toFixed(10),
+      childrenProvisionedCostInUsdCents: childrenProvisioned.toFixed(10),
       descendantRuns,
     });
   } catch (err) {
-    console.error("[Runs Service] Error getting run:", err);
+    console.error("[runs-service] Error getting run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// POST /v1/runs/:id/costs — add cost line items
+// ---------------------------------------------------------------------------
+// Phase 2+5 — POST /v1/runs/:id/costs.
+// App writes only cost.added events to bronze. Trigger creates runs_costs
+// rows. Per-item idempotencyKey replay returns existing row from silver.
+// ---------------------------------------------------------------------------
 router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
 
     const parsed = AddCostsRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
@@ -372,19 +392,12 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
 
     const { items } = parsed.data;
 
-    // Verify run exists
-    const [run] = await db
-      .select()
-      .from(runs)
-      .where(eq(runs.id, id))
-      .limit(1);
-
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    // Resolve unit costs from costs-service
     const names = items.map((i) => i.costName);
     let costMap: Map<string, string>;
     try {
@@ -399,54 +412,84 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       });
     } catch (err) {
       if (err instanceof CostNotFoundError) {
-        res
-          .status(422)
-          .json({ error: `Unknown cost: ${err.costName}` });
+        res.status(422).json({ error: `Unknown cost: ${err.costName}` });
         return;
       }
       throw err;
     }
 
-    // Build cost rows
-    const costRows = items.map((item) => {
-      const unitCost = costMap.get(item.costName)!;
-      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
-      return {
-        runId: id,
-        costName: item.costName,
-        costSource: item.costSource,
-        quantity: String(item.quantity),
-        unitCostInUsdCents: unitCost,
-        totalCostInUsdCents: total,
-        status: item.status ?? "actual",
-        idempotencyKey: item.idempotencyKey ?? null,
-      };
-    });
+    const identity: Identity = {
+      orgId: req.orgId,
+      userId: req.userId || run.userId,
+      brandIds: req.headerBrandIds ?? null,
+      campaignId: req.headerCampaignId ?? null,
+      workflowSlug: req.headerWorkflowSlug ?? null,
+      featureSlug: req.headerFeatureSlug ?? null,
+    };
 
-    // Insert costs — runs_costs is the source of truth for run-level platform spend.
-    // Per-item idempotencyKey deduped via partial unique idx (run_id, idempotency_key).
-    // ON CONFLICT DO NOTHING skips duplicates; returning() only contains successfully inserted rows.
-    const insertedRows = await db.insert(runsCosts).values(costRows).onConflictDoNothing().returning();
-
-    // Restore caller-visible 1-to-1 mapping: for items with idempotencyKey that conflicted,
-    // fetch the original row so the response shape matches the request.
-    const insertedKeys = new Set(insertedRows.filter((r) => r.idempotencyKey).map((r) => r.idempotencyKey!));
-    const missingKeys = costRows
-      .filter((r) => r.idempotencyKey && !insertedKeys.has(r.idempotencyKey))
-      .map((r) => r.idempotencyKey!);
-    let existingByKey: typeof insertedRows = [];
-    if (missingKeys.length > 0) {
-      existingByKey = await db
+    // Idempotency dedupe for per-item keys — re-fetch existing silver rows
+    // for keys that already exist; never emit duplicate bronze events for those.
+    const keyed = items.filter((i) => i.idempotencyKey);
+    const existingByKey = new Map<string, any>();
+    if (keyed.length > 0) {
+      const existing = await db
         .select()
         .from(runsCosts)
-        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, missingKeys)));
+        .where(and(eq(runsCosts.runId, id), inArray(runsCosts.idempotencyKey, keyed.map((i) => i.idempotencyKey!))));
+      for (const row of existing) existingByKey.set(row.idempotencyKey!, row);
     }
-    const inserted = [...insertedRows, ...existingByKey];
 
-    // Fire-and-forget cache-invalidation hint to billing-service. Failures log to
-    // Railway via notifyUsage's internal catch; lifecycle continues regardless.
+    const itemsToCreate: Array<{ item: typeof items[number]; costId: string; total: string }> = [];
+    for (const item of items) {
+      if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) continue;
+      const unitCost = costMap.get(item.costName)!;
+      const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
+      itemsToCreate.push({ item, costId: newCostId(), total });
+    }
+
+    const newRows = await db.transaction(async (tx) => {
+      for (const { item, costId, total } of itemsToCreate) {
+        const unitCost = costMap.get(item.costName)!;
+        await logCostLifecycle(tx, {
+          runId: id,
+          costId,
+          eventType: "cost.added",
+          payload: {
+            costId,
+            costName: item.costName,
+            costSource: item.costSource,
+            quantity: String(item.quantity),
+            unitCostInUsdCents: unitCost,
+            totalCostInUsdCents: total,
+            status: item.status ?? "actual",
+            idempotencyKey: item.idempotencyKey ?? null,
+          },
+          identity,
+          idempotencyKey: item.idempotencyKey ?? null,
+        });
+      }
+      if (itemsToCreate.length === 0) return [] as any[];
+      return await tx
+        .select()
+        .from(runsCosts)
+        .where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
+    });
+
+    // Restore 1-to-1 mapping for response: items that idempotency-collided return the existing row.
+    const inserted: any[] = [];
+    let createdIdx = 0;
+    for (const item of items) {
+      if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) {
+        inserted.push(existingByKey.get(item.idempotencyKey));
+      } else {
+        inserted.push(newRows[createdIdx]);
+        createdIdx++;
+      }
+    }
+
+    // Fire-and-forget cache-invalidation hint to billing-service.
     const billingUserId = req.userId || run.userId;
-    if (billingUserId) {
+    if (billingUserId && itemsToCreate.length > 0) {
       const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
       await notifyUsage(
         {
@@ -474,7 +517,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
   }
 });
 
-// PATCH /v1/runs/:id/costs/:costId — update a cost item (e.g. realize a provision)
+// ---------------------------------------------------------------------------
+// Phase 2+5 — PATCH /v1/runs/:id/costs/:costId.
+// App writes cost.materialized / cost.cancelled events to bronze.
+// Trigger flips runs_costs.status.
+// ---------------------------------------------------------------------------
 router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
   try {
     const { id, costId } = req.params;
@@ -485,14 +532,12 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
       return;
     }
 
-    // Verify run exists
     const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    // Read the existing cost item before updating
     const [existing] = await db
       .select()
       .from(runsCosts)
@@ -505,15 +550,31 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     }
 
     const newStatus = parsed.data.status;
+    const eventType = newStatus === "actual" ? "cost.materialized" : "cost.cancelled";
 
-    // Update the cost row — runs_costs is the source of truth.
-    const [updated] = await db
-      .update(runsCosts)
-      .set({ status: newStatus })
-      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
-      .returning();
+    const updated = await db.transaction(async (tx) => {
+      await logCostLifecycle(tx, {
+        runId: id,
+        costId,
+        eventType,
+        payload: { from: existing.status, to: newStatus },
+        identity: {
+          orgId: req.orgId,
+          userId: req.userId || run.userId,
+          brandIds: req.headerBrandIds ?? null,
+          campaignId: req.headerCampaignId ?? null,
+          workflowSlug: req.headerWorkflowSlug ?? null,
+          featureSlug: req.headerFeatureSlug ?? null,
+        },
+      });
+      const [row] = await tx
+        .select()
+        .from(runsCosts)
+        .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
+        .limit(1);
+      return row;
+    });
 
-    // Fire-and-forget cache-invalidation hint to billing-service.
     const billingUserId = req.userId || run.userId;
     if (billingUserId) {
       const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
@@ -538,63 +599,62 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
   }
 });
 
-// PATCH /v1/runs/:id — update run status
+// ---------------------------------------------------------------------------
+// Phase 2+5 — PATCH /v1/runs/:id.
+// App writes run.completed / run.failed events to bronze. Trigger flips
+// runs.status + completed_at.
+// ---------------------------------------------------------------------------
 router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
 
     const parsed = UpdateRunRequestSchema.safeParse(req.body);
-
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
 
     const { status } = parsed.data;
+    const eventType = status === "completed" ? "run.completed" : "run.failed";
 
-    const [updated] = await db
-      .update(runs)
-      .set({
-        status,
-        completedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(runs.id, id))
-      .returning();
+    const updated = await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+      if (!existing) return null;
+      await logRunLifecycle(tx, {
+        runId: id,
+        eventType,
+        payload: { from: existing.status, to: status },
+        identity: {
+          orgId: req.orgId,
+          userId: req.userId || existing.userId,
+        },
+      });
+      const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
+      return row;
+    });
 
     if (!updated) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
-
     res.json(updated);
   } catch (err) {
-    console.error("[Runs Service] Error updating run:", err);
+    console.error("[runs-service] Error updating run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /v1/runs — list runs with cost totals
+// ---------------------------------------------------------------------------
+// GET /v1/runs — unchanged from prior PR; read path that already uses SUM/GROUP BY.
+// ---------------------------------------------------------------------------
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      userId,
-      brandId,
-      campaignId,
-      workflowSlug,
-      featureSlug,
-      serviceName,
-      taskName,
-      status,
-      parentRunId,
-      startedAfter,
-      startedBefore,
-      limit: limitStr,
-      offset: offsetStr,
+      userId, brandId, campaignId, workflowSlug, featureSlug, serviceName, taskName,
+      status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
 
     const conditions = [eq(runs.organizationId, req.orgId)];
-
     if (userId) conditions.push(eq(runs.userId, userId as string));
     if (brandId) conditions.push(sql`${brandId} = ANY(${runs.brandIds})`);
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
@@ -604,16 +664,13 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (status) conditions.push(eq(runs.status, status as string));
     if (parentRunId) conditions.push(eq(runs.parentRunId, parentRunId as string));
-    if (startedAfter)
-      conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
-    if (startedBefore)
-      conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
+    if (startedAfter) conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
+    if (startedBefore) conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
 
     const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
     const limit = limitStr ? Number(limitStr) : undefined;
     const offset = offsetStr ? Number(offsetStr) : 0;
 
-    // Select runs with own cost totals via LEFT JOIN + SUM
     const query = db
       .select({
         id: runs.id,
@@ -639,21 +696,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
       .where(whereClause)
       .groupBy(
-        runs.id,
-        runs.parentRunId,
-        runs.organizationId,
-        runs.userId,
-        runs.brandIds,
-        runs.campaignId,
-        runs.workflowSlug,
-        runs.featureSlug,
-        runs.serviceName,
-        runs.taskName,
-        runs.status,
-        runs.startedAt,
-        runs.completedAt,
-        runs.createdAt,
-        runs.updatedAt,
+        runs.id, runs.parentRunId, runs.organizationId, runs.userId, runs.brandIds,
+        runs.campaignId, runs.workflowSlug, runs.featureSlug, runs.serviceName, runs.taskName,
+        runs.status, runs.startedAt, runs.completedAt, runs.createdAt, runs.updatedAt,
       )
       .orderBy(desc(runs.startedAt));
 
@@ -661,8 +706,6 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (offset) query.offset(offset);
 
     const result = await query;
-
-    // Format cost fields to fixed decimal
     const formattedRuns = result.map((r) => ({
       ...r,
       ownCostInUsdCents: new Decimal(r.ownCostInUsdCents).toFixed(10),
@@ -672,7 +715,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
 
     res.json({ runs: formattedRuns, ...(limit !== undefined && { limit }), offset });
   } catch (err) {
-    console.error("[Runs Service] Error listing runs:", err);
+    console.error("[runs-service] Error listing runs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

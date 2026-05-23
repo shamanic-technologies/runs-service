@@ -94,3 +94,52 @@ export const runEvents = pgTable(
 
 export type RunEvent = typeof runEvents.$inferSelect;
 export type NewRunEvent = typeof runEvents.$inferInsert;
+
+// Bronze layer (γ-migration Phase 1) — append-only domain event logs.
+// No FK to runs / runs_costs: bronze must survive even if silver is cascade-deleted.
+// Phase 2 will wire handlers to dual-write into these tables. Phase 4 will swap reads.
+// See CLAUDE.md "Data layering" section.
+
+export const runLifecycleEvents = pgTable(
+  "run_lifecycle_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    sourceService: text("source_service"),
+    identity: jsonb("identity"),
+    idempotencyKey: text("idempotency_key"),
+    correlationId: text("correlation_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_rle_run_occurred").on(table.runId, table.occurredAt),
+    index("idx_rle_event_type").on(table.eventType, table.occurredAt),
+  ]
+);
+
+export type RunLifecycleEvent = typeof runLifecycleEvents.$inferSelect;
+export type NewRunLifecycleEvent = typeof runLifecycleEvents.$inferInsert;
+
+export const costLifecycleEvents = pgTable(
+  "cost_lifecycle_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    costId: uuid("cost_id"),
+    runId: uuid("run_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    identity: jsonb("identity"),
+    idempotencyKey: text("idempotency_key"),
+    correlationId: text("correlation_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_cle_run_occurred").on(table.runId, table.occurredAt),
+    index("idx_cle_event_type").on(table.eventType, table.occurredAt),
+  ]
+);
+
+export type CostLifecycleEvent = typeof costLifecycleEvents.$inferSelect;
+export type NewCostLifecycleEvent = typeof costLifecycleEvents.$inferInsert;
