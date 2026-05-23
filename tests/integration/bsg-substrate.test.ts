@@ -312,11 +312,11 @@ describe("B/S/G substrate — Phase 1", () => {
         quantity: "1", unitCostInUsdCents: "9.0000000000",
         totalCostInUsdCents: "9.0000000000", status: "cancelled",
       });
-      // excluded — org source
+      // excluded — org source (unit_cost is numeric(12,10) — keep < 99.9999999999)
       await insertTestRunCost({
         runId: r2.id, costName: "byok", costSource: "org",
-        quantity: "1", unitCostInUsdCents: "100.0000000000",
-        totalCostInUsdCents: "100.0000000000", status: "actual",
+        quantity: "1", unitCostInUsdCents: "50.0000000000",
+        totalCostInUsdCents: "50.0000000000", status: "actual",
       });
 
       const result = await db.execute(sql`
