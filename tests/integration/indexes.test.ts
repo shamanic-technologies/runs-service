@@ -10,7 +10,7 @@ describe("Database indexes", () => {
   it("has the covering aggregation index on runs_costs", async () => {
     const result = await sql`
       SELECT indexname, indexdef FROM pg_indexes
-      WHERE tablename = 'runs_costs' AND indexname = 'idx_runs_costs_run_agg'
+      WHERE tablename = 'runs_costs_old' AND indexname = 'idx_runs_costs_run_agg'
     `;
     expect(result).toHaveLength(1);
     expect(result[0].indexdef).toContain("run_id");
@@ -22,7 +22,7 @@ describe("Database indexes", () => {
   it("has the created_at index on runs_costs for budget queries", async () => {
     const result = await sql`
       SELECT indexname FROM pg_indexes
-      WHERE tablename = 'runs_costs' AND indexname = 'idx_runs_costs_created_at'
+      WHERE tablename = 'runs_costs_old' AND indexname = 'idx_runs_costs_created_at'
     `;
     expect(result).toHaveLength(1);
   });
@@ -30,7 +30,7 @@ describe("Database indexes", () => {
   it("has the composite feature_slug + org index on runs", async () => {
     const result = await sql`
       SELECT indexname, indexdef FROM pg_indexes
-      WHERE tablename = 'runs' AND indexname = 'idx_runs_feature_org'
+      WHERE tablename = 'runs_old' AND indexname = 'idx_runs_feature_org'
     `;
     expect(result).toHaveLength(1);
     expect(result[0].indexdef).toContain("feature_slug");
@@ -40,7 +40,7 @@ describe("Database indexes", () => {
   it("does not have the removed unused indexes", async () => {
     const result = await sql`
       SELECT indexname FROM pg_indexes
-      WHERE tablename IN ('runs', 'runs_costs')
+      WHERE tablename IN ('runs_old', 'runs_costs_old')
         AND indexname IN (
           'idx_runs_org',
           'idx_runs_status',

@@ -111,12 +111,23 @@ Idempotent. DISABLES projection triggers during execution so synthetic events do
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Generated cols + bronze tables + gold views | ✅ Merged (#129) |
-| 2 | Bronze writes from handlers | ✅ This PR |
-| 3 | Backfill script | ✅ This PR (manual invocation) |
-| 4 | Read swap to gold views | ✅ This PR |
-| 5 | Trigger projects silver from bronze; handlers stop writing silver directly | ✅ This PR |
-| 6 | `ALTER TABLE runs RENAME TO runs_old` etc. | ⏳ Deferred to follow-up PR (cosmetic, isolate blast radius) |
-| 7 | Drop `_old` tables | ⏳ Deferred (user-driven, days/weeks later) |
+| 2 | Bronze writes from handlers | ✅ Merged (#130) |
+| 3 | Backfill script | ✅ Merged (#130) (manual invocation post-deploy) |
+| 4 | Read swap to gold views | ✅ Merged (#130) |
+| 5 | Trigger projects silver from bronze | ✅ Merged (#130) |
+| 6 | Rename silver to `_old` + auto-updatable view shim | ✅ This PR |
+| 7 | Drop `_old` tables + view shim | ⏳ Deferred (user-driven, days/weeks later) |
+
+### Phase 6 specifics — view shim, not naked rename
+
+`runs` and `runs_costs` are now **auto-updatable PG views** passing through to the renamed base tables `runs_old` / `runs_costs_old`. Reasons this beat the naked-rename:
+
+- **Zero code change.** Drizzle schema target stays `runs` / `runs_costs`. ~17 raw-SQL references in routes + ~9 in tests keep working.
+- **Trigger function bodies stay intact.** `INSERT INTO runs` from `project_run_lifecycle_to_silver` forwards through the view to `runs_old` because auto-updatable views support write-through including `ON CONFLICT (id) DO NOTHING`.
+- **Gold views auto-follow via OID.** No view recreation needed.
+- **Visible sunset signal in psql / Drizzle Studio.** `\d+ runs` shows VIEW (deprecated wrapper). `\d+ runs_old` shows BASE TABLE (live). Anyone connecting directly knows where the action is.
+
+Auto-updatability requires: single-table reference, no aggregates / joins / DISTINCT / GROUP BY / LIMIT. `SELECT * FROM runs_old` qualifies.
 
 ## CI status checks ↔ branch protection
 
