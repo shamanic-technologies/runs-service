@@ -23,6 +23,7 @@ import {
   AddCostsRequestSchema,
   UpdateCostRequestSchema,
   BatchCostsRequestSchema,
+  BatchRunsRequestSchema,
 } from "../schemas.js";
 
 const router = Router();
@@ -248,6 +249,179 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
     res.json({ costs });
   } catch (err) {
     console.error("[runs-service] Error in POST /v1/runs/costs/batch:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/runs/batch — fetch N runs with full RunWithCosts shape in one call.
+// Replaces the N × GET /v1/runs/:id fanout in api-service runs-client.
+// Reads from v_run_cost_rollup (rolled-up aggregates) + runs (row data) +
+// runs_costs (own + descendant cost arrays) + v_runs_with_descendants
+// (descendant tree). Constant 4 SQL round-trips regardless of N (up to 10000).
+// ---------------------------------------------------------------------------
+router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
+  try {
+    const parsed = BatchRunsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const { runIds } = parsed.data;
+
+    // Query 1 — base run rows scoped to org.
+    const runRows = await db
+      .select()
+      .from(runs)
+      .where(and(eq(runs.organizationId, req.orgId), inArray(runs.id, runIds)));
+
+    if (runRows.length === 0) {
+      res.json({ runs: [] });
+      return;
+    }
+
+    const foundIds = runRows.map((r) => r.id);
+
+    // Query 2 — rolled-up aggregates (descendants included) from gold view.
+    const rollupResult = await db.execute(sql`
+      SELECT
+        root_run_id,
+        total_cost::text       AS total_cost,
+        actual_cost::text      AS actual_cost,
+        provisioned_cost::text AS provisioned_cost
+      FROM v_run_cost_rollup
+      WHERE root_run_id IN (${sql.join(foundIds.map((id) => sql`${id}`), sql`, `)})
+    `);
+    const rollupByRoot = new Map<string, any>(
+      (rollupResult as any[]).map((r) => [r.root_run_id, r])
+    );
+
+    // Query 3 — descendant run rows (excluding the roots themselves) with their
+    // metadata. Single recursive walk via v_runs_with_descendants view.
+    const descendantResult = await db.execute(sql`
+      SELECT
+        d.root_run_id,
+        r.id,
+        r.parent_run_id,
+        r.service_name,
+        r.task_name,
+        r.status,
+        r.started_at,
+        r.completed_at
+      FROM v_runs_with_descendants d
+      INNER JOIN runs r ON r.id = d.id
+      WHERE d.root_run_id IN (${sql.join(foundIds.map((id) => sql`${id}`), sql`, `)})
+        AND d.depth > 0
+    `);
+    const descendantRows = descendantResult as any[];
+    const descendantIds = descendantRows.map((r) => r.id);
+    const descendantsByRoot = new Map<string, any[]>();
+    for (const row of descendantRows) {
+      const list = descendantsByRoot.get(row.root_run_id) || [];
+      list.push(row);
+      descendantsByRoot.set(row.root_run_id, list);
+    }
+
+    // Query 4 — all cost rows for roots + descendants in one fetch.
+    const allCostRunIds = [...foundIds, ...descendantIds];
+    const allCosts = allCostRunIds.length === 0
+      ? []
+      : await db.select().from(runsCosts).where(inArray(runsCosts.runId, allCostRunIds));
+    const costsByRunId = new Map<string, any[]>();
+    for (const cost of allCosts) {
+      const list = costsByRunId.get(cost.runId) || [];
+      list.push(cost);
+      costsByRunId.set(cost.runId, list);
+    }
+
+    // Per-descendant own-cost aggregates (depth>0). Done in one SQL aggregation.
+    const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
+      SELECT
+        run_id,
+        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
+        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
+        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+      FROM runs_costs
+      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      GROUP BY run_id
+    `);
+    const ownAggByRunId = new Map<string, any>(
+      (descendantOwnResult as any[]).map((r) => [r.run_id, r])
+    );
+
+    // Per-root own-cost aggregates (depth=0).
+    const rootOwnResult = await db.execute(sql`
+      SELECT
+        run_id,
+        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
+        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
+        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+      FROM runs_costs
+      WHERE run_id IN (${sql.join(foundIds.map((id) => sql`${id}`), sql`, `)})
+      GROUP BY run_id
+    `);
+    const rootOwnByRunId = new Map<string, any>(
+      (rootOwnResult as any[]).map((r) => [r.run_id, r])
+    );
+
+    // Assemble RunWithCosts per requested root in JS (no math, just dispatch).
+    const result = runRows.map((run) => {
+      const rollup = rollupByRoot.get(run.id) ?? {
+        total_cost: "0",
+        actual_cost: "0",
+        provisioned_cost: "0",
+      };
+      const ownAgg = rootOwnByRunId.get(run.id) ?? {
+        own_total: "0",
+        own_actual: "0",
+        own_provisioned: "0",
+      };
+      const childrenTotal = new Decimal(rollup.total_cost).minus(ownAgg.own_total);
+      const childrenActual = new Decimal(rollup.actual_cost).minus(ownAgg.own_actual);
+      const childrenProvisioned = new Decimal(rollup.provisioned_cost).minus(ownAgg.own_provisioned);
+
+      const descendantRuns = (descendantsByRoot.get(run.id) ?? []).map((d) => {
+        const dCosts = costsByRunId.get(d.id) ?? [];
+        const dOwn = ownAggByRunId.get(d.id) ?? {
+          own_total: "0",
+          own_actual: "0",
+          own_provisioned: "0",
+        };
+        return {
+          id: d.id,
+          parentRunId: d.parent_run_id,
+          serviceName: d.service_name,
+          taskName: d.task_name,
+          status: d.status,
+          startedAt: d.started_at,
+          completedAt: d.completed_at,
+          costs: dCosts,
+          ownCostInUsdCents: new Decimal(dOwn.own_total).toFixed(10),
+          ownActualCostInUsdCents: new Decimal(dOwn.own_actual).toFixed(10),
+          ownProvisionedCostInUsdCents: new Decimal(dOwn.own_provisioned).toFixed(10),
+        };
+      });
+
+      return {
+        ...run,
+        costs: costsByRunId.get(run.id) ?? [],
+        totalCostInUsdCents: new Decimal(rollup.total_cost).toFixed(10),
+        actualCostInUsdCents: new Decimal(rollup.actual_cost).toFixed(10),
+        provisionedCostInUsdCents: new Decimal(rollup.provisioned_cost).toFixed(10),
+        ownCostInUsdCents: new Decimal(ownAgg.own_total).toFixed(10),
+        ownActualCostInUsdCents: new Decimal(ownAgg.own_actual).toFixed(10),
+        ownProvisionedCostInUsdCents: new Decimal(ownAgg.own_provisioned).toFixed(10),
+        childrenCostInUsdCents: childrenTotal.toFixed(10),
+        childrenActualCostInUsdCents: childrenActual.toFixed(10),
+        childrenProvisionedCostInUsdCents: childrenProvisioned.toFixed(10),
+        descendantRuns,
+      };
+    });
+
+    res.json({ runs: result });
+  } catch (err) {
+    console.error("[runs-service] Error in POST /v1/runs/batch:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
