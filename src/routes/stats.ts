@@ -388,12 +388,10 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
       : sql``;
 
+    // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+        ${costAggregateSelectSql("rc")},
         COUNT(DISTINCT r.id) as run_count,
         MIN(r.started_at) as min_started_at,
         MAX(r.started_at) as max_started_at
