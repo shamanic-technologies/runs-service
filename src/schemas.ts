@@ -147,6 +147,16 @@ export const BatchCostsRequestSchema = z
   })
   .openapi("BatchCostsRequest");
 
+// POST /v1/runs/batch — fetch many runs with full RunWithCosts shape in one call.
+// Replaces the N × GET /v1/runs/:id fanout the api-service runs-client does today.
+export const BatchRunsRequestSchema = z
+  .object({
+    runIds: z.array(z.string().uuid()).min(1).max(10000),
+  })
+  .openapi("BatchRunsRequest");
+
+export type BatchRunsRequest = z.infer<typeof BatchRunsRequestSchema>;
+
 export type BatchCostsRequest = z.infer<typeof BatchCostsRequestSchema>;
 
 export const BatchCostsEntrySchema = z
@@ -499,6 +509,35 @@ registry.registerPath({
     },
     400: {
       description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/runs/batch",
+  summary: "Batch get runs with full cost breakdown",
+  description:
+    "Returns one `RunWithCosts` per requested run ID — the exact same shape as `GET /v1/runs/:id` including per-run own costs, rolled-up totals, and the `descendantRuns[]` tree. Org-scoped via x-org-id; rows not found or not belonging to the org are silently omitted from the response. Per-request cap is 10000 runIds; callers above the cap MUST chunk. Designed to replace the N × `GET /v1/runs/:id` fanout that runs-client does today.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: BatchRunsRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Runs with cost breakdown",
+      content: {
+        "application/json": {
+          schema: z.object({ runs: z.array(RunWithCostsSchema) }),
+        },
+      },
+    },
+    400: {
+      description: "Invalid request or runIds count > 10000",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
     401: { description: "Unauthorized" },
