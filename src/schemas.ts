@@ -776,8 +776,8 @@ export const StatsFiltersSchema = z.object({
   workflowSlug: z.string().optional().openapi({ description: "Filter by a single workflow slug" }),
   workflowSlugs: z.string().optional().openapi({ description: "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided." }),
   workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service. Takes precedence over workflowSlug/workflowSlugs." }),
-  featureSlug: z.string().optional().openapi({ description: "Filter by feature slug" }),
-  featureDynastySlug: z.string().optional().openapi({ description: "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug." }),
+  featureSlug: z.string().optional().openapi({ description: "Filter by a single feature slug" }),
+  featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug when both are provided. Callers that compute feature lineage themselves (e.g. features-service) pass the full lineage in one call to avoid N HTTP roundtrips." }),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
   startedAfter: z.string().datetime().optional(),
@@ -804,6 +804,52 @@ export const StatsCostsResponseSchema = z
     ),
   })
   .openapi("StatsCostsResponse");
+
+export const ServiceTaskSchema = z
+  .object({
+    serviceName: z.string().min(1),
+    taskName: z.string().min(1),
+  })
+  .openapi("ServiceTask");
+
+export const StatsCostsByServiceTasksRequestSchema = z
+  .object({
+    groupBy: z.string().min(1).openapi({ description: "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST." }),
+    brandId: z.string().optional(),
+    campaignId: z.string().optional(),
+    workflowSlug: z.string().optional(),
+    workflowSlugs: z.array(z.string().min(1)).optional().openapi({ description: "Filter by multiple workflow slugs. Takes precedence over workflowSlug." }),
+    featureSlug: z.string().optional(),
+    featureSlugs: z.array(z.string().min(1)).optional().openapi({ description: "Filter by multiple feature slugs. Takes precedence over featureSlug." }),
+    startedAfter: z.string().datetime().optional(),
+    startedBefore: z.string().datetime().optional(),
+    serviceTasks: z.array(ServiceTaskSchema).min(1).openapi({ description: "List of (serviceName, taskName) pairs. Each pair produces its own bucket of aggregated groups in the response. Pairs are matched as a tuple — passing [{serviceName:'a', taskName:'b'}] is NOT the same as serviceName='a' AND taskName='b' across multiple service-task combos." }),
+  })
+  .openapi("StatsCostsByServiceTasksRequest");
+
+export const StatsCostsByServiceTasksResponseSchema = z
+  .object({
+    buckets: z.array(
+      z.object({
+        serviceName: z.string(),
+        taskName: z.string(),
+        groups: z.array(
+          z.object({
+            dimensions: z.record(z.string(), z.string().nullable()),
+            totalCostInUsdCents: z.string(),
+            actualCostInUsdCents: z.string(),
+            provisionedCostInUsdCents: z.string(),
+            cancelledCostInUsdCents: z.string(),
+            runCount: z.number(),
+            minStartedAt: z.string().datetime().nullable(),
+            maxStartedAt: z.string().datetime().nullable(),
+            totalQuantity: z.string().optional(),
+          })
+        ),
+      })
+    ),
+  })
+  .openapi("StatsCostsByServiceTasksResponse");
 
 export const BudgetWindowSchema = z.object({
   label: z.string().min(1),
@@ -864,13 +910,12 @@ export const ChildrenSummaryResponseSchema = z
 
 export const PublicCostsQuerySchema = z
   .object({
-    groupBy: z.enum(["brandId", "workflowSlug", "campaignId", "featureSlug", "serviceName", "costName", "workflowDynastySlug", "featureDynastySlug"]),
+    groupBy: z.enum(["brandId", "workflowSlug", "campaignId", "featureSlug", "serviceName", "costName", "workflowDynastySlug"]),
     orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     featureSlug: z.string().optional(),
-    featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this." }),
-    featureDynastySlug: z.string().optional().openapi({ description: "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs." }),
+    featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug." }),
     workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service." }),
     taskName: z.string().optional(),
   })
@@ -883,7 +928,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Aggregate costs with GROUP BY",
   description:
-    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, featureDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Dynasty groupBy re-groups versioned slugs under their dynasty. Organization identified via x-org-id header.",
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName, workflowDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsCostsQuerySchema,
@@ -896,6 +941,31 @@ registry.registerPath({
     400: {
       description: "Invalid groupBy value",
       content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/stats/costs",
+  summary: "Batched cost aggregation across multiple (serviceName, taskName) tuples",
+  description:
+    "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: StatsCostsByServiceTasksRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Aggregated cost groups per (serviceName, taskName) bucket",
+      content: { "application/json": { schema: StatsCostsByServiceTasksResponseSchema } },
+    },
+    400: {
+      description: "Invalid request or unsupported groupBy",
+      content: { "application/json": { schema: ValidationErrorSchema } },
     },
     401: { description: "Unauthorized" },
   },
@@ -956,7 +1026,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs",
   summary: "Public cost aggregation (no auth)",
   description:
-    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
+    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
   },

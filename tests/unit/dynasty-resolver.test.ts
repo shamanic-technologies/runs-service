@@ -1,9 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   resolveWorkflowDynastySlugs,
-  resolveFeatureDynastySlugs,
   fetchAllWorkflowDynasties,
-  fetchAllFeatureDynasties,
   buildSlugToDynastyMap,
   type IdentityHeaders,
 } from "../../src/services/dynasty-resolver.js";
@@ -18,8 +16,6 @@ const testIdentity: IdentityHeaders = {
 beforeEach(() => {
   process.env.WORKFLOW_SERVICE_URL = "https://workflow.test";
   process.env.WORKFLOW_SERVICE_API_KEY = "wf-key";
-  process.env.FEATURES_SERVICE_URL = "https://features.test";
-  process.env.FEATURES_SERVICE_API_KEY = "feat-key";
 });
 
 afterEach(() => {
@@ -77,27 +73,6 @@ describe("resolveWorkflowDynastySlugs", () => {
   });
 });
 
-describe("resolveFeatureDynastySlugs", () => {
-  it("returns slugs from features-service", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ slugs: ["feat-a", "feat-a-v2"] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
-
-    const slugs = await resolveFeatureDynastySlugs("feat-a", testIdentity);
-    expect(slugs).toEqual(["feat-a", "feat-a-v2"]);
-
-    const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
-    expect(fetchCall[0]).toBe(
-      "https://features.test/features/dynasty/slugs?dynastySlug=feat-a"
-    );
-    const headers = fetchCall[1]?.headers as Record<string, string>;
-    expect(headers["x-org-id"]).toBe(testIdentity.orgId);
-  });
-});
-
 describe("fetchAllWorkflowDynasties", () => {
   it("returns all dynasties from dedicated endpoint with new field names", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
@@ -118,23 +93,6 @@ describe("fetchAllWorkflowDynasties", () => {
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe("https://workflow.test/workflows/dynasties");
-  });
-});
-
-describe("fetchAllFeatureDynasties", () => {
-  it("returns all dynasties", async () => {
-    const dynasties = [
-      { dynastySlug: "feat-alpha", slugs: ["feat-alpha", "feat-alpha-v2"] },
-    ];
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ dynasties }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
-
-    const result = await fetchAllFeatureDynasties(testIdentity);
-    expect(result).toEqual(dynasties);
   });
 });
 

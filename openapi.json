@@ -866,6 +866,161 @@
           "groups"
         ]
       },
+      "StatsCostsByServiceTasksResponse": {
+        "type": "object",
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "serviceName": {
+                  "type": "string"
+                },
+                "taskName": {
+                  "type": "string"
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "dimensions": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "totalCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "actualCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "provisionedCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "cancelledCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "runCount": {
+                        "type": "number"
+                      },
+                      "minStartedAt": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "date-time"
+                      },
+                      "maxStartedAt": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "date-time"
+                      },
+                      "totalQuantity": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "dimensions",
+                      "totalCostInUsdCents",
+                      "actualCostInUsdCents",
+                      "provisionedCostInUsdCents",
+                      "cancelledCostInUsdCents",
+                      "runCount",
+                      "minStartedAt",
+                      "maxStartedAt"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "serviceName",
+                "taskName",
+                "groups"
+              ]
+            }
+          }
+        },
+        "required": [
+          "buckets"
+        ]
+      },
+      "StatsCostsByServiceTasksRequest": {
+        "type": "object",
+        "properties": {
+          "groupBy": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST."
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "campaignId": {
+            "type": "string"
+          },
+          "workflowSlug": {
+            "type": "string"
+          },
+          "workflowSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Filter by multiple workflow slugs. Takes precedence over workflowSlug."
+          },
+          "featureSlug": {
+            "type": "string"
+          },
+          "featureSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Filter by multiple feature slugs. Takes precedence over featureSlug."
+          },
+          "startedAfter": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedBefore": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "serviceTasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceTask"
+            },
+            "minItems": 1,
+            "description": "List of (serviceName, taskName) pairs. Each pair produces its own bucket of aggregated groups in the response. Pairs are matched as a tuple — passing [{serviceName:'a', taskName:'b'}] is NOT the same as serviceName='a' AND taskName='b' across multiple service-task combos."
+          }
+        },
+        "required": [
+          "groupBy",
+          "serviceTasks"
+        ]
+      },
+      "ServiceTask": {
+        "type": "object",
+        "properties": {
+          "serviceName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "taskName": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "serviceName",
+          "taskName"
+        ]
+      },
       "BudgetResponse": {
         "type": "object",
         "properties": {
@@ -2107,7 +2262,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, featureDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. Dynasty groupBy re-groups versioned slugs under their dynasty. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName, workflowDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -2165,21 +2320,21 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by feature slug"
+              "description": "Filter by a single feature slug"
             },
             "required": false,
-            "description": "Filter by feature slug",
+            "description": "Filter by a single feature slug",
             "name": "featureSlug",
             "in": "query"
           },
           {
             "schema": {
               "type": "string",
-              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug."
+              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug when both are provided. Callers that compute feature lineage themselves (e.g. features-service) pass the full lineage in one call to avoid N HTTP roundtrips."
             },
             "required": false,
-            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug.",
-            "name": "featureDynastySlug",
+            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug when both are provided. Callers that compute feature lineage themselves (e.g. features-service) pass the full lineage in one call to avoid N HTTP roundtrips.",
+            "name": "featureSlugs",
             "in": "query"
           },
           {
@@ -2243,6 +2398,49 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "summary": "Batched cost aggregation across multiple (serviceName, taskName) tuples",
+        "description": "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatsCostsByServiceTasksRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Aggregated cost groups per (serviceName, taskName) bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsCostsByServiceTasksResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or unsupported groupBy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
                 }
               }
             }
@@ -2348,7 +2546,7 @@
     "/v1/stats/public/costs": {
       "get": {
         "summary": "Public cost aggregation (no auth)",
-        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, workflowDynastySlug, or featureDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), featureDynastySlug, workflowDynastySlug, taskName. No authentication required.",
+        "description": "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName. No authentication required.",
         "parameters": [
           {
             "schema": {
@@ -2360,8 +2558,7 @@
                 "featureSlug",
                 "serviceName",
                 "costName",
-                "workflowDynastySlug",
-                "featureDynastySlug"
+                "workflowDynastySlug"
               ]
             },
             "required": true,
@@ -2404,21 +2601,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this."
+              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug."
             },
             "required": false,
-            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug. featureDynastySlug still takes precedence over this.",
+            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug.",
             "name": "featureSlugs",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs."
-            },
-            "required": false,
-            "description": "Filter by feature dynasty slug. Resolved to all versioned slugs via features-service. Takes precedence over featureSlug and featureSlugs.",
-            "name": "featureDynastySlug",
             "in": "query"
           },
           {

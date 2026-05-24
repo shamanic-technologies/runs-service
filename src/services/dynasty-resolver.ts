@@ -42,17 +42,6 @@ export async function resolveWorkflowDynastySlugs(dynastySlug: string, identity:
   return data.workflowSlugs;
 }
 
-export async function resolveFeatureDynastySlugs(dynastySlug: string, identity: IdentityHeaders): Promise<string[]> {
-  const url = process.env.FEATURES_SERVICE_URL;
-  if (!url) throw new Error("FEATURES_SERVICE_URL not configured");
-  const data = await fetchJson<{ slugs: string[] }>(
-    `${url}/features/dynasty/slugs?dynastySlug=${encodeURIComponent(dynastySlug)}`,
-    process.env.FEATURES_SERVICE_API_KEY,
-    identity
-  );
-  return data.slugs;
-}
-
 export async function fetchAllWorkflowDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
   const url = process.env.WORKFLOW_SERVICE_URL;
   if (!url) throw new Error("WORKFLOW_SERVICE_URL not configured");
@@ -62,17 +51,6 @@ export async function fetchAllWorkflowDynasties(identity: IdentityHeaders): Prom
     identity
   );
   return data.dynasties.map((d) => ({ dynastySlug: d.workflowDynastySlug, slugs: d.workflowSlugs }));
-}
-
-export async function fetchAllFeatureDynasties(identity: IdentityHeaders): Promise<DynastyEntry[]> {
-  const url = process.env.FEATURES_SERVICE_URL;
-  if (!url) throw new Error("FEATURES_SERVICE_URL not configured");
-  const data = await fetchJson<{ dynasties: DynastyEntry[] }>(
-    `${url}/features/dynasties`,
-    process.env.FEATURES_SERVICE_API_KEY,
-    identity
-  );
-  return data.dynasties;
 }
 
 export function buildSlugToDynastyMap(dynasties: DynastyEntry[]): Map<string, string> {
