@@ -119,10 +119,14 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
 
   const { org_id } = parsed.data;
 
+  // Inline aggregate using is_platform_projected generated col + partial index.
+  // Gold view removed (filter pushdown through GROUP BY caused 20+ GB OOM on prod).
   const result = await db.execute(sql`
-    SELECT COALESCE(projected_spent_cents, 0) AS spent_cents
-      FROM v_org_platform_spend
-     WHERE organization_id = ${org_id}
+    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
+      FROM runs r
+      JOIN runs_costs rc ON rc.run_id = r.id
+     WHERE r.organization_id = ${org_id}
+       AND rc.is_platform_projected
   `);
 
   const rows = result as any[];
