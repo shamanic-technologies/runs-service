@@ -975,52 +975,6 @@ describe("Stats endpoints", () => {
       expect(totalRunCount).toBe(2);
     });
 
-    it("featureDynastySlug takes precedence over featureSlugs", async () => {
-      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
-        "dynasty-resolved-slug",
-      ]);
-
-      const run1 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "dynasty-resolved-slug",
-      });
-      const run2 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "direct-slug",
-      });
-
-      await insertTestRunCost({
-        runId: run1.id,
-        costName: "token",
-        quantity: "100",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.1000000000",
-      });
-      await insertTestRunCost({
-        runId: run2.id,
-        costName: "token",
-        quantity: "200",
-        unitCostInUsdCents: "0.0010000000",
-        totalCostInUsdCents: "0.2000000000",
-      });
-
-      // When both featureDynastySlug and featureSlugs are provided, dynasty wins
-      const res = await request(app)
-        .get("/v1/stats/public/costs")
-        .query({
-          groupBy: "workflowSlug",
-          featureSlugs: "direct-slug",
-          featureDynastySlug: "some-dynasty",
-        });
-
-      expect(res.status).toBe(200);
-      const totalRunCount = res.body.groups.reduce((acc: number, g: any) => acc + g.runCount, 0);
-      expect(totalRunCount).toBe(1); // Only dynasty-resolved-slug matched
-    });
   });
 
   describe("Dynasty slug filtering — GET /v1/stats/costs", () => {
@@ -1061,45 +1015,6 @@ describe("Stats endpoints", () => {
       expect(res.body.groups).toHaveLength(2);
       const slugs = res.body.groups.map((g: any) => g.dimensions.workflowSlug).sort();
       expect(slugs).toEqual(["cold-email", "cold-email-v2"]);
-    });
-
-    it("filters by featureDynastySlug (resolved to versioned slugs)", async () => {
-      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
-        "feat-alpha",
-        "feat-alpha-v2",
-      ]);
-
-      const run1 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-alpha",
-      });
-      const run2 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-alpha-v2",
-      });
-      const run3 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "unrelated-feature",
-      });
-
-      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
-      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
-      await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
-
-      const res = await request(app)
-        .get("/v1/stats/costs?groupBy=featureSlug&featureDynastySlug=feat-alpha")
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(2);
-      const slugs = res.body.groups.map((g: any) => g.dimensions.featureSlug).sort();
-      expect(slugs).toEqual(["feat-alpha", "feat-alpha-v2"]);
     });
 
     it("returns empty stats when dynasty resolves to empty list", async () => {
@@ -1151,24 +1066,24 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].dimensions.workflowSlug).toBe("dynasty-wf");
     });
 
-    it("combines dynasty filter with other filters", async () => {
-      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
-        "feat-a",
-        "feat-a-v2",
+    it("combines workflow dynasty filter with other filters", async () => {
+      vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([
+        "wf-a",
+        "wf-a-v2",
       ]);
 
       const run1 = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "feat-a",
+        workflowSlug: "wf-a",
         brandIds: ["brand-x"],
       });
       const run2 = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "feat-a-v2",
+        workflowSlug: "wf-a-v2",
         brandIds: ["brand-y"],
       });
 
@@ -1176,12 +1091,12 @@ describe("Stats endpoints", () => {
       await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
 
       const res = await request(app)
-        .get("/v1/stats/costs?groupBy=featureSlug&featureDynastySlug=feat-a&brandId=brand-x")
+        .get("/v1/stats/costs?groupBy=workflowSlug&workflowDynastySlug=wf-a&brandId=brand-x")
         .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.featureSlug).toBe("feat-a");
+      expect(res.body.groups[0].dimensions.workflowSlug).toBe("wf-a");
     });
   });
 
@@ -1232,38 +1147,6 @@ describe("Stats endpoints", () => {
       expect(warmIntro).toBeDefined();
       expect(warmIntro.totalCostInUsdCents).toBe("0.3000000000");
       expect(warmIntro.runCount).toBe(1);
-    });
-
-    it("groups by featureDynastySlug (merges versioned slugs)", async () => {
-      vi.spyOn(dynastyResolver, "fetchAllFeatureDynasties").mockResolvedValue([
-        { dynastySlug: "feat-alpha", slugs: ["feat-alpha", "feat-alpha-v2"] },
-      ]);
-
-      const run1 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-alpha",
-      });
-      const run2 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-alpha-v2",
-      });
-
-      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
-      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
-
-      const res = await request(app)
-        .get("/v1/stats/costs?groupBy=featureDynastySlug")
-        .set(authHeaders);
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.featureDynastySlug).toBe("feat-alpha");
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
-      expect(res.body.groups[0].runCount).toBe(2);
     });
 
     it("orphan slugs (not in any dynasty) fall back to raw slug value", async () => {
@@ -1604,63 +1487,27 @@ describe("Stats endpoints", () => {
       expect(res.body.groups[0].runCount).toBe(2);
     });
 
-    it("groups by featureDynastySlug", async () => {
-      vi.spyOn(dynastyResolver, "fetchAllFeatureDynasties").mockResolvedValue([
-        { dynastySlug: "feat-alpha", slugs: ["feat-alpha", "feat-alpha-v2"] },
-      ]);
+  });
 
+  describe("featureSlugs CSV — GET /v1/stats/costs", () => {
+    it("filters by featureSlugs (comma-separated)", async () => {
       const run1 = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "feat-alpha",
+        featureSlug: "sales-cold-email",
       });
       const run2 = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "feat-alpha-v2",
-      });
-
-      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
-      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
-
-      const res = await request(app)
-        .get("/v1/stats/public/costs")
-        .query({ groupBy: "featureDynastySlug" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].dimensions.featureDynastySlug).toBe("feat-alpha");
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
-    });
-
-    it("filters by featureDynastySlug", async () => {
-      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([
-        "feat-a",
-        "feat-a-v2",
-      ]);
-
-      const run1 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-a",
-        brandIds: ["brand-x"],
-      });
-      const run2 = await insertTestRun({
-        organizationId: ORG_ID,
-        serviceName: "svc",
-        taskName: "task",
-        featureSlug: "feat-a-v2",
-        brandIds: ["brand-x"],
+        featureSlug: "sales-cold-email-v2",
       });
       const run3 = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "unrelated",
-        brandIds: ["brand-x"],
+        featureSlug: "unrelated-feature",
       });
 
       await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
@@ -1668,32 +1515,198 @@ describe("Stats endpoints", () => {
       await insertTestRunCost({ runId: run3.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
 
       const res = await request(app)
-        .get("/v1/stats/public/costs")
-        .query({ groupBy: "brandId", featureDynastySlug: "feat-a" });
+        .get("/v1/stats/costs?groupBy=featureSlug&featureSlugs=sales-cold-email,sales-cold-email-v2")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(2);
+      const slugs = res.body.groups.map((g: any) => g.dimensions.featureSlug).sort();
+      expect(slugs).toEqual(["sales-cold-email", "sales-cold-email-v2"]);
+      const totalRunCount = res.body.groups.reduce((acc: number, g: any) => acc + g.runCount, 0);
+      expect(totalRunCount).toBe(2);
+    });
+
+    it("featureSlugs takes precedence over featureSlug", async () => {
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-a",
+      });
+      const run2 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "feat-b",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+
+      // Both featureSlug and featureSlugs provided — featureSlugs wins
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureSlug&featureSlug=feat-a&featureSlugs=feat-b")
+        .set(authHeaders);
 
       expect(res.status).toBe(200);
       expect(res.body.groups).toHaveLength(1);
-      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
-      expect(res.body.groups[0].runCount).toBe(2);
+      expect(res.body.groups[0].dimensions.featureSlug).toBe("feat-b");
     });
 
-    it("returns empty when dynasty resolves to empty list (public)", async () => {
-      vi.spyOn(dynastyResolver, "resolveFeatureDynastySlugs").mockResolvedValue([]);
+    it("groupBy=featureDynastySlug returns 400 (eradicated concept)", async () => {
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=featureDynastySlug")
+        .set(authHeaders);
 
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("featureDynastySlug");
+    });
+
+    it("?featureDynastySlug=foo on GET is silently ignored (does not filter)", async () => {
       const run = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "svc",
         taskName: "task",
-        featureSlug: "something",
+        featureSlug: "feat-a",
       });
       await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
 
       const res = await request(app)
-        .get("/v1/stats/public/costs")
-        .query({ groupBy: "brandId", featureDynastySlug: "nonexistent" });
+        .get("/v1/stats/costs?groupBy=featureSlug&featureDynastySlug=should-not-affect-result")
+        .set(authHeaders);
 
       expect(res.status).toBe(200);
-      expect(res.body.groups).toEqual([]);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.featureSlug).toBe("feat-a");
+    });
+  });
+
+  describe("POST /v1/stats/costs — batched serviceTasks", () => {
+    it("returns K buckets in input order matching K serviceTasks", async () => {
+      const runA = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "email-gateway",
+        taskName: "send",
+        workflowSlug: "wf-1",
+      });
+      const runB = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "image-service",
+        taskName: "generate",
+        workflowSlug: "wf-1",
+      });
+
+      await insertTestRunCost({ runId: runA.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000" });
+      await insertTestRunCost({ runId: runB.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "2.0000000000" });
+
+      const res = await request(app)
+        .post("/v1/stats/costs")
+        .set(authHeaders)
+        .send({
+          groupBy: "workflowSlug",
+          serviceTasks: [
+            { serviceName: "email-gateway", taskName: "send" },
+            { serviceName: "image-service", taskName: "generate" },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(2);
+      expect(res.body.buckets[0].serviceName).toBe("email-gateway");
+      expect(res.body.buckets[0].taskName).toBe("send");
+      expect(res.body.buckets[0].groups).toHaveLength(1);
+      expect(res.body.buckets[0].groups[0].dimensions.workflowSlug).toBe("wf-1");
+      expect(res.body.buckets[0].groups[0].runCount).toBe(1);
+      expect(res.body.buckets[0].groups[0].totalCostInUsdCents).toBe("1.0000000000");
+
+      expect(res.body.buckets[1].serviceName).toBe("image-service");
+      expect(res.body.buckets[1].taskName).toBe("generate");
+      expect(res.body.buckets[1].groups[0].totalCostInUsdCents).toBe("2.0000000000");
+    });
+
+    it("returns empty bucket when no rows match a serviceTask combo", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "email-gateway",
+        taskName: "send",
+        workflowSlug: "wf-1",
+      });
+      await insertTestRunCost({ runId: run.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000" });
+
+      const res = await request(app)
+        .post("/v1/stats/costs")
+        .set(authHeaders)
+        .send({
+          groupBy: "workflowSlug",
+          serviceTasks: [
+            { serviceName: "email-gateway", taskName: "send" },
+            { serviceName: "nonexistent-service", taskName: "nonexistent-task" },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(2);
+      expect(res.body.buckets[0].groups).toHaveLength(1);
+      expect(res.body.buckets[1].serviceName).toBe("nonexistent-service");
+      expect(res.body.buckets[1].groups).toEqual([]);
+    });
+
+    it("combines serviceTasks with featureSlugs filter", async () => {
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "email-gateway",
+        taskName: "send",
+        featureSlug: "feat-included",
+      });
+      const run2 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "email-gateway",
+        taskName: "send",
+        featureSlug: "feat-excluded",
+      });
+
+      await insertTestRunCost({ runId: run1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000" });
+      await insertTestRunCost({ runId: run2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "2.0000000000" });
+
+      const res = await request(app)
+        .post("/v1/stats/costs")
+        .set(authHeaders)
+        .send({
+          groupBy: "featureSlug",
+          featureSlugs: ["feat-included"],
+          serviceTasks: [{ serviceName: "email-gateway", taskName: "send" }],
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(1);
+      expect(res.body.buckets[0].groups).toHaveLength(1);
+      expect(res.body.buckets[0].groups[0].dimensions.featureSlug).toBe("feat-included");
+      expect(res.body.buckets[0].groups[0].totalCostInUsdCents).toBe("1.0000000000");
+    });
+
+    it("rejects empty serviceTasks with 400", async () => {
+      const res = await request(app)
+        .post("/v1/stats/costs")
+        .set(authHeaders)
+        .send({
+          groupBy: "workflowSlug",
+          serviceTasks: [],
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects dynasty groupBy with 400", async () => {
+      const res = await request(app)
+        .post("/v1/stats/costs")
+        .set(authHeaders)
+        .send({
+          groupBy: "workflowDynastySlug",
+          serviceTasks: [{ serviceName: "email-gateway", taskName: "send" }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("workflowDynastySlug");
     });
   });
 

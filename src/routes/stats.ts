@@ -1,10 +1,13 @@
 import { Router } from "express";
-import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
+import { eq, sql, inArray } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
-import { BudgetRequestSchema } from "../schemas.js";
+import {
+  BudgetRequestSchema,
+  StatsCostsByServiceTasksRequestSchema,
+} from "../schemas.js";
 import {
   costAggregateSelectSql,
   costAggregateWithSinceSql,
@@ -12,9 +15,7 @@ import {
 } from "../services/cost-aggregator.js";
 import {
   resolveWorkflowDynastySlugs,
-  resolveFeatureDynastySlugs,
   fetchAllWorkflowDynasties,
-  fetchAllFeatureDynasties,
   buildSlugToDynastyMap,
   type IdentityHeaders,
 } from "../services/dynasty-resolver.js";
@@ -30,6 +31,7 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   campaignId: "r.campaign_id",
   featureSlug: "r.feature_slug",
   serviceName: "r.service_name",
+  taskName: "r.task_name",
   costName: "rc.cost_name",
 };
 
@@ -40,13 +42,13 @@ const RESULT_COL_NAMES: Record<string, string> = {
   campaignId: "campaign_id",
   featureSlug: "feature_slug",
   serviceName: "service_name",
+  taskName: "task_name",
   costName: "cost_name",
 };
 
 // Dynasty groupBy keys map to their underlying DB column
 const DYNASTY_GROUP_BY: Record<string, string> = {
   workflowDynastySlug: "r.workflow_slug",
-  featureDynastySlug: "r.feature_slug",
 };
 
 const ALL_GROUP_BY_COLUMNS: Record<string, string> = {
@@ -76,7 +78,7 @@ function buildFilterSql(
   if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
 
-  // Feature slug filtering: resolved dynasty slugs > single slug
+  // Feature slug filtering: list takes precedence over singular
   if (filters.featureSlugs && filters.featureSlugs.length > 0) {
     parts.push(sql`r.feature_slug IN (${sql.join(filters.featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
   } else if (filters.featureSlug) {
@@ -98,7 +100,13 @@ function buildFilterSql(
   return parts.reduce((acc, part) => sql`${acc} AND ${part}`);
 }
 
-/** Resolve dynasty slug filters into arrays of versioned slugs */
+function parseCsv(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+}
+
+/** Resolve dynasty + multi-slug query params into arrays of versioned slugs */
 async function resolveDynastyFilters(query: Record<string, string | undefined>, identity: IdentityHeaders): Promise<{
   workflowSlugs?: string[];
   featureSlugs?: string[];
@@ -116,16 +124,11 @@ async function resolveDynastyFilters(query: Record<string, string | undefined>, 
       workflowSlugs = resolved;
     }
   } else if (query.workflowSlugs) {
-    workflowSlugs = query.workflowSlugs.split(",").map((s) => s.trim()).filter(Boolean);
+    workflowSlugs = parseCsv(query.workflowSlugs);
   }
 
-  if (query.featureDynastySlug) {
-    const resolved = await resolveFeatureDynastySlugs(query.featureDynastySlug, identity);
-    if (resolved.length === 0) {
-      emptyResult = true;
-    } else {
-      featureSlugs = resolved;
-    }
+  if (query.featureSlugs) {
+    featureSlugs = parseCsv(query.featureSlugs);
   }
 
   return { workflowSlugs, featureSlugs, emptyResult };
@@ -199,7 +202,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       workflowSlugs: workflowSlugsParam,
       workflowDynastySlug,
       featureSlug,
-      featureDynastySlug,
+      featureSlugs: featureSlugsParam,
       serviceName,
       taskName,
       startedAfter,
@@ -221,12 +224,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       return;
     }
 
-    // Resolve dynasty filters
+    // Resolve dynasty + multi-slug filters
     const identity: IdentityHeaders = { orgId: req.orgId, userId: req.userId, runId: req.runId };
     const dynastyFilters = await resolveDynastyFilters({
       workflowDynastySlug,
-      featureDynastySlug,
       workflowSlugs: workflowSlugsParam,
+      featureSlugs: featureSlugsParam,
     }, identity);
 
     if (dynastyFilters.emptyResult) {
@@ -236,10 +239,9 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     // Determine which dynasty groupBy keys are present
     const hasDynastyWorkflowGroupBy = groupByKeys.includes("workflowDynastySlug");
-    const hasDynastyFeatureGroupBy = groupByKeys.includes("featureDynastySlug");
 
     // Build actual SQL groupBy keys: replace dynasty keys with their underlying column
-    const sqlGroupByKeys = groupByKeys.map((k) => DYNASTY_GROUP_BY[k] ? (k === "workflowDynastySlug" ? "workflowSlug" : "featureSlug") : k);
+    const sqlGroupByKeys = groupByKeys.map((k) => k === "workflowDynastySlug" ? "workflowSlug" : k);
     const uniqueSqlGroupByKeys = [...new Set(sqlGroupByKeys)];
 
     const groupByCols = uniqueSqlGroupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
@@ -310,15 +312,137 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       const slugMap = buildSlugToDynastyMap(dynasties);
       groups = regroupByDynasty(groups, "workflowDynastySlug", "workflowSlug", slugMap);
     }
-    if (hasDynastyFeatureGroupBy) {
-      const dynasties = await fetchAllFeatureDynasties(identity);
-      const slugMap = buildSlugToDynastyMap(dynasties);
-      groups = regroupByDynasty(groups, "featureDynastySlug", "featureSlug", slugMap);
-    }
 
     res.json({ groups });
   } catch (err) {
     console.error("[Runs Service] Error in GET /v1/stats/costs:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /v1/stats/costs — batched aggregation across multiple (serviceName, taskName) tuples in ONE SQL pass
+router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
+  try {
+    const parsed = StatsCostsByServiceTasksRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const {
+      groupBy,
+      brandId,
+      campaignId,
+      workflowSlug,
+      workflowSlugs,
+      featureSlug,
+      featureSlugs,
+      startedAfter,
+      startedBefore,
+      serviceTasks,
+    } = parsed.data;
+
+    const groupByKeys = groupBy.split(",").map((s) => s.trim());
+    const invalidKeys = groupByKeys.filter((k) => !GROUP_BY_COLUMNS[k]);
+    if (invalidKeys.length > 0) {
+      res.status(400).json({
+        error: `Invalid groupBy values: ${invalidKeys.join(", ")}. Allowed: ${Object.keys(GROUP_BY_COLUMNS).join(", ")}. Dynasty groupBy is not supported on POST /v1/stats/costs.`,
+      });
+      return;
+    }
+
+    // Discriminator dims = service_name + task_name, plus user-requested groupBy
+    const userDimKeys = [...new Set(groupByKeys)];
+    const allDimKeys = [...new Set(["serviceName", "taskName", ...userDimKeys])];
+    const groupByCols = allDimKeys.map((k) => GROUP_BY_COLUMNS[k]);
+    const selectCols = groupByCols.map((col) => sql.raw(col));
+    const groupByClause = sql.raw(groupByCols.join(", "));
+    const hasCostName = groupByKeys.includes("costName");
+
+    const baseWhereParts = [sql`r.organization_id = ${req.orgId}`];
+    if (brandId) baseWhereParts.push(sql`${brandId} = ANY(r.brand_ids)`);
+    if (campaignId) baseWhereParts.push(sql`r.campaign_id = ${campaignId}`);
+    if (featureSlugs && featureSlugs.length > 0) {
+      baseWhereParts.push(sql`r.feature_slug IN (${sql.join(featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
+    } else if (featureSlug) {
+      baseWhereParts.push(sql`r.feature_slug = ${featureSlug}`);
+    }
+    if (workflowSlugs && workflowSlugs.length > 0) {
+      baseWhereParts.push(sql`r.workflow_slug IN (${sql.join(workflowSlugs.map((n) => sql`${n}`), sql`, `)})`);
+    } else if (workflowSlug) {
+      baseWhereParts.push(sql`r.workflow_slug = ${workflowSlug}`);
+    }
+    if (startedAfter) baseWhereParts.push(sql`r.started_at >= ${startedAfter}::timestamptz`);
+    if (startedBefore) baseWhereParts.push(sql`r.started_at <= ${startedBefore}::timestamptz`);
+
+    const serviceTaskTuples = sql.join(
+      serviceTasks.map((st) => sql`(${st.serviceName}, ${st.taskName})`),
+      sql`, `
+    );
+    baseWhereParts.push(sql`(r.service_name, r.task_name) IN (${serviceTaskTuples})`);
+
+    const whereSql = baseWhereParts.reduce((acc, part) => sql`${acc} AND ${part}`);
+
+    const joinType = hasCostName ? sql`INNER JOIN` : sql`LEFT JOIN`;
+    const quantitySelect = hasCostName
+      ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
+      : sql``;
+
+    // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
+    const result = await db.execute(sql`
+      SELECT ${sql.join(selectCols, sql`, `)},
+        ${costAggregateSelectSql("rc")},
+        COUNT(DISTINCT r.id) as run_count,
+        MIN(r.started_at) as min_started_at,
+        MAX(r.started_at) as max_started_at
+        ${quantitySelect}
+      FROM runs r
+      ${joinType} runs_costs rc ON rc.run_id = r.id
+      WHERE ${whereSql}
+      GROUP BY ${groupByClause}
+      ORDER BY total_cost DESC
+    `);
+
+    const rows = result as any[];
+
+    // Initialize buckets in input order so missing combos surface as empty groups
+    const buckets = serviceTasks.map((st) => ({
+      serviceName: st.serviceName,
+      taskName: st.taskName,
+      groups: [] as AggRow[],
+    }));
+    const bucketIndex = new Map<string, number>();
+    serviceTasks.forEach((st, i) => bucketIndex.set(`${st.serviceName} ${st.taskName}`, i));
+
+    for (const row of rows) {
+      const key = `${row.service_name} ${row.task_name}`;
+      const idx = bucketIndex.get(key);
+      if (idx === undefined) continue;
+
+      const dimensions: Record<string, string | null> = {};
+      for (const k of userDimKeys) {
+        const resultCol = RESULT_COL_NAMES[k] ?? GROUP_BY_COLUMNS[k].replace(/^r\.|^rc\./, "");
+        dimensions[k] = row[resultCol] ?? null;
+      }
+      const group: AggRow = {
+        dimensions,
+        totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+        actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+        provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+        cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        runCount: Number(row.run_count),
+        minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
+        maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
+      };
+      if (hasCostName) {
+        group.totalQuantity = new Decimal(row.total_quantity).toFixed(6);
+      }
+      buckets[idx].groups.push(group);
+    }
+
+    res.json({ buckets });
+  } catch (err) {
+    console.error("[Runs Service] Error in POST /v1/stats/costs:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -553,7 +677,6 @@ const PUBLIC_RESULT_COL_NAMES: Record<string, string> = {
 
 const PUBLIC_DYNASTY_GROUP_BY: Record<string, string> = {
   workflowDynastySlug: "r.workflow_slug",
-  featureDynastySlug: "r.feature_slug",
 };
 
 const ALL_PUBLIC_GROUP_BY: Record<string, string> = {
@@ -594,7 +717,7 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, featureDynastySlug, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
 
       if (!groupBy || !ALL_PUBLIC_GROUP_BY[groupBy]) {
         res.status(400).json({
@@ -604,9 +727,7 @@ function handlePublicCosts(req: any, res: any) {
       }
 
       const isDynastyGroupBy = !!PUBLIC_DYNASTY_GROUP_BY[groupBy];
-      const actualGroupBy = isDynastyGroupBy
-        ? (groupBy === "workflowDynastySlug" ? "workflowSlug" : "featureSlug")
-        : groupBy;
+      const actualGroupBy = isDynastyGroupBy ? "workflowSlug" : groupBy;
       const col = PUBLIC_GROUP_BY_COLUMNS[actualGroupBy];
       const hasCostName = groupBy === "costName";
       const joinType = hasCostName ? sql`INNER JOIN` : sql`LEFT JOIN`;
@@ -614,24 +735,14 @@ function handlePublicCosts(req: any, res: any) {
         ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
         : sql``;
 
-      // Resolve dynasty filters
+      // Resolve dynasty + multi-slug filters
       const identity: IdentityHeaders = {
         orgId: req.orgId ?? (req.headers["x-org-id"] as string),
         userId: req.userId ?? (req.headers["x-user-id"] as string),
         runId: req.runId ?? (req.headers["x-run-id"] as string),
       };
-      let featureSlugs: string[] | undefined;
+      const featureSlugs: string[] | undefined = parseCsv(featureSlugsParam);
       let workflowSlugs: string[] | undefined;
-      if (featureDynastySlug) {
-        const resolved = await resolveFeatureDynastySlugs(featureDynastySlug, identity);
-        if (resolved.length === 0) {
-          res.json(EMPTY_STATS_RESPONSE);
-          return;
-        }
-        featureSlugs = resolved;
-      } else if (featureSlugsParam) {
-        featureSlugs = featureSlugsParam.split(",").map((s) => s.trim()).filter(Boolean);
-      }
       if (workflowDynastySlug) {
         const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug, identity);
         if (resolved.length === 0) {
@@ -677,12 +788,9 @@ function handlePublicCosts(req: any, res: any) {
         return group;
       });
 
-      // Post-process dynasty groupBy
+      // Post-process dynasty groupBy (workflow only — feature dynasty was eradicated)
       if (isDynastyGroupBy) {
-        const isWorkflow = groupBy === "workflowDynastySlug";
-        const dynasties = isWorkflow
-          ? await fetchAllWorkflowDynasties(identity)
-          : await fetchAllFeatureDynasties(identity);
+        const dynasties = await fetchAllWorkflowDynasties(identity);
         const slugMap = buildSlugToDynastyMap(dynasties);
         groups = regroupByDynasty(groups, groupBy, actualGroupBy, slugMap);
       }
