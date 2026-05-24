@@ -39,6 +39,39 @@ REST API for tracking service execution runs and their associated costs, with hi
 - **Never use `Number(x)` on a cost-value string**, even inside `Number(x).toFixed(10)`. IEEE 754 double has ~15-17 sig digits; `numeric(16,10)` max value `999999.9999999999` has 16 → round-trip drops digits, and SUM of many rows compounds float drift. Use `new Decimal(x)` from `decimal.js` for any JS arithmetic on cost values; convert to `number` ONLY at the billing-service boundary (`.toNumber()`), where the upstream API still accepts `number`. For PG aggregations, prefer `SUM(...)::text` and pass the string through unchanged, or wrap in `new Decimal(...).toFixed(10)` for normalized scale.
 - For reconciliation/drift-detection endpoints that diff against billing-service totals, run all math in Postgres (CTE + `::text` cast) — handler does zero JS arithmetic so `numeric(16,10)` precision survives byte-for-byte (see `GET /internal/runs-expected-totals`).
 
+## Cost predicate doctrine
+
+Every cost aggregation in this codebase uses atomic status literals only. The
+following compound predicates are the ONLY allowed ones, codified as PG
+generated columns:
+
+- `is_platform_projected` = `cost_source = 'platform' AND status IN ('actual','provisioned')`
+- `is_platform_committed` = `cost_source = 'platform' AND status = 'actual'`
+
+Atomic-literal predicates allowed inline:
+
+- `status = 'actual'`
+- `status = 'provisioned'`
+- `status = 'cancelled'`
+- `status IN ('actual','provisioned')` (== "displayed total")
+- `cost_source = 'platform'`
+- `cost_source = 'org'`
+
+**Banned inline**: `status != 'cancelled'` or `status <> 'cancelled'`. The
+negation form silently includes any future enum value. Use the explicit
+`status IN ('actual','provisioned')` instead so a 4th status (e.g. `pending`,
+`refunded`) defaults to NOT counted until consciously added — fail-safe.
+
+**Shared SQL builder**: `src/services/cost-aggregator.ts` exports the canonical
+SUM CASE WHEN blocks for total / actual / provisioned / cancelled / own / own-platform.
+Every aggregation endpoint imports + uses these. New aggregation sites MUST
+go through the aggregator — do not copy-paste inline CASE expressions.
+
+**JS-side aggregation**: when summing in JS (children-summary), use explicit
+status enumeration (`if status === 'actual' ... else if status === 'provisioned' ...`).
+Never use `else` as a catch-all — that's the same mistake as `status != 'cancelled'`
+in SQL.
+
 ## Deploy ordering with billing-service
 
 Any change to runs-service's billing call shape (amount type/precision, headers, endpoint path) MUST land in billing-service first and deploy to the target env before the runs-service PR merges. Squash-merge to `staging` triggers Railway auto-deploy; merging ahead of billing-service breaks the env. Document the upstream dependency in the PR body under `⚠️ Deployment ordering` and defer merge until billing-service is live in the same env.
