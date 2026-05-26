@@ -25,6 +25,11 @@ import {
   BatchCostsRequestSchema,
   BatchRunsRequestSchema,
 } from "../schemas.js";
+import {
+  costAggregateSelectSql,
+  costAggregateOwnSelectSql,
+  costAggregateOwnPlatformSelectSql,
+} from "../services/cost-aggregator.js";
 
 const router = Router();
 
@@ -239,11 +244,8 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
       )
       SELECT
         d.root_run_id,
-        COALESCE(SUM(CASE WHEN rc.status <> 'cancelled' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS provisioned_cost,
-        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'actual' AND rc.is_platform_projected THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual_platform_cost,
-        COALESCE(SUM(CASE WHEN d.id = d.root_run_id AND rc.status = 'provisioned' AND rc.is_platform_projected THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned_platform_cost
+        ${costAggregateSelectSql("rc")},
+        ${costAggregateOwnPlatformSelectSql("rc", "d")}
       FROM descendants d
       LEFT JOIN runs_costs rc ON rc.run_id = d.id
       GROUP BY d.root_run_id
@@ -299,6 +301,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
 
     // Query 2 — rolled-up aggregates via INLINE bounded recursive CTE.
     // Gold view removed (unbounded walk caused 20+ GB OOM on prod).
+    // Predicates atomic via cost-aggregator (no `!= 'cancelled'`).
     const rollupResult = await db.execute(sql`
       WITH RECURSIVE descendants AS (
         SELECT id, id AS root_run_id FROM runs WHERE id IN (${foundIdsList})
@@ -307,9 +310,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
       )
       SELECT
         d.root_run_id,
-        COALESCE(SUM(CASE WHEN rc.status <> 'cancelled' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS provisioned_cost
+        ${costAggregateSelectSql("rc")}
       FROM descendants d
       LEFT JOIN runs_costs rc ON rc.run_id = d.id
       GROUP BY d.root_run_id
@@ -361,13 +362,11 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
       costsByRunId.set(cost.runId, list);
     }
 
-    // Per-descendant own-cost aggregates (depth>0). Done in one SQL aggregation.
+    // Per-descendant own-cost aggregates (depth>0). Atomic literals via cost-aggregator.
     const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
       SELECT
         run_id,
-        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
-        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
-        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+        ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
       WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
       GROUP BY run_id
@@ -376,13 +375,11 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
       (descendantOwnResult as any[]).map((r) => [r.run_id, r])
     );
 
-    // Per-root own-cost aggregates (depth=0).
+    // Per-root own-cost aggregates (depth=0). Atomic literals via cost-aggregator.
     const rootOwnResult = await db.execute(sql`
       SELECT
         run_id,
-        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
-        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
-        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+        ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
       WHERE run_id IN (${sql.join(foundIds.map((id) => sql`${id}`), sql`, `)})
       GROUP BY run_id
@@ -470,28 +467,22 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     const costs = await db.select().from(runsCosts).where(eq(runsCosts.runId, id));
 
     // Rolled-up cost aggregates via INLINE bounded recursive CTE.
-    // Gold view v_run_cost_rollup removed (unbounded walk caused 20+ GB OOM on prod).
+    // Atomic literals via cost-aggregator (no `!= 'cancelled'`).
     const rollupResult = await db.execute(sql`
       WITH RECURSIVE descendants AS (
         SELECT id FROM runs WHERE id = ${id}
         UNION ALL
         SELECT r.id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
       )
-      SELECT
-        COALESCE(SUM(CASE WHEN rc.status <> 'cancelled' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents ELSE 0 END), 0)::text AS provisioned_cost
+      SELECT ${costAggregateSelectSql("rc")}
       FROM descendants d
       LEFT JOIN runs_costs rc ON rc.run_id = d.id
     `);
-    const rollup = (rollupResult as any[])[0] ?? { total_cost: "0", actual_cost: "0", provisioned_cost: "0" };
+    const rollup = (rollupResult as any[])[0] ?? { total_cost: "0", actual_cost: "0", provisioned_cost: "0", cancelled_cost: "0" };
 
-    // Own-row aggregates (depth=0 only) — separate SQL to keep view single-purpose.
+    // Own-row aggregates (depth=0 only). Atomic literals via cost-aggregator.
     const ownResult = await db.execute(sql`
-      SELECT
-        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
-        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
-        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+      SELECT ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
       WHERE run_id = ${id}
     `);
@@ -516,13 +507,11 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
       allDescendantCosts = await db.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
     }
 
-    // Per-descendant own-cost via SQL aggregation.
+    // Per-descendant own-cost via SQL aggregation. Atomic literals via cost-aggregator.
     const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
       SELECT
         run_id,
-        COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_total,
-        COALESCE(SUM(CASE WHEN status = 'actual' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_actual,
-        COALESCE(SUM(CASE WHEN status = 'provisioned' THEN total_cost_in_usd_cents ELSE 0 END), 0)::text AS own_provisioned
+        ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
       WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
       GROUP BY run_id
@@ -894,7 +883,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         completedAt: runs.completedAt,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
-        ownCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} != 'cancelled' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_cost_in_usd_cents"),
+        ownCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} IN ('actual','provisioned') THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_cost_in_usd_cents"),
         ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'actual' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
         ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'provisioned' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
       })

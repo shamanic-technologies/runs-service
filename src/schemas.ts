@@ -725,7 +725,7 @@ export const PublicRunsStatsMonthlyEntrySchema = z
       .string()
       .openapi({
         description:
-          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this month, restricted to cost_source='platform' AND status != 'cancelled'. 10-decimal string to preserve numeric(16,10) precision.",
+          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this month, restricted to cost_source='platform' AND status IN ('actual','provisioned'). 10-decimal string to preserve numeric(16,10) precision.",
         example: "0.4500000000",
       }),
   })
@@ -747,7 +747,7 @@ export const PublicRunsStatsWeeklyEntrySchema = z
       .string()
       .openapi({
         description:
-          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this ISO week, restricted to cost_source='platform' AND status != 'cancelled'. 10-decimal string to preserve numeric(16,10) precision.",
+          "Sum of total_cost_in_usd_cents for cost rows belonging to runs started in this ISO week, restricted to cost_source='platform' AND status IN ('actual','provisioned'). 10-decimal string to preserve numeric(16,10) precision.",
         example: "0.4500000000",
       }),
   })
@@ -762,7 +762,7 @@ export const PublicRunsStatsResponseSchema = z
       .string()
       .openapi({
         description:
-          "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status != 'cancelled' (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
+          "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status IN ('actual','provisioned') (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
         example: "1234.5678901234",
       }),
   })
@@ -1047,7 +1047,7 @@ registry.registerPath({
   path: "/public/stats/runs",
   summary: "Public run stats (no auth)",
   description:
-    "Returns run counts by status, a monthly breakdown, a weekly breakdown (ISO week, Monday UTC start), and an all-time top-level cumulative cost. Each monthly/weekly entry includes per-status counts and per-bucket cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status != 'cancelled' (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. Monthly and weekly arrays are ordered ascending (oldest first) and include the current in-progress bucket. No authentication required. Cross-tenant aggregate.",
+    "Returns run counts by status, a monthly breakdown, a weekly breakdown (ISO week, Monday UTC start), and an all-time top-level cumulative cost. Each monthly/weekly entry includes per-status counts and per-bucket cumulative cost. Cost fields sum runs_costs rows where cost_source='platform' AND status IN ('actual','provisioned') (BYOK and cancelled rows excluded). 10-decimal strings preserve numeric(16,10) precision. Monthly and weekly arrays are ordered ascending (oldest first) and include the current in-progress bucket. No authentication required. Cross-tenant aggregate.",
   responses: {
     200: {
       description: "Run stats",

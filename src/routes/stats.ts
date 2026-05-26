@@ -9,6 +9,11 @@ import {
   StatsCostsByServiceTasksRequestSchema,
 } from "../schemas.js";
 import {
+  costAggregateSelectSql,
+  costAggregateWithSinceSql,
+  platformTotalSelectSql,
+} from "../services/cost-aggregator.js";
+import {
   resolveWorkflowDynastySlugs,
   fetchAllWorkflowDynasties,
   buildSlugToDynastyMap,
@@ -262,12 +267,10 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
       : sql``;
 
+    // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+        ${costAggregateSelectSql("rc")},
         COUNT(DISTINCT r.id) as run_count,
         MIN(r.started_at) as min_started_at,
         MAX(r.started_at) as max_started_at
@@ -385,12 +388,10 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
       : sql``;
 
+    // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
-        COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-        COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+        ${costAggregateSelectSql("rc")},
         COUNT(DISTINCT r.id) as run_count,
         MIN(r.started_at) as min_started_at,
         MAX(r.started_at) as max_started_at
@@ -466,17 +467,12 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
 
     const baseWhere = filterParts.reduce((acc, part) => sql`${acc} AND ${part}`);
 
-    // Build CASE WHEN per window for actual and provisioned
+    // Build per-window aggregations via cost-aggregator (atomic literals).
     const windowSelects = windows.flatMap((w, i) => {
       const sinceCondition = w.since
         ? sql`AND rc.created_at >= ${w.since}::timestamptz`
         : sql``;
-
-      return [
-        sql`COALESCE(SUM(CASE WHEN rc.status != 'cancelled' ${sinceCondition} THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as ${sql.raw(`w${i}_total`)}`,
-        sql`COALESCE(SUM(CASE WHEN rc.status = 'actual' ${sinceCondition} THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as ${sql.raw(`w${i}_actual`)}`,
-        sql`COALESCE(SUM(CASE WHEN rc.status = 'provisioned' ${sinceCondition} THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as ${sql.raw(`w${i}_provisioned`)}`,
-      ];
+      return [costAggregateWithSinceSql("rc", i, sinceCondition)];
     });
 
     const result = await db.execute(sql`
@@ -570,7 +566,9 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
       runToRootChild.set(row.id, row.root_child_id);
     }
 
-    // Aggregate costs by root_child_id and costName
+    // Aggregate costs by root_child_id and costName. Atomic status literals
+    // (matches the cost-aggregator doctrine): unknown statuses are ignored,
+    // never silently mis-bucketed via an `else` fall-through.
     const childCosts = new Map<string, {
       total: Decimal;
       actual: Decimal;
@@ -581,6 +579,13 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
     for (const cost of allCosts) {
       const rootChildId = runToRootChild.get(cost.runId);
       if (!rootChildId) continue;
+
+      // Only known status values are aggregated. cancelled is audit-only.
+      // Unknown statuses (e.g. a future enum extension) are ignored — explicit
+      // enumeration replaces the prior `else` fall-through that would have
+      // routed any non-cancelled/non-provisioned value into the actual bucket.
+      const status = cost.status;
+      if (status !== "actual" && status !== "provisioned") continue;
 
       if (!childCosts.has(rootChildId)) {
         childCosts.set(rootChildId, {
@@ -593,16 +598,13 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
       const agg = childCosts.get(rootChildId)!;
       const amount = new Decimal(cost.totalCostInUsdCents);
 
-      if (cost.status === "cancelled") continue;
-
-      if (cost.status === "provisioned") {
+      if (status === "provisioned") {
         agg.provisioned = agg.provisioned.plus(amount);
       } else {
         agg.actual = agg.actual.plus(amount);
       }
       agg.total = agg.total.plus(amount);
 
-      // By name
       if (!agg.byName.has(cost.costName)) {
         agg.byName.set(cost.costName, {
           total: new Decimal(0),
@@ -611,7 +613,7 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
         });
       }
       const byName = agg.byName.get(cost.costName)!;
-      if (cost.status === "provisioned") {
+      if (status === "provisioned") {
         byName.provisioned = byName.provisioned.plus(amount);
       } else {
         byName.actual = byName.actual.plus(amount);
@@ -753,12 +755,10 @@ function handlePublicCosts(req: any, res: any) {
       const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, featureSlugs, workflowSlugs, taskName });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
+      // Cost aggregation via cost-aggregator (atomic literals).
       const result = await db.execute(sql`
         SELECT ${sql.raw(col)},
-          COALESCE(SUM(CASE WHEN rc.status != 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as total_cost,
-          COALESCE(SUM(CASE WHEN rc.status = 'actual' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as actual_cost,
-          COALESCE(SUM(CASE WHEN rc.status = 'provisioned' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as provisioned_cost,
-          COALESCE(SUM(CASE WHEN rc.status = 'cancelled' THEN rc.total_cost_in_usd_cents::numeric ELSE 0 END), 0) as cancelled_cost,
+          ${costAggregateSelectSql("rc")},
           COUNT(DISTINCT r.id) as run_count
           ${quantitySelect}
         FROM runs r
@@ -820,13 +820,7 @@ router.get("/public/stats/runs", async (_req, res) => {
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
-          COALESCE(SUM(
-            CASE
-              WHEN rc.cost_source = 'platform' AND rc.status != 'cancelled'
-                THEN rc.total_cost_in_usd_cents::numeric
-              ELSE 0
-            END
-          ), 0)::text as total_cost
+          ${platformTotalSelectSql("rc")}::text as total_cost
         FROM runs r
         LEFT JOIN runs_costs rc ON rc.run_id = r.id
         GROUP BY DATE_TRUNC('month', r.started_at)
@@ -837,22 +831,16 @@ router.get("/public/stats/runs", async (_req, res) => {
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
           COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
-          COALESCE(SUM(
-            CASE
-              WHEN rc.cost_source = 'platform' AND rc.status != 'cancelled'
-                THEN rc.total_cost_in_usd_cents::numeric
-              ELSE 0
-            END
-          ), 0)::text as total_cost
+          ${platformTotalSelectSql("rc")}::text as total_cost
         FROM runs r
         LEFT JOIN runs_costs rc ON rc.run_id = r.id
         GROUP BY DATE_TRUNC('week', r.started_at AT TIME ZONE 'UTC')
         ORDER BY period ASC
       `),
       db.execute(sql`
-        SELECT COALESCE(SUM(rc.total_cost_in_usd_cents::numeric), 0)::text as total_cost
+        SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0)::text as total_cost
         FROM runs_costs rc
-        WHERE rc.cost_source = 'platform' AND rc.status != 'cancelled'
+        WHERE rc.is_platform_projected
       `),
     ]);
 
