@@ -357,7 +357,7 @@ curl -s https://your-url/v1/runs/$RUN_ID \
 | `runId` | uuid | FK to runs (cascade delete) |
 | `costName` | text | Cost type identifier |
 | `quantity` | numeric(20,6) | |
-| `unitCostInUsdCents` | numeric(12,10) | |
+| `unitCostInUsdCents` | numeric(16,10) | |
 | `totalCostInUsdCents` | numeric(16,10) | |
 | `createdAt` | timestamp | |
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { eq, and, sql } from "drizzle-orm";
+import { Decimal } from "decimal.js";
 import { db } from "../../src/db/index.js";
 import {
   runs,
@@ -29,6 +30,9 @@ vi.mock("../../src/services/cost-resolver.js", () => ({
     new Map([
       ["gpt-4o", "0.0010000000"],
       ["claude-haiku", "0.0005000000"],
+      // Unit price ≥ 100 cents ($1) — overflows the legacy unit_cost numeric(12,10)
+      // (max abs < 100). Regression guard for the widening to numeric(16,10).
+      ["featured-api-pitch-submit", "200.0000000000"],
     ])
   ),
   CostNotFoundError: class CostNotFoundError extends Error {
@@ -235,6 +239,32 @@ describe("B/S/G substrate — Phase 2-5", () => {
       const silver = await db.select().from(runsCosts).where(eq(runsCosts.runId, runId));
       expect(silver).toHaveLength(2);
       expect(silver.map((s) => s.costName).sort()).toEqual(["claude-haiku", "gpt-4o"]);
+    });
+
+    it("projects a cost whose unit price ≥ $1 to silver without numeric overflow", async () => {
+      // Regression: unit_cost_in_usd_cents was numeric(12,10) (max abs < 100 cents).
+      // featured-api-pitch-submit resolves to 200 cents/unit → trigger INSERT into
+      // runs_costs overflowed (22003), the whole cost.added txn rolled back, EQRS got 500.
+      const create = await request(app).post("/v1/runs").set(authHeaders).send({ serviceName: "s", taskName: "t" });
+      const runId = create.body.id;
+
+      const res = await request(app)
+        .post(`/v1/runs/${runId}/costs`)
+        .set(authHeaders)
+        .send({ items: [{ costName: "featured-api-pitch-submit", costSource: "platform", quantity: 1 }] });
+      expect(res.status).toBe(201);
+      expect(res.body.costs).toHaveLength(1);
+
+      // Bronze event written (txn did NOT roll back).
+      const events = await db.select().from(costLifecycleEvents).where(eq(costLifecycleEvents.runId, runId));
+      expect(events).toHaveLength(1);
+      expect(events[0].eventType).toBe("cost.added");
+
+      // Silver projected via trigger with full precision preserved.
+      const silver = await db.select().from(runsCosts).where(eq(runsCosts.runId, runId));
+      expect(silver).toHaveLength(1);
+      expect(new Decimal(silver[0].unitCostInUsdCents).toFixed(10)).toBe("200.0000000000");
+      expect(new Decimal(silver[0].totalCostInUsdCents).toFixed(10)).toBe("200.0000000000");
     });
 
     it("idempotent replay on cost item returns existing row and writes no new event", async () => {
