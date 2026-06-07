@@ -282,5 +282,107 @@ describe("Run Events", () => {
       expect(res.body.events[0].event).toBe("second");
       expect(res.body.events[1].event).toBe("first");
     });
+
+    it("filters by a single event slug", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "brand-service",
+        taskName: "scrape",
+      });
+
+      for (const event of ["send-start", "poll-tick", "generate-start"]) {
+        await request(app)
+          .post(`/v1/runs/${run.id}/events`)
+          .set(authHeaders)
+          .send({ service: "brand-service", event });
+      }
+
+      const res = await request(app)
+        .get("/v1/events?event=send-start")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toHaveLength(1);
+      expect(res.body.events[0].event).toBe("send-start");
+    });
+
+    it("filters by a union of multiple event slugs", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "brand-service",
+        taskName: "scrape",
+      });
+
+      for (const event of ["send-start", "poll-tick", "generate-start", "billing-noise"]) {
+        await request(app)
+          .post(`/v1/runs/${run.id}/events`)
+          .set(authHeaders)
+          .send({ service: "brand-service", event });
+      }
+
+      const res = await request(app)
+        .get("/v1/events?event=send-start,generate-start")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toHaveLength(2);
+      const slugs = res.body.events.map((e: { event: string }) => e.event).sort();
+      expect(slugs).toEqual(["generate-start", "send-start"]);
+    }, 30_000);
+
+    it("returns all events when event filter is omitted", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "brand-service",
+        taskName: "scrape",
+      });
+
+      for (const event of ["send-start", "poll-tick", "generate-start"]) {
+        await request(app)
+          .post(`/v1/runs/${run.id}/events`)
+          .set(authHeaders)
+          .send({ service: "brand-service", event });
+      }
+
+      const res = await request(app)
+        .get("/v1/events")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toHaveLength(3);
+    });
+
+    it("combines (AND) the event filter with other filters", async () => {
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "brand-service",
+        taskName: "scrape",
+      });
+      const run2 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "workflow-service",
+        taskName: "execute",
+      });
+
+      // Same slug across two services — the service filter must still narrow it.
+      await request(app)
+        .post(`/v1/runs/${run1.id}/events`)
+        .set(authHeaders)
+        .send({ service: "brand-service", event: "send-start" });
+
+      await request(app)
+        .post(`/v1/runs/${run2.id}/events`)
+        .set(authHeaders)
+        .send({ service: "workflow-service", event: "send-start" });
+
+      const res = await request(app)
+        .get("/v1/events?service=brand-service&event=send-start")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+      expect(res.body.events).toHaveLength(1);
+      expect(res.body.events[0].service).toBe("brand-service");
+      expect(res.body.events[0].event).toBe("send-start");
+    });
   });
 });

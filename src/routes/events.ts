@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, desc, asc, gt, sql } from "drizzle-orm";
+import { eq, and, desc, asc, gt, sql, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { runs, runEvents } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -169,9 +169,20 @@ router.get("/v1/events", requireApiKey, async (req, res) => {
       workflowSlug,
       featureSlug,
       level,
+      event,
       limit: limitStr,
       offset: offsetStr,
     } = req.query;
+
+    // Comma-separated allowlist of event slugs (e.g. ?event=send-start,generate-start).
+    // Absent/empty → no event filter. Multiple slugs are a union (OR within the set),
+    // ANDed with every other filter below.
+    const eventSlugs = event
+      ? String(event)
+          .split(",")
+          .map((slug) => slug.trim())
+          .filter(Boolean)
+      : [];
 
     const conditions: ReturnType<typeof eq>[] = [];
 
@@ -182,6 +193,7 @@ router.get("/v1/events", requireApiKey, async (req, res) => {
     if (workflowSlug) conditions.push(eq(runEvents.workflowSlug, workflowSlug as string));
     if (featureSlug) conditions.push(eq(runEvents.featureSlug, featureSlug as string));
     if (level) conditions.push(eq(runEvents.level, level as string));
+    if (eventSlugs.length > 0) conditions.push(inArray(runEvents.event, eventSlugs));
 
     const limit = limitStr ? Number(limitStr) : undefined;
     const offset = offsetStr ? Number(offsetStr) : 0;
