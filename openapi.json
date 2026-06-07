@@ -3088,7 +3088,7 @@
     "/v1/events": {
       "get": {
         "summary": "List events across all runs",
-        "description": "Returns events across all runs for admin log viewing. Supports filtering by service, orgId, brandId, campaignId, workflowSlug, featureSlug, level. Ordered by created_at DESC.",
+        "description": "Returns events across all runs for admin log viewing. Supports filtering by service, orgId, brandId, campaignId, workflowSlug, featureSlug, level, and event (comma-separated allowlist of event slugs, union within the set). Ordered by created_at DESC.",
         "security": [
           {
             "apiKey": []
@@ -3151,6 +3151,16 @@
             },
             "required": false,
             "name": "level",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated allowlist of event slugs, e.g. send-start,generate-start. Absent/empty → no event filter."
+            },
+            "required": false,
+            "description": "Comma-separated allowlist of event slugs, e.g. send-start,generate-start. Absent/empty → no event filter.",
+            "name": "event",
             "in": "query"
           },
           {
