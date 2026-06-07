@@ -1246,7 +1246,7 @@ registry.registerPath({
   path: "/v1/events",
   summary: "List events across all runs",
   description:
-    "Returns events across all runs for admin log viewing. Supports filtering by service, orgId, brandId, campaignId, workflowSlug, featureSlug, level. Ordered by created_at DESC.",
+    "Returns events across all runs for admin log viewing. Supports filtering by service, orgId, brandId, campaignId, workflowSlug, featureSlug, level, and event (comma-separated allowlist of event slugs, union within the set). Ordered by created_at DESC.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
@@ -1257,6 +1257,10 @@ registry.registerPath({
       workflowSlug: z.string().optional(),
       featureSlug: z.string().optional(),
       level: EventLevelEnum.optional(),
+      event: z
+        .string()
+        .optional()
+        .describe("Comma-separated allowlist of event slugs, e.g. send-start,generate-start. Absent/empty → no event filter."),
       limit: z.string().optional(),
       offset: z.string().optional(),
     }),
