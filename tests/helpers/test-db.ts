@@ -26,6 +26,10 @@ export async function insertTestRun(data: {
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  brandProfileId?: string;
+  customerProfileId?: string;
+  workflowContext?: string;
   userId?: string;
   parentRunId?: string;
   status?: string;
@@ -42,6 +46,10 @@ export async function insertTestRun(data: {
       campaignId: data.campaignId || null,
       workflowSlug: data.workflowSlug || null,
       featureSlug: data.featureSlug || null,
+      goal: data.goal || null,
+      brandProfileId: data.brandProfileId || null,
+      customerProfileId: data.customerProfileId || null,
+      workflowContext: data.workflowContext || null,
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",
@@ -60,6 +68,10 @@ export async function insertTestRunCost(data: {
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
   status?: string;
+  goal?: string;
+  brandProfileId?: string;
+  customerProfileId?: string;
+  workflowContext?: string;
   idempotencyKey?: string;
 }) {
   const [cost] = await db
