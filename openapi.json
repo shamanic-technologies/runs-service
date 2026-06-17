@@ -751,6 +751,26 @@
           "targetOrgId"
         ]
       },
+      "DeleteRunsByOrgResponse": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deletedRuns": {
+            "type": "number"
+          },
+          "tombstoneEvents": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "orgId",
+          "deletedRuns",
+          "tombstoneEvents"
+        ]
+      },
       "RunsExpectedTotalsResponse": {
         "type": "object",
         "properties": {
@@ -2161,6 +2181,63 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/runs/by-org/{orgId}": {
+      "delete": {
+        "summary": "Delete runs-service state for an org",
+        "description": "Idempotently tears down runs-service-owned org state for a deleted internal org UUID. Writes bronze teardown events, then removes the live silver run projection so runs_costs and run_events cascade out of active billing/stat surfaces. Existing bronze history is retained for audit.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org teardown complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteRunsByOrgResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid org ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Teardown failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
