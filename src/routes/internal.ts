@@ -1,16 +1,114 @@
 import { Router } from "express";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
-import { runs } from "../db/schema.js";
+import {
+  costLifecycleEvents,
+  runEvents,
+  runLifecycleEvents,
+  runs,
+  runsCosts,
+} from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import {
+  DeleteRunsByOrgParamsSchema,
   TransferBrandRequestSchema,
   RunsExpectedTotalsQuerySchema,
   OrgUsageTotalQuerySchema,
 } from "../schemas.js";
 
 const router = Router();
+
+// DELETE /internal/runs/by-org/:orgId — org cascade-teardown leg.
+// Bronze is the source of truth; deleting only silver projections would leave
+// enough source data to resurrect billable org state during future projection.
+router.delete("/internal/runs/by-org/:orgId", requireInternalAuth, async (req, res) => {
+  try {
+    const parsed = DeleteRunsByOrgParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const { orgId } = parsed.data;
+
+    const deleted = await db.transaction(async (tx) => {
+      const runRows = await tx
+        .select({ id: runs.id })
+        .from(runs)
+        .where(eq(runs.organizationId, orgId));
+      const runIds = runRows.map((row) => row.id);
+
+      const runLifecycleWhere =
+        runIds.length > 0
+          ? or(
+              inArray(runLifecycleEvents.runId, runIds),
+              sql`${runLifecycleEvents.identity}->>'orgId' = ${orgId}`,
+              sql`${runLifecycleEvents.payload}->>'organizationId' = ${orgId}`
+            )
+          : or(
+              sql`${runLifecycleEvents.identity}->>'orgId' = ${orgId}`,
+              sql`${runLifecycleEvents.payload}->>'organizationId' = ${orgId}`
+            );
+
+      const costLifecycleWhere =
+        runIds.length > 0
+          ? or(
+              inArray(costLifecycleEvents.runId, runIds),
+              sql`${costLifecycleEvents.identity}->>'orgId' = ${orgId}`
+            )
+          : sql`${costLifecycleEvents.identity}->>'orgId' = ${orgId}`;
+
+      const deletedCostLifecycleEvents = await tx
+        .delete(costLifecycleEvents)
+        .where(costLifecycleWhere)
+        .returning({ id: costLifecycleEvents.id });
+
+      const deletedRunLifecycleEvents = await tx
+        .delete(runLifecycleEvents)
+        .where(runLifecycleWhere)
+        .returning({ id: runLifecycleEvents.id });
+
+      if (runIds.length === 0) {
+        return {
+          runs: 0,
+          costs: 0,
+          runEvents: 0,
+          runLifecycleEvents: deletedRunLifecycleEvents.length,
+          costLifecycleEvents: deletedCostLifecycleEvents.length,
+        };
+      }
+
+      const deletedRunEvents = await tx
+        .delete(runEvents)
+        .where(inArray(runEvents.runId, runIds))
+        .returning({ id: runEvents.id });
+
+      const deletedCosts = await tx
+        .delete(runsCosts)
+        .where(inArray(runsCosts.runId, runIds))
+        .returning({ id: runsCosts.id });
+
+      const deletedRuns = await tx
+        .delete(runs)
+        .where(inArray(runs.id, runIds))
+        .returning({ id: runs.id });
+
+      return {
+        runs: deletedRuns.length,
+        costs: deletedCosts.length,
+        runEvents: deletedRunEvents.length,
+        runLifecycleEvents: deletedRunLifecycleEvents.length,
+        costLifecycleEvents: deletedCostLifecycleEvents.length,
+      };
+    });
+
+    res.json({ orgId, deleted });
+  } catch (err) {
+    console.error("[runs-service] Error in DELETE /internal/runs/by-org/:orgId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // POST /internal/transfer-brand — re-assign solo-brand runs to a different org.
 // Unchanged from prior PR — silver-table direct mutation is the audit gap that

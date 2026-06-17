@@ -589,6 +589,52 @@ export const TransferBrandRequestSchema = z
 
 export type TransferBrandRequest = z.infer<typeof TransferBrandRequestSchema>;
 
+export const DeleteRunsByOrgParamsSchema = z
+  .object({
+    orgId: z.string().uuid(),
+  })
+  .openapi("DeleteRunsByOrgParams");
+
+export const DeleteRunsByOrgResponseSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    deleted: z.object({
+      runs: z.number(),
+      costs: z.number(),
+      runEvents: z.number(),
+      runLifecycleEvents: z.number(),
+      costLifecycleEvents: z.number(),
+    }),
+  })
+  .openapi("DeleteRunsByOrgResponse");
+
+registry.registerPath({
+  method: "delete",
+  path: "/internal/runs/by-org/{orgId}",
+  summary: "Delete runs-service state for an org",
+  description:
+    "Idempotent internal cascade-teardown endpoint for deleted organizations. Deletes runs-service-owned org-scoped bronze lifecycle events and silver run/cost/event projections for the internal org UUID. No cross-service fan-out is performed.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: DeleteRunsByOrgParamsSchema,
+  },
+  responses: {
+    200: {
+      description: "Org run state deleted or already absent",
+      content: { "application/json": { schema: DeleteRunsByOrgResponseSchema } },
+    },
+    400: {
+      description: "Invalid path parameters",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    500: {
+      description: "Database or invariant failure",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
 export const TransferBrandResponseSchema = z
   .object({
     updatedTables: z.array(

@@ -699,6 +699,46 @@
           "status"
         ]
       },
+      "DeleteRunsByOrgResponse": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deleted": {
+            "type": "object",
+            "properties": {
+              "runs": {
+                "type": "number"
+              },
+              "costs": {
+                "type": "number"
+              },
+              "runEvents": {
+                "type": "number"
+              },
+              "runLifecycleEvents": {
+                "type": "number"
+              },
+              "costLifecycleEvents": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "runs",
+              "costs",
+              "runEvents",
+              "runLifecycleEvents",
+              "costLifecycleEvents"
+            ]
+          }
+        },
+        "required": [
+          "orgId",
+          "deleted"
+        ]
+      },
       "TransferBrandResponse": {
         "type": "object",
         "properties": {
@@ -2116,6 +2156,63 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/runs/by-org/{orgId}": {
+      "delete": {
+        "summary": "Delete runs-service state for an org",
+        "description": "Idempotent internal cascade-teardown endpoint for deleted organizations. Deletes runs-service-owned org-scoped bronze lifecycle events and silver run/cost/event projections for the internal org UUID. No cross-service fan-out is performed.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org run state deleted or already absent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteRunsByOrgResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Database or invariant failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

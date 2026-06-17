@@ -14,8 +14,16 @@ export async function setup() {
   try {
     // Post Phase 6 (view shim): `runs` and `runs_costs` are auto-updatable
     // views over `runs_old` / `runs_costs_old`. TRUNCATE only works on base
-    // tables — target the *_old tables directly.
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs_old, runs_old CASCADE`;
+    // tables — target the *_old tables directly when they exist. Local
+    // direct-push verification DBs use the current schema tables instead.
+    const [tables] = await sql<[{ runs_old: string | null }]>`
+      SELECT to_regclass('public.runs_old')::text AS runs_old
+    `;
+    if (tables.runs_old) {
+      await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs_old, runs_old CASCADE`;
+    } else {
+      await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs CASCADE`;
+    }
   } finally {
     await sql.end();
   }
