@@ -4,13 +4,26 @@ import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
+import { logRunLifecycle } from "../services/bronze.js";
 import {
   TransferBrandRequestSchema,
   RunsExpectedTotalsQuerySchema,
   OrgUsageTotalQuerySchema,
+  DeleteRunsByOrgParamsSchema,
 } from "../schemas.js";
 
 const router = Router();
+
+type OrgRunTeardownRow = {
+  id: string;
+  user_id: string | null;
+  brand_ids: string[] | null;
+  campaign_id: string | null;
+  workflow_slug: string | null;
+  feature_slug: string | null;
+  service_name: string;
+  task_name: string;
+};
 
 // POST /internal/transfer-brand — re-assign solo-brand runs to a different org.
 // Unchanged from prior PR — silver-table direct mutation is the audit gap that
@@ -59,6 +72,76 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
     res.json({ updatedTables: [{ tableName: "runs", count: totalUpdated }] });
   } catch (err) {
     console.error("[runs-service] Error in POST /internal/transfer-brand:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// DELETE /internal/runs/by-org/:orgId — org cascade teardown.
+// Bronze records the teardown decision; the projection trigger deletes the
+// silver run, cascading runs_costs + run_events for the live billing surface.
+router.delete("/internal/runs/by-org/:orgId", requireInternalAuth, async (req, res) => {
+  const parsed = DeleteRunsByOrgParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid params", details: parsed.error.flatten() });
+    return;
+  }
+
+  const { orgId } = parsed.data;
+  const sourceService = (req.headers["x-service-name"] as string | undefined)?.trim() || null;
+
+  try {
+    const deletedRuns = await db.transaction(async (tx) => {
+      const result = await tx.execute(sql`
+        WITH RECURSIVE org_runs AS (
+          SELECT id, parent_run_id, user_id, brand_ids, campaign_id,
+                 workflow_slug, feature_slug, service_name, task_name
+            FROM runs
+           WHERE organization_id = ${orgId}
+        ),
+        walk AS (
+          SELECT r.*, 0 AS depth
+            FROM org_runs r
+           WHERE r.parent_run_id IS NULL
+              OR NOT EXISTS (SELECT 1 FROM org_runs p WHERE p.id = r.parent_run_id)
+          UNION ALL
+          SELECT child.*, walk.depth + 1 AS depth
+            FROM org_runs child
+            JOIN walk ON child.parent_run_id = walk.id
+        )
+        SELECT id, user_id, brand_ids, campaign_id, workflow_slug, feature_slug,
+               service_name, task_name
+          FROM walk
+         ORDER BY depth DESC, id
+      `);
+
+      const rows = result as unknown as OrgRunTeardownRow[];
+
+      for (const row of rows) {
+        await logRunLifecycle(tx, {
+          runId: row.id,
+          eventType: "run.org_deleted",
+          payload: {
+            organizationId: orgId,
+            reason: "org_cascade_teardown",
+          },
+          identity: {
+            orgId,
+            userId: row.user_id,
+            brandIds: row.brand_ids,
+            campaignId: row.campaign_id,
+            workflowSlug: row.workflow_slug,
+            featureSlug: row.feature_slug,
+          },
+          sourceService,
+        });
+      }
+
+      return rows.length;
+    });
+
+    res.json({ orgId, deletedRuns, tombstoneEvents: deletedRuns });
+  } catch (err) {
+    console.error("[runs-service] Error in DELETE /internal/runs/by-org/:orgId:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

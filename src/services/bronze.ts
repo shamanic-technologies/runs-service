@@ -17,7 +17,7 @@ import { runLifecycleEvents, costLifecycleEvents } from "../db/schema.js";
 
 export type Tx = Parameters<Parameters<typeof import("../db/index.js").db.transaction>[0]>[0];
 
-export type RunLifecycleEventType = "run.created" | "run.completed" | "run.failed";
+export type RunLifecycleEventType = "run.created" | "run.completed" | "run.failed" | "run.org_deleted";
 export type CostLifecycleEventType = "cost.added" | "cost.materialized" | "cost.cancelled";
 
 export type Identity = {

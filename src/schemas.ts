@@ -625,6 +625,47 @@ registry.registerPath({
   },
 });
 
+export const DeleteRunsByOrgParamsSchema = z
+  .object({
+    orgId: z.string().uuid(),
+  })
+  .openapi("DeleteRunsByOrgParams");
+
+export const DeleteRunsByOrgResponseSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    deletedRuns: z.number(),
+    tombstoneEvents: z.number(),
+  })
+  .openapi("DeleteRunsByOrgResponse");
+
+registry.registerPath({
+  method: "delete",
+  path: "/internal/runs/by-org/{orgId}",
+  summary: "Delete runs-service state for an org",
+  description:
+    "Idempotently tears down runs-service-owned org state for a deleted internal org UUID. Writes bronze teardown events, then removes the live silver run projection so runs_costs and run_events cascade out of active billing/stat surfaces. Existing bronze history is retained for audit.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: DeleteRunsByOrgParamsSchema,
+  },
+  responses: {
+    200: {
+      description: "Org teardown complete",
+      content: { "application/json": { schema: DeleteRunsByOrgResponseSchema } },
+    },
+    400: {
+      description: "Invalid org ID",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    500: {
+      description: "Teardown failed",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
 export const RunsExpectedTotalsQuerySchema = z
   .object({
     org_id: z.string().uuid(),
