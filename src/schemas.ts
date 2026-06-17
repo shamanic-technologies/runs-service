@@ -31,6 +31,8 @@ export const ValidationErrorSchema = z
   })
   .openapi("ValidationError");
 
+export const GoalEnum = z.enum(["signup", "meetingBooked", "purchase"]).openapi("Goal");
+
 // --- Run schemas ---
 
 export const RunSchema = z
@@ -42,6 +44,10 @@ export const RunSchema = z
     campaignId: z.string().nullable(),
     workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
+    goal: GoalEnum.nullable(),
+    brandProfileId: z.string().uuid().nullable(),
+    customerProfileId: z.string().uuid().nullable(),
+    workflowContext: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -66,6 +72,10 @@ export const CreateRunRequestSchema = z
     campaignId: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-campaign-id header instead. Kept for backwards compatibility; header takes precedence." }),
     workflowSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-workflow-slug header instead. Kept for backwards compatibility; header takes precedence." }),
     featureSlug: z.string().min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence." }),
+    goal: GoalEnum.optional().openapi({ description: "Optional explicit brand runtime goal attribution. Header x-goal takes precedence when present." }),
+    brandProfileId: z.string().uuid().optional().openapi({ description: "Optional real brand-profile attribution ID. Header x-brand-profile-id takes precedence when present." }),
+    customerProfileId: z.string().uuid().optional().openapi({ description: "Optional real customer-profile/persona attribution ID. Header x-customer-profile-id takes precedence when present." }),
+    workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
     idempotencyKey: z.string().min(1).max(256).optional().openapi({
@@ -102,6 +112,10 @@ export const CostSchema = z
     unitCostInUsdCents: z.string(),
     totalCostInUsdCents: z.string(),
     status: CostStatusEnum,
+    goal: GoalEnum.nullable(),
+    brandProfileId: z.string().uuid().nullable(),
+    customerProfileId: z.string().uuid().nullable(),
+    workflowContext: z.string().nullable(),
     idempotencyKey: z.string().nullable(),
     createdAt: z.string().datetime(),
   })
@@ -113,6 +127,10 @@ export const CostItemSchema = z
     costSource: CostSourceEnum,
     quantity: z.number().positive(),
     status: CostStatusEnum.default("actual"),
+    goal: GoalEnum.optional().openapi({ description: "Optional per-cost goal attribution override. Omit to inherit the run/header attribution." }),
+    brandProfileId: z.string().uuid().optional().openapi({ description: "Optional per-cost brand-profile attribution override. Omit to inherit the run/header attribution." }),
+    customerProfileId: z.string().uuid().optional().openapi({ description: "Optional per-cost customer-profile/persona attribution override. Omit to inherit the run/header attribution." }),
+    workflowContext: z.string().min(1).optional().openapi({ description: "Optional per-cost workflow-context attribution override. Omit to inherit the run/header attribution." }),
     idempotencyKey: z.string().min(1).max(256).optional().openapi({
       description:
         "Caller-supplied per-item dedup key. Optional. Uniqueness is PER-RUN — two items inside the same run may not share an idempotencyKey, but two different runs may use the same key independently. Callers should still self-namespace to keep cross-run audit clean. On retry, the original cost row is returned and no duplicate row is created. Max 256 chars.",
@@ -189,6 +207,10 @@ export const DescendantRunSchema = z
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
+    goal: GoalEnum.nullable(),
+    brandProfileId: z.string().uuid().nullable(),
+    customerProfileId: z.string().uuid().nullable(),
+    workflowContext: z.string().nullable(),
     startedAt: z.string().datetime(),
     completedAt: z.string().datetime().nullable(),
     costs: z.array(CostSchema),
@@ -207,6 +229,10 @@ export const RunWithCostsSchema = z
     campaignId: z.string().nullable(),
     workflowSlug: z.string().nullable(),
     featureSlug: z.string().nullable(),
+    goal: GoalEnum.nullable(),
+    brandProfileId: z.string().uuid().nullable(),
+    customerProfileId: z.string().uuid().nullable(),
+    workflowContext: z.string().nullable(),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -294,6 +320,10 @@ const WorkflowTrackingHeadersSchema = z.object({
   "x-campaign-id": z.string().optional().openapi({ description: "Campaign identifier, injected by workflow-service" }),
   "x-workflow-slug": z.string().optional().openapi({ description: "Workflow slug, injected by workflow-service" }),
   "x-feature-slug": z.string().optional().openapi({ description: "Feature slug from features-service, injected by campaign-service" }),
+  "x-goal": GoalEnum.optional().openapi({ description: "Brand runtime goal attribution: signup, meetingBooked, or purchase" }),
+  "x-brand-profile-id": z.string().uuid().optional().openapi({ description: "Real brand-profile attribution ID" }),
+  "x-customer-profile-id": z.string().uuid().optional().openapi({ description: "Real customer-profile/persona attribution ID" }),
+  "x-workflow-context": z.string().optional().openapi({ description: "Stable workflow-context attribution key" }),
 });
 
 // --- Register paths ---
@@ -376,6 +406,10 @@ registry.registerPath({
       campaignId: z.string().optional(),
       workflowSlug: z.string().optional(),
       featureSlug: z.string().optional(),
+      goal: GoalEnum.optional(),
+      brandProfileId: z.string().uuid().optional(),
+      customerProfileId: z.string().uuid().optional(),
+      workflowContext: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
       status: z.string().optional(),
@@ -819,6 +853,11 @@ export const StatsFiltersSchema = z.object({
   workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service. Takes precedence over workflowSlug/workflowSlugs." }),
   featureSlug: z.string().optional().openapi({ description: "Filter by a single feature slug" }),
   featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug when both are provided. Callers that compute feature lineage themselves (e.g. features-service) pass the full lineage in one call to avoid N HTTP roundtrips." }),
+  goal: GoalEnum.optional().openapi({ description: "Filter by explicit run/cost goal attribution." }),
+  brandProfileId: z.string().uuid().optional().openapi({ description: "Filter by explicit brand-profile attribution. Matches cost override first, then run attribution." }),
+  customerProfileId: z.string().uuid().optional().openapi({ description: "Filter by explicit customer-profile/persona attribution. Matches cost override first, then run attribution." }),
+  workflowContext: z.string().optional().openapi({ description: "Filter by explicit stable workflow-context attribution. Matches cost override first, then run attribution." }),
+  attributionStatus: z.enum(["all", "tagged", "unattributed"]).optional().openapi({ description: "Optional persona/profile attribution filter. tagged means brandProfileId or customerProfileId is present; unattributed means both are null. Default all." }),
   serviceName: z.string().optional(),
   taskName: z.string().optional(),
   startedAfter: z.string().datetime().optional(),
@@ -855,13 +894,18 @@ export const ServiceTaskSchema = z
 
 export const StatsCostsByServiceTasksRequestSchema = z
   .object({
-    groupBy: z.string().min(1).openapi({ description: "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST." }),
+    groupBy: z.string().min(1).openapi({ description: "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST." }),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     workflowSlug: z.string().optional(),
     workflowSlugs: z.array(z.string().min(1)).optional().openapi({ description: "Filter by multiple workflow slugs. Takes precedence over workflowSlug." }),
     featureSlug: z.string().optional(),
     featureSlugs: z.array(z.string().min(1)).optional().openapi({ description: "Filter by multiple feature slugs. Takes precedence over featureSlug." }),
+    goal: GoalEnum.optional(),
+    brandProfileId: z.string().uuid().optional(),
+    customerProfileId: z.string().uuid().optional(),
+    workflowContext: z.string().optional(),
+    attributionStatus: z.enum(["all", "tagged", "unattributed"]).optional(),
     startedAfter: z.string().datetime().optional(),
     startedBefore: z.string().datetime().optional(),
     serviceTasks: z.array(ServiceTaskSchema).min(1).openapi({ description: "List of (serviceName, taskName) pairs. Each pair produces its own bucket of aggregated groups in the response. Pairs are matched as a tuple — passing [{serviceName:'a', taskName:'b'}] is NOT the same as serviceName='a' AND taskName='b' across multiple service-task combos." }),
@@ -969,7 +1013,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Aggregate costs with GROUP BY",
   description:
-    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName, workflowDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). The attribution dimensions are explicit stored tags only: runs/costs without customerProfileId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsCostsQuerySchema,
@@ -992,7 +1036,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Batched cost aggregation across multiple (serviceName, taskName) tuples",
   description:
-    "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
+    "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, goal, profile attribution, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     body: {

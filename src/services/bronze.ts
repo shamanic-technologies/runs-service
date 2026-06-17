@@ -27,6 +27,10 @@ export type Identity = {
   campaignId?: string | null;
   workflowSlug?: string | null;
   featureSlug?: string | null;
+  goal?: string | null;
+  brandProfileId?: string | null;
+  customerProfileId?: string | null;
+  workflowContext?: string | null;
 };
 
 type LogRunArgs = {

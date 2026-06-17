@@ -83,6 +83,23 @@
             "type": "string",
             "nullable": true
           },
+          "goal": {
+            "$ref": "#/components/schemas/Goal"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "workflowContext": {
+            "type": "string",
+            "nullable": true
+          },
           "serviceName": {
             "type": "string"
           },
@@ -127,6 +144,10 @@
           "campaignId",
           "workflowSlug",
           "featureSlug",
+          "goal",
+          "brandProfileId",
+          "customerProfileId",
+          "workflowContext",
           "serviceName",
           "taskName",
           "status",
@@ -136,6 +157,16 @@
           "completedAt",
           "createdAt",
           "updatedAt"
+        ]
+      },
+      "Goal": {
+        "type": "string",
+        "nullable": true,
+        "enum": [
+          "signup",
+          "meetingBooked",
+          "purchase",
+          null
         ]
       },
       "ValidationError": {
@@ -182,6 +213,31 @@
             "minLength": 1,
             "deprecated": true,
             "description": "Deprecated: use x-feature-slug header instead. Kept for backwards compatibility; header takes precedence."
+          },
+          "goal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Goal"
+              },
+              {
+                "description": "Optional explicit brand runtime goal attribution. Header x-goal takes precedence when present."
+              }
+            ]
+          },
+          "brandProfileId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional real brand-profile attribution ID. Header x-brand-profile-id takes precedence when present."
+          },
+          "customerProfileId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional real customer-profile/persona attribution ID. Header x-customer-profile-id takes precedence when present."
+          },
+          "workflowContext": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels."
           },
           "serviceName": {
             "type": "string",
@@ -287,6 +343,23 @@
             "type": "string",
             "nullable": true
           },
+          "goal": {
+            "$ref": "#/components/schemas/Goal"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "workflowContext": {
+            "type": "string",
+            "nullable": true
+          },
           "serviceName": {
             "type": "string"
           },
@@ -370,6 +443,10 @@
           "campaignId",
           "workflowSlug",
           "featureSlug",
+          "goal",
+          "brandProfileId",
+          "customerProfileId",
+          "workflowContext",
           "serviceName",
           "taskName",
           "status",
@@ -421,6 +498,23 @@
           "status": {
             "$ref": "#/components/schemas/CostStatus"
           },
+          "goal": {
+            "$ref": "#/components/schemas/Goal"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "workflowContext": {
+            "type": "string",
+            "nullable": true
+          },
           "idempotencyKey": {
             "type": "string",
             "nullable": true
@@ -439,6 +533,10 @@
           "unitCostInUsdCents",
           "totalCostInUsdCents",
           "status",
+          "goal",
+          "brandProfileId",
+          "customerProfileId",
+          "workflowContext",
           "idempotencyKey",
           "createdAt"
         ]
@@ -479,6 +577,23 @@
           "status": {
             "type": "string"
           },
+          "goal": {
+            "$ref": "#/components/schemas/Goal"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "workflowContext": {
+            "type": "string",
+            "nullable": true
+          },
           "startedAt": {
             "type": "string",
             "format": "date-time"
@@ -510,6 +625,10 @@
           "serviceName",
           "taskName",
           "status",
+          "goal",
+          "brandProfileId",
+          "customerProfileId",
+          "workflowContext",
           "startedAt",
           "completedAt",
           "costs",
@@ -575,6 +694,31 @@
           },
           "status": {
             "$ref": "#/components/schemas/CostStatus"
+          },
+          "goal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Goal"
+              },
+              {
+                "description": "Optional per-cost goal attribution override. Omit to inherit the run/header attribution."
+              }
+            ]
+          },
+          "brandProfileId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional per-cost brand-profile attribution override. Omit to inherit the run/header attribution."
+          },
+          "customerProfileId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional per-cost customer-profile/persona attribution override. Omit to inherit the run/header attribution."
+          },
+          "workflowContext": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional per-cost workflow-context attribution override. Omit to inherit the run/header attribution."
           },
           "idempotencyKey": {
             "type": "string",
@@ -972,7 +1116,7 @@
           "groupBy": {
             "type": "string",
             "minLength": 1,
-            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST."
+            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST."
           },
           "brandId": {
             "type": "string"
@@ -1001,6 +1145,28 @@
               "minLength": 1
             },
             "description": "Filter by multiple feature slugs. Takes precedence over featureSlug."
+          },
+          "goal": {
+            "$ref": "#/components/schemas/Goal"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workflowContext": {
+            "type": "string"
+          },
+          "attributionStatus": {
+            "type": "string",
+            "enum": [
+              "all",
+              "tagged",
+              "unattributed"
+            ]
           },
           "startedAfter": {
             "type": "string",
@@ -1544,6 +1710,54 @@
             "description": "Feature slug from features-service, injected by campaign-service",
             "name": "x-feature-slug",
             "in": "header"
+          },
+          {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Goal"
+                },
+                {
+                  "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase"
+                }
+              ]
+            },
+            "required": false,
+            "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase",
+            "name": "x-goal",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real brand-profile attribution ID"
+            },
+            "required": false,
+            "description": "Real brand-profile attribution ID",
+            "name": "x-brand-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real customer-profile/persona attribution ID"
+            },
+            "required": false,
+            "description": "Real customer-profile/persona attribution ID",
+            "name": "x-customer-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Stable workflow-context attribution key"
+            },
+            "required": false,
+            "description": "Stable workflow-context attribution key",
+            "name": "x-workflow-context",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -1649,6 +1863,40 @@
             },
             "required": false,
             "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "$ref": "#/components/schemas/Goal"
+            },
+            "required": false,
+            "name": "goal",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "brandProfileId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "customerProfileId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowContext",
             "in": "query"
           },
           {
@@ -1905,6 +2153,54 @@
             "required": false,
             "description": "Feature slug from features-service, injected by campaign-service",
             "name": "x-feature-slug",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Goal"
+                },
+                {
+                  "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase"
+                }
+              ]
+            },
+            "required": false,
+            "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase",
+            "name": "x-goal",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real brand-profile attribution ID"
+            },
+            "required": false,
+            "description": "Real brand-profile attribution ID",
+            "name": "x-brand-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real customer-profile/persona attribution ID"
+            },
+            "required": false,
+            "description": "Real customer-profile/persona attribution ID",
+            "name": "x-customer-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Stable workflow-context attribution key"
+            },
+            "required": false,
+            "description": "Stable workflow-context attribution key",
+            "name": "x-workflow-context",
             "in": "header"
           }
         ],
@@ -2339,7 +2635,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, serviceName, taskName, costName, workflowDynastySlug). When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). The attribution dimensions are explicit stored tags only: runs/costs without customerProfileId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -2416,6 +2712,69 @@
           },
           {
             "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Goal"
+                },
+                {
+                  "description": "Filter by explicit run/cost goal attribution."
+                }
+              ]
+            },
+            "required": false,
+            "description": "Filter by explicit run/cost goal attribution.",
+            "name": "goal",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Filter by explicit brand-profile attribution. Matches cost override first, then run attribution."
+            },
+            "required": false,
+            "description": "Filter by explicit brand-profile attribution. Matches cost override first, then run attribution.",
+            "name": "brandProfileId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Filter by explicit customer-profile/persona attribution. Matches cost override first, then run attribution."
+            },
+            "required": false,
+            "description": "Filter by explicit customer-profile/persona attribution. Matches cost override first, then run attribution.",
+            "name": "customerProfileId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by explicit stable workflow-context attribution. Matches cost override first, then run attribution."
+            },
+            "required": false,
+            "description": "Filter by explicit stable workflow-context attribution. Matches cost override first, then run attribution.",
+            "name": "workflowContext",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "tagged",
+                "unattributed"
+              ],
+              "description": "Optional persona/profile attribution filter. tagged means brandProfileId or customerProfileId is present; unattributed means both are null. Default all."
+            },
+            "required": false,
+            "description": "Optional persona/profile attribution filter. tagged means brandProfileId or customerProfileId is present; unattributed means both are null. Default all.",
+            "name": "attributionStatus",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "required": false,
@@ -2486,7 +2845,7 @@
       },
       "post": {
         "summary": "Batched cost aggregation across multiple (serviceName, taskName) tuples",
-        "description": "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
+        "description": "Returns aggregated cost groups for each requested (serviceName, taskName) pair in ONE SQL pass. Replaces N separate GET /v1/stats/costs calls when a caller (e.g. features-service stats registry) needs counts for K specific service+task combos under the same scoping (org, brand, feature lineage, goal, profile attribution, date window). Response is a list of buckets in input order. A bucket with no matching rows returns groups: []. Dynasty groupBy is NOT supported on POST — callers compute lineage client-side and pass featureSlugs / workflowSlugs explicitly. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -2795,6 +3154,54 @@
             "required": false,
             "description": "Feature slug from features-service, injected by campaign-service",
             "name": "x-feature-slug",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Goal"
+                },
+                {
+                  "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase"
+                }
+              ]
+            },
+            "required": false,
+            "description": "Brand runtime goal attribution: signup, meetingBooked, or purchase",
+            "name": "x-goal",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real brand-profile attribution ID"
+            },
+            "required": false,
+            "description": "Real brand-profile attribution ID",
+            "name": "x-brand-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Real customer-profile/persona attribution ID"
+            },
+            "required": false,
+            "description": "Real customer-profile/persona attribution ID",
+            "name": "x-customer-profile-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Stable workflow-context attribution key"
+            },
+            "required": false,
+            "description": "Stable workflow-context attribution key",
+            "name": "x-workflow-context",
             "in": "header"
           }
         ],
