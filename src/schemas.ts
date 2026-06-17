@@ -600,6 +600,47 @@ export const TransferBrandResponseSchema = z
   })
   .openapi("TransferBrandResponse");
 
+export const DeleteRunsByOrgParamsSchema = z
+  .object({
+    orgId: z.string().uuid(),
+  })
+  .openapi("DeleteRunsByOrgParams");
+
+export const DeleteRunsByOrgResponseSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    tombstonedRuns: z.number(),
+    deletedRuns: z.number(),
+  })
+  .openapi("DeleteRunsByOrgResponse");
+
+registry.registerPath({
+  method: "delete",
+  path: "/internal/runs/by-org/{orgId}",
+  summary: "Tear down runs-service state for an org",
+  description:
+    "Idempotently tombstones run-owned source events and removes current run/cost/event projections for an internal org UUID. Intended as the runs-service leg of client-service org cascade teardown. No cross-service fan-out.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: DeleteRunsByOrgParamsSchema,
+  },
+  responses: {
+    200: {
+      description: "Org run state teardown complete",
+      content: { "application/json": { schema: DeleteRunsByOrgResponseSchema } },
+    },
+    400: {
+      description: "Invalid org UUID",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    500: {
+      description: "Database or invariant failure; caller should retry",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/transfer-brand",

@@ -699,6 +699,26 @@
           "status"
         ]
       },
+      "DeleteRunsByOrgResponse": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tombstonedRuns": {
+            "type": "number"
+          },
+          "deletedRuns": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "orgId",
+          "tombstonedRuns",
+          "deletedRuns"
+        ]
+      },
       "TransferBrandResponse": {
         "type": "object",
         "properties": {
@@ -2116,6 +2136,63 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/runs/by-org/{orgId}": {
+      "delete": {
+        "summary": "Tear down runs-service state for an org",
+        "description": "Idempotently tombstones run-owned source events and removes current run/cost/event projections for an internal org UUID. Intended as the runs-service leg of client-service org cascade teardown. No cross-service fan-out.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org run state teardown complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteRunsByOrgResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid org UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Database or invariant failure; caller should retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

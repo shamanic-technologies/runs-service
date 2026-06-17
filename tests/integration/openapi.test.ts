@@ -14,6 +14,7 @@ describe("OpenAPI", () => {
     expect(res.body.paths["/health"]).toBeDefined();
     expect(res.body.paths["/v1/runs"]).toBeDefined();
     expect(res.body.paths["/v1/runs/{id}"]).toBeDefined();
+    expect(res.body.paths["/internal/runs/by-org/{orgId}"]).toBeDefined();
     expect(res.body.components?.schemas).toBeDefined();
     expect(res.body.components.schemas.Run).toBeDefined();
     expect(res.body.components.schemas.Cost).toBeDefined();

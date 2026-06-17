@@ -8,9 +8,116 @@ import {
   TransferBrandRequestSchema,
   RunsExpectedTotalsQuerySchema,
   OrgUsageTotalQuerySchema,
+  DeleteRunsByOrgParamsSchema,
 } from "../schemas.js";
 
 const router = Router();
+
+// DELETE /internal/runs/by-org/:orgId — org cascade-teardown leg.
+// Bronze is retained as source-of-truth via a tombstone event; current silver
+// projections are hard-deleted so run/cost/event read surfaces stop serving
+// deleted-org state. Replays are safe: existing tombstones suppress duplicates.
+router.delete("/internal/runs/by-org/:orgId", requireInternalAuth, async (req, res) => {
+  const parsed = DeleteRunsByOrgParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid params", details: parsed.error.flatten() });
+    return;
+  }
+
+  const { orgId } = parsed.data;
+
+  try {
+    const result = await db.transaction(async (tx) => {
+      const runIdRows = await tx.execute(sql`
+        SELECT DISTINCT run_id
+        FROM (
+          SELECT id AS run_id
+            FROM runs
+           WHERE organization_id = ${orgId}
+          UNION ALL
+          SELECT run_id
+            FROM run_lifecycle_events
+           WHERE identity->>'orgId' = ${orgId}
+              OR payload->>'organizationId' = ${orgId}
+              OR payload->>'orgId' = ${orgId}
+          UNION ALL
+          SELECT run_id
+            FROM cost_lifecycle_events
+           WHERE identity->>'orgId' = ${orgId}
+              OR payload->>'organizationId' = ${orgId}
+              OR payload->>'orgId' = ${orgId}
+        ) org_runs
+      `);
+
+      const runIds = (runIdRows as any[]).map((row) => row.run_id as string);
+      if (runIds.length === 0) {
+        return { tombstonedRuns: 0, deletedRuns: 0 };
+      }
+
+      const runIdValues = sql.join(runIds.map((id) => sql`(${id}::uuid)`), sql`, `);
+      const runIdList = sql.join(runIds.map((id) => sql`${id}`), sql`, `);
+
+      const tombstonedRows = await tx.execute(sql`
+        INSERT INTO run_lifecycle_events (
+          run_id,
+          event_type,
+          payload,
+          source_service,
+          identity,
+          idempotency_key,
+          occurred_at
+        )
+        SELECT
+          ids.run_id,
+          'run.org_teardown',
+          jsonb_build_object(
+            'organizationId', ${orgId},
+            'reason', 'org_cascade_teardown'
+          ),
+          'runs-service',
+          jsonb_build_object('orgId', ${orgId}),
+          'org-teardown:' || ${orgId} || ':' || ids.run_id::text,
+          now()
+        FROM (VALUES ${runIdValues}) AS ids(run_id)
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM run_lifecycle_events existing
+           WHERE existing.run_id = ids.run_id
+             AND existing.event_type = 'run.org_teardown'
+             AND existing.payload->>'organizationId' = ${orgId}
+        )
+        RETURNING run_id
+      `);
+
+      await tx.execute(sql`
+        UPDATE runs
+           SET parent_run_id = NULL,
+               updated_at = now()
+         WHERE parent_run_id IN (${runIdList})
+      `);
+
+      const deletedRows = await tx.execute(sql`
+        DELETE FROM runs
+         WHERE id IN (${runIdList})
+        RETURNING id
+      `);
+
+      return {
+        tombstonedRuns: (tombstonedRows as any[]).length,
+        deletedRuns: (deletedRows as any[]).length,
+      };
+    });
+
+    res.json({
+      orgId,
+      tombstonedRuns: result.tombstonedRuns,
+      deletedRuns: result.deletedRuns,
+    });
+  } catch (err) {
+    console.error("[runs-service] Error in DELETE /internal/runs/by-org/:orgId:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // POST /internal/transfer-brand — re-assign solo-brand runs to a different org.
 // Unchanged from prior PR — silver-table direct mutation is the audit gap that
