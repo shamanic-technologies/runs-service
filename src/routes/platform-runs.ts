@@ -41,6 +41,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       featureSlug,
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
       serviceName,
@@ -67,6 +68,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
     const attribution = requestAttribution(req, {
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
     });
@@ -277,7 +279,7 @@ router.patch("/v1/platform-runs/:id", requirePlatformAuth, async (req, res) => {
           featureSlug: existing.featureSlug,
           goal: existing.goal,
           brandProfileId: existing.brandProfileId,
-          customerProfileId: existing.customerProfileId,
+          audienceId: existing.audienceId,
           workflowContext: existing.workflowContext,
         },
         sourceService: req.platformServiceName ?? null,

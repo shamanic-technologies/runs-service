@@ -91,7 +91,7 @@
             "nullable": true,
             "format": "uuid"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
             "format": "uuid"
@@ -146,7 +146,7 @@
           "featureSlug",
           "goal",
           "brandProfileId",
-          "customerProfileId",
+          "audienceId",
           "workflowContext",
           "serviceName",
           "taskName",
@@ -229,10 +229,16 @@
             "format": "uuid",
             "description": "Optional real brand-profile attribution ID. Header x-brand-profile-id takes precedence when present."
           },
+          "audienceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional audience attribution ID (human-service org-scoped saved filter-set, audience.id). Header x-audience-id takes precedence when present. Inherited from the parent run when not set."
+          },
           "customerProfileId": {
             "type": "string",
             "format": "uuid",
-            "description": "Optional real customer-profile/persona attribution ID. Header x-customer-profile-id takes precedence when present."
+            "deprecated": true,
+            "description": "Deprecated: use audienceId / x-audience-id. Legacy alias resolved to audienceId during rollout."
           },
           "workflowContext": {
             "type": "string",
@@ -351,7 +357,7 @@
             "nullable": true,
             "format": "uuid"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
             "format": "uuid"
@@ -445,7 +451,7 @@
           "featureSlug",
           "goal",
           "brandProfileId",
-          "customerProfileId",
+          "audienceId",
           "workflowContext",
           "serviceName",
           "taskName",
@@ -506,7 +512,7 @@
             "nullable": true,
             "format": "uuid"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
             "format": "uuid"
@@ -535,7 +541,7 @@
           "status",
           "goal",
           "brandProfileId",
-          "customerProfileId",
+          "audienceId",
           "workflowContext",
           "idempotencyKey",
           "createdAt"
@@ -585,7 +591,7 @@
             "nullable": true,
             "format": "uuid"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
             "format": "uuid"
@@ -627,7 +633,7 @@
           "status",
           "goal",
           "brandProfileId",
-          "customerProfileId",
+          "audienceId",
           "workflowContext",
           "startedAt",
           "completedAt",
@@ -710,10 +716,16 @@
             "format": "uuid",
             "description": "Optional per-cost brand-profile attribution override. Omit to inherit the run/header attribution."
           },
+          "audienceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional per-cost audience attribution override (audience.id). Omit to inherit the run/header attribution."
+          },
           "customerProfileId": {
             "type": "string",
             "format": "uuid",
-            "description": "Optional per-cost customer-profile/persona attribution override. Omit to inherit the run/header attribution."
+            "deprecated": true,
+            "description": "Deprecated: use audienceId. Legacy alias resolved to audienceId during rollout."
           },
           "workflowContext": {
             "type": "string",
@@ -1116,7 +1128,7 @@
           "groupBy": {
             "type": "string",
             "minLength": 1,
-            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST."
+            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName. (customerProfileId is a deprecated alias for audienceId.) Dynasty groupBy is NOT supported on POST."
           },
           "brandId": {
             "type": "string"
@@ -1153,9 +1165,15 @@
             "type": "string",
             "format": "uuid"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "format": "uuid"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "format": "uuid",
+            "deprecated": true,
+            "description": "Deprecated: use audienceId."
           },
           "workflowContext": {
             "type": "string"
@@ -1742,10 +1760,22 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Real customer-profile/persona attribution ID"
+              "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree."
             },
             "required": false,
-            "description": "Real customer-profile/persona attribution ID",
+            "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree.",
+            "name": "x-audience-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "deprecated": true,
+              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
+            },
+            "required": false,
+            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
             "name": "x-customer-profile-id",
             "in": "header"
           },
@@ -1888,6 +1918,18 @@
               "format": "uuid"
             },
             "required": false,
+            "name": "audienceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "deprecated": true,
+              "description": "Deprecated: use audienceId."
+            },
+            "required": false,
+            "description": "Deprecated: use audienceId.",
             "name": "customerProfileId",
             "in": "query"
           },
@@ -2186,10 +2228,22 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Real customer-profile/persona attribution ID"
+              "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree."
             },
             "required": false,
-            "description": "Real customer-profile/persona attribution ID",
+            "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree.",
+            "name": "x-audience-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "deprecated": true,
+              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
+            },
+            "required": false,
+            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
             "name": "x-customer-profile-id",
             "in": "header"
           },
@@ -2635,7 +2689,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, customerProfileId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). The attribution dimensions are explicit stored tags only: runs/costs without customerProfileId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). customerProfileId is a deprecated alias for audienceId and still accepted as a groupBy/filter during rollout (response keys mirror the requested token). The attribution dimensions are explicit stored tags only: runs/costs without audienceId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -2741,10 +2795,22 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Filter by explicit customer-profile/persona attribution. Matches cost override first, then run attribution."
+              "description": "Filter by explicit audience attribution (audience.id). Matches cost override first, then run attribution."
             },
             "required": false,
-            "description": "Filter by explicit customer-profile/persona attribution. Matches cost override first, then run attribution.",
+            "description": "Filter by explicit audience attribution (audience.id). Matches cost override first, then run attribution.",
+            "name": "audienceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "deprecated": true,
+              "description": "Deprecated: use audienceId. Legacy alias matching the same column during rollout."
+            },
+            "required": false,
+            "description": "Deprecated: use audienceId. Legacy alias matching the same column during rollout.",
             "name": "customerProfileId",
             "in": "query"
           },
@@ -2766,10 +2832,10 @@
                 "tagged",
                 "unattributed"
               ],
-              "description": "Optional persona/profile attribution filter. tagged means brandProfileId or customerProfileId is present; unattributed means both are null. Default all."
+              "description": "Optional attribution filter. tagged means brandProfileId or audienceId is present; unattributed means both are null. Default all."
             },
             "required": false,
-            "description": "Optional persona/profile attribution filter. tagged means brandProfileId or customerProfileId is present; unattributed means both are null. Default all.",
+            "description": "Optional attribution filter. tagged means brandProfileId or audienceId is present; unattributed means both are null. Default all.",
             "name": "attributionStatus",
             "in": "query"
           },
@@ -3187,10 +3253,22 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Real customer-profile/persona attribution ID"
+              "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree."
             },
             "required": false,
-            "description": "Real customer-profile/persona attribution ID",
+            "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree.",
+            "name": "x-audience-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "deprecated": true,
+              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
+            },
+            "required": false,
+            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
             "name": "x-customer-profile-id",
             "in": "header"
           },

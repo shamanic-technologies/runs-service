@@ -16,6 +16,8 @@ declare global {
       headerFeatureSlug?: string;
       headerGoal?: string;
       headerBrandProfileId?: string;
+      headerAudienceId?: string;
+      /** @deprecated Legacy alias for headerAudienceId (x-customer-profile-id). */
       headerCustomerProfileId?: string;
       headerWorkflowContext?: string;
     }
@@ -61,6 +63,16 @@ function extractWorkflowHeaders(req: Request, res: Response): boolean {
     req.headerBrandProfileId = brandProfileId;
   }
 
+  const audienceId = req.headers["x-audience-id"] as string | undefined;
+  if (audienceId) {
+    if (!UUID_RE.test(audienceId)) {
+      res.status(400).json({ error: "x-audience-id header must be a valid UUID" });
+      return false;
+    }
+    req.headerAudienceId = audienceId;
+  }
+
+  // Deprecated alias — kept until consumers migrate to x-audience-id.
   const customerProfileId = req.headers["x-customer-profile-id"] as string | undefined;
   if (customerProfileId) {
     if (!UUID_RE.test(customerProfileId)) {

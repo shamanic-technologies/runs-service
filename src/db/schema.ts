@@ -14,7 +14,7 @@ export const runs = pgTable(
     featureSlug: text("feature_slug"),
     goal: text("goal"),
     brandProfileId: text("brand_profile_id"),
-    customerProfileId: text("customer_profile_id"),
+    audienceId: text("audience_id"),
     workflowContext: text("workflow_context"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
@@ -34,7 +34,7 @@ export const runs = pgTable(
     index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
     index("idx_runs_goal_org").on(table.goal, table.organizationId),
     index("idx_runs_brand_profile").on(table.brandProfileId),
-    index("idx_runs_customer_profile").on(table.customerProfileId),
+    index("idx_runs_audience").on(table.audienceId),
     uniqueIndex("idx_runs_idempotency_key")
       .on(table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
@@ -59,7 +59,7 @@ export const runsCosts = pgTable(
     status: text("status").notNull().default("actual"),
     goal: text("goal"),
     brandProfileId: text("brand_profile_id"),
-    customerProfileId: text("customer_profile_id"),
+    audienceId: text("audience_id"),
     workflowContext: text("workflow_context"),
     idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -70,7 +70,7 @@ export const runsCosts = pgTable(
     index("idx_runs_costs_created_at").on(table.createdAt),
     index("idx_runs_costs_goal").on(table.goal),
     index("idx_runs_costs_brand_profile").on(table.brandProfileId),
-    index("idx_runs_costs_customer_profile").on(table.customerProfileId),
+    index("idx_runs_costs_audience").on(table.audienceId),
     uniqueIndex("idx_runs_costs_idempotency_key")
       .on(table.runId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),

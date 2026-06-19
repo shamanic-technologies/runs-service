@@ -29,7 +29,7 @@ export type Identity = {
   featureSlug?: string | null;
   goal?: string | null;
   brandProfileId?: string | null;
-  customerProfileId?: string | null;
+  audienceId?: string | null;
   workflowContext?: string | null;
 };
 
