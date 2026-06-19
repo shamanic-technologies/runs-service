@@ -16,6 +16,7 @@ import {
   newCostId,
   type Identity,
 } from "../services/bronze.js";
+import { costAttribution, requestAttribution } from "../services/attribution.js";
 import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
@@ -33,7 +34,20 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       return;
     }
 
-    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
+    const {
+      brandIds,
+      campaignId,
+      workflowSlug,
+      featureSlug,
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+      serviceName,
+      taskName,
+      idempotencyKey,
+    } = parsed.data;
 
     if (idempotencyKey) {
       const [existing] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
@@ -51,6 +65,13 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
     }
 
     const id = newRunId();
+    const attribution = requestAttribution(req, {
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+    });
     const identity: Identity = {
       orgId: req.orgId ?? null,
       userId: req.userId ?? null,
@@ -58,6 +79,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       campaignId: req.headerCampaignId ?? campaignId ?? null,
       workflowSlug: req.headerWorkflowSlug ?? workflowSlug ?? null,
       featureSlug: req.headerFeatureSlug ?? featureSlug ?? null,
+      ...attribution,
     };
     const payload = {
       runId: id,
@@ -68,6 +90,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       campaignId: req.headerCampaignId ?? campaignId ?? null,
       workflowSlug: req.headerWorkflowSlug ?? workflowSlug ?? null,
       featureSlug: req.headerFeatureSlug ?? featureSlug ?? null,
+      ...attribution,
       serviceName,
       taskName,
       idempotencyKey: idempotencyKey ?? null,
@@ -168,6 +191,7 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
     const newRows = await db.transaction(async (tx) => {
       for (const { item, costId, total } of itemsToCreate) {
         const unitCost = costMap.get(item.costName)!;
+        const attribution = costAttribution(item, req, run);
         await logCostLifecycle(tx, {
           runId: id,
           costId,
@@ -180,11 +204,17 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
             unitCostInUsdCents: unitCost,
             totalCostInUsdCents: total,
             status: item.status ?? "actual",
+            ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },
           identity: {
             orgId: run.organizationId,
             userId: run.userId,
+            brandIds: run.brandIds,
+            campaignId: run.campaignId,
+            workflowSlug: run.workflowSlug,
+            featureSlug: run.featureSlug,
+            ...attribution,
           },
           idempotencyKey: item.idempotencyKey ?? null,
         });
@@ -240,7 +270,18 @@ router.patch("/v1/platform-runs/:id", requirePlatformAuth, async (req, res) => {
         runId: id,
         eventType,
         payload: { from: existing.status, to: status },
-        identity: { orgId: existing.organizationId, userId: existing.userId },
+        identity: {
+          orgId: existing.organizationId,
+          userId: existing.userId,
+          brandIds: existing.brandIds,
+          campaignId: existing.campaignId,
+          workflowSlug: existing.workflowSlug,
+          featureSlug: existing.featureSlug,
+          goal: existing.goal,
+          brandProfileId: existing.brandProfileId,
+          audienceId: existing.audienceId,
+          workflowContext: existing.workflowContext,
+        },
         sourceService: req.platformServiceName ?? null,
       });
       const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);

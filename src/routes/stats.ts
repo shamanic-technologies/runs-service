@@ -30,9 +30,25 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   workflowSlug: "r.workflow_slug",
   campaignId: "r.campaign_id",
   featureSlug: "r.feature_slug",
+  goal: "COALESCE(rc.goal, r.goal)",
+  brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id)",
+  audienceId: "COALESCE(rc.audience_id, r.audience_id)",
+  // Deprecated alias — same underlying column, kept until consumers migrate.
+  customerProfileId: "COALESCE(rc.audience_id, r.audience_id)",
+  workflowContext: "COALESCE(rc.workflow_context, r.workflow_context)",
   serviceName: "r.service_name",
   taskName: "r.task_name",
   costName: "rc.cost_name",
+};
+
+const SELECT_COLUMNS: Record<string, string> = {
+  goal: "COALESCE(rc.goal, r.goal) AS goal",
+  brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id) AS brand_profile_id",
+  audienceId: "COALESCE(rc.audience_id, r.audience_id) AS audience_id",
+  // Deprecated alias — same column, legacy result-column name so consumers
+  // still grouping by customerProfileId get the key they expect.
+  customerProfileId: "COALESCE(rc.audience_id, r.audience_id) AS customer_profile_id",
+  workflowContext: "COALESCE(rc.workflow_context, r.workflow_context) AS workflow_context",
 };
 
 // Maps groupBy keys to the result column name in the SQL result row.
@@ -41,6 +57,11 @@ const RESULT_COL_NAMES: Record<string, string> = {
   workflowSlug: "workflow_slug",
   campaignId: "campaign_id",
   featureSlug: "feature_slug",
+  goal: "goal",
+  brandProfileId: "brand_profile_id",
+  audienceId: "audience_id",
+  customerProfileId: "customer_profile_id",
+  workflowContext: "workflow_context",
   serviceName: "service_name",
   taskName: "task_name",
   costName: "cost_name",
@@ -67,6 +88,12 @@ function buildFilterSql(
     workflowSlugs?: string[];
     featureSlug?: string;
     featureSlugs?: string[];
+    goal?: string;
+    brandProfileId?: string;
+    audienceId?: string;
+    customerProfileId?: string;
+    workflowContext?: string;
+    attributionStatus?: string;
     serviceName?: string;
     taskName?: string;
     startedAfter?: string;
@@ -83,6 +110,22 @@ function buildFilterSql(
     parts.push(sql`r.feature_slug IN (${sql.join(filters.featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
   } else if (filters.featureSlug) {
     parts.push(sql`r.feature_slug = ${filters.featureSlug}`);
+  }
+
+  if (filters.goal) parts.push(sql`COALESCE(rc.goal, r.goal) = ${filters.goal}`);
+  if (filters.brandProfileId) parts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${filters.brandProfileId}`);
+  // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+  const audienceFilter = filters.audienceId ?? filters.customerProfileId;
+  if (audienceFilter) parts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
+  if (filters.workflowContext) parts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${filters.workflowContext}`);
+  if (filters.attributionStatus === "tagged") {
+    parts.push(sql`(
+      COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NOT NULL
+      OR COALESCE(rc.audience_id, r.audience_id) IS NOT NULL
+    )`);
+  } else if (filters.attributionStatus === "unattributed") {
+    parts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NULL`);
+    parts.push(sql`COALESCE(rc.audience_id, r.audience_id) IS NULL`);
   }
 
   // Workflow slug filtering: resolved dynasty slugs > comma-separated > single slug
@@ -203,6 +246,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       workflowDynastySlug,
       featureSlug,
       featureSlugs: featureSlugsParam,
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+      attributionStatus,
       serviceName,
       taskName,
       startedAfter,
@@ -211,6 +260,11 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     if (!groupBy) {
       res.status(400).json({ error: "groupBy is required" });
+      return;
+    }
+
+    if (attributionStatus && !["all", "tagged", "unattributed"].includes(attributionStatus)) {
+      res.status(400).json({ error: "Invalid attributionStatus. Allowed: all, tagged, unattributed" });
       return;
     }
 
@@ -245,7 +299,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     const uniqueSqlGroupByKeys = [...new Set(sqlGroupByKeys)];
 
     const groupByCols = uniqueSqlGroupByKeys.map((k) => GROUP_BY_COLUMNS[k]);
-    const selectCols = groupByCols.map((col) => sql.raw(col));
+    const selectCols = uniqueSqlGroupByKeys.map((k) => sql.raw(SELECT_COLUMNS[k] ?? GROUP_BY_COLUMNS[k]));
     const groupByClause = sql.raw(groupByCols.join(", "));
     const hasCostName = groupByKeys.includes("costName");
 
@@ -256,6 +310,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       workflowSlugs: dynastyFilters.workflowSlugs,
       featureSlug,
       featureSlugs: dynastyFilters.featureSlugs,
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+      attributionStatus,
       serviceName,
       taskName,
       startedAfter,
@@ -337,6 +397,12 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       workflowSlugs,
       featureSlug,
       featureSlugs,
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+      attributionStatus,
       startedAfter,
       startedBefore,
       serviceTasks,
@@ -350,12 +416,16 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       });
       return;
     }
+    if (attributionStatus && !["all", "tagged", "unattributed"].includes(attributionStatus)) {
+      res.status(400).json({ error: "Invalid attributionStatus. Allowed: all, tagged, unattributed" });
+      return;
+    }
 
     // Discriminator dims = service_name + task_name, plus user-requested groupBy
     const userDimKeys = [...new Set(groupByKeys)];
     const allDimKeys = [...new Set(["serviceName", "taskName", ...userDimKeys])];
     const groupByCols = allDimKeys.map((k) => GROUP_BY_COLUMNS[k]);
-    const selectCols = groupByCols.map((col) => sql.raw(col));
+    const selectCols = allDimKeys.map((k) => sql.raw(SELECT_COLUMNS[k] ?? GROUP_BY_COLUMNS[k]));
     const groupByClause = sql.raw(groupByCols.join(", "));
     const hasCostName = groupByKeys.includes("costName");
 
@@ -366,6 +436,21 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       baseWhereParts.push(sql`r.feature_slug IN (${sql.join(featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
     } else if (featureSlug) {
       baseWhereParts.push(sql`r.feature_slug = ${featureSlug}`);
+    }
+    if (goal) baseWhereParts.push(sql`COALESCE(rc.goal, r.goal) = ${goal}`);
+    if (brandProfileId) baseWhereParts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${brandProfileId}`);
+    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+    const audienceFilter = audienceId ?? customerProfileId;
+    if (audienceFilter) baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
+    if (workflowContext) baseWhereParts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${workflowContext}`);
+    if (attributionStatus === "tagged") {
+      baseWhereParts.push(sql`(
+        COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NOT NULL
+        OR COALESCE(rc.audience_id, r.audience_id) IS NOT NULL
+      )`);
+    } else if (attributionStatus === "unattributed") {
+      baseWhereParts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NULL`);
+      baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) IS NULL`);
     }
     if (workflowSlugs && workflowSlugs.length > 0) {
       baseWhereParts.push(sql`r.workflow_slug IN (${sql.join(workflowSlugs.map((n) => sql`${n}`), sql`, `)})`);

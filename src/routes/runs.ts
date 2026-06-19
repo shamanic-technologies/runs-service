@@ -18,6 +18,12 @@ import {
   type Identity,
 } from "../services/bronze.js";
 import {
+  attributionConflicts,
+  costAttribution,
+  inheritAttribution,
+  requestAttribution,
+} from "../services/attribution.js";
+import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
@@ -67,7 +73,20 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       return;
     }
 
-    const { brandIds, campaignId, workflowSlug, featureSlug, serviceName, taskName, idempotencyKey } = parsed.data;
+    const {
+      brandIds,
+      campaignId,
+      workflowSlug,
+      featureSlug,
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+      serviceName,
+      taskName,
+      idempotencyKey,
+    } = parsed.data;
     const parentRunId = req.runId || null;
 
     // Idempotency pre-check
@@ -96,6 +115,13 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     let resolvedFeatureSlug = req.headerFeatureSlug || featureSlug || null;
     let resolvedOrgId = req.orgId;
     let resolvedUserId = req.userId || null;
+    let resolvedAttribution = requestAttribution(req, {
+      goal,
+      brandProfileId,
+      audienceId,
+      customerProfileId,
+      workflowContext,
+    });
 
     if (parentRunId) {
       const [parentRun] = await db
@@ -104,6 +130,10 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           campaignId: runs.campaignId,
           workflowSlug: runs.workflowSlug,
           featureSlug: runs.featureSlug,
+          goal: runs.goal,
+          brandProfileId: runs.brandProfileId,
+          audienceId: runs.audienceId,
+          workflowContext: runs.workflowContext,
           organizationId: runs.organizationId,
           userId: runs.userId,
         })
@@ -139,6 +169,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (resolvedUserId && parentRun.userId && resolvedUserId !== parentRun.userId) {
         conflicts.push(`userId: request="${resolvedUserId}" vs parent="${parentRun.userId}"`);
       }
+      conflicts.push(...attributionConflicts(resolvedAttribution, parentRun));
 
       if (conflicts.length > 0) {
         console.error(`[runs-service] Parent-child conflict on run ${parentRunId}: ${conflicts.join(", ")}`);
@@ -151,6 +182,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
       if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
       if (!resolvedUserId) resolvedUserId = parentRun.userId;
+      resolvedAttribution = inheritAttribution(resolvedAttribution, parentRun);
     }
 
     const identity: Identity = {
@@ -160,6 +192,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       campaignId: resolvedCampaignId,
       workflowSlug: resolvedWorkflowSlug,
       featureSlug: resolvedFeatureSlug,
+      ...resolvedAttribution,
     };
 
     const id = newRunId();
@@ -172,6 +205,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       campaignId: resolvedCampaignId,
       workflowSlug: resolvedWorkflowSlug,
       featureSlug: resolvedFeatureSlug,
+      ...resolvedAttribution,
       serviceName,
       taskName,
       idempotencyKey: idempotencyKey ?? null,
@@ -335,6 +369,10 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
         r.service_name,
         r.task_name,
         r.status,
+        r.goal,
+        r.brand_profile_id,
+        r.audience_id,
+        r.workflow_context,
         r.started_at,
         r.completed_at
       FROM walk w
@@ -417,6 +455,10 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
           serviceName: d.service_name,
           taskName: d.task_name,
           status: d.status,
+          goal: d.goal,
+          brandProfileId: d.brand_profile_id,
+          audienceId: d.audience_id,
+          workflowContext: d.workflow_context,
           startedAt: d.started_at,
           completedAt: d.completed_at,
           costs: dCosts,
@@ -491,10 +533,14 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     // Descendant rows for the response shape (parent's view of children).
     const descendantResult = await db.execute(
       sql`WITH RECURSIVE descendants AS (
-        SELECT id, parent_run_id, service_name, task_name, status, started_at, completed_at
+        SELECT id, parent_run_id, service_name, task_name, status,
+               goal, brand_profile_id, audience_id, workflow_context,
+               started_at, completed_at
         FROM runs WHERE parent_run_id = ${id}
         UNION ALL
-        SELECT r.id, r.parent_run_id, r.service_name, r.task_name, r.status, r.started_at, r.completed_at
+        SELECT r.id, r.parent_run_id, r.service_name, r.task_name, r.status,
+               r.goal, r.brand_profile_id, r.audience_id, r.workflow_context,
+               r.started_at, r.completed_at
         FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
       )
       SELECT * FROM descendants`
@@ -536,6 +582,10 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         serviceName: r.service_name,
         taskName: r.task_name,
         status: r.status,
+        goal: r.goal,
+        brandProfileId: r.brand_profile_id,
+        audienceId: r.audience_id,
+        workflowContext: r.workflow_context,
         startedAt: r.started_at,
         completedAt: r.completed_at,
         costs: runCosts,
@@ -613,15 +663,6 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       throw err;
     }
 
-    const identity: Identity = {
-      orgId: req.orgId,
-      userId: req.userId || run.userId,
-      brandIds: req.headerBrandIds ?? null,
-      campaignId: req.headerCampaignId ?? null,
-      workflowSlug: req.headerWorkflowSlug ?? null,
-      featureSlug: req.headerFeatureSlug ?? null,
-    };
-
     // Idempotency dedupe for per-item keys — re-fetch existing silver rows
     // for keys that already exist; never emit duplicate bronze events for those.
     const keyed = items.filter((i) => i.idempotencyKey);
@@ -645,6 +686,16 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     const newRows = await db.transaction(async (tx) => {
       for (const { item, costId, total } of itemsToCreate) {
         const unitCost = costMap.get(item.costName)!;
+        const attribution = costAttribution(item, req, run);
+        const identity: Identity = {
+          orgId: req.orgId,
+          userId: req.userId || run.userId,
+          brandIds: req.headerBrandIds ?? run.brandIds ?? null,
+          campaignId: req.headerCampaignId ?? run.campaignId ?? null,
+          workflowSlug: req.headerWorkflowSlug ?? run.workflowSlug ?? null,
+          featureSlug: req.headerFeatureSlug ?? run.featureSlug ?? null,
+          ...attribution,
+        };
         await logCostLifecycle(tx, {
           runId: id,
           costId,
@@ -657,6 +708,7 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
             unitCostInUsdCents: unitCost,
             totalCostInUsdCents: total,
             status: item.status ?? "actual",
+            ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },
           identity,
@@ -756,10 +808,14 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         identity: {
           orgId: req.orgId,
           userId: req.userId || run.userId,
-          brandIds: req.headerBrandIds ?? null,
-          campaignId: req.headerCampaignId ?? null,
-          workflowSlug: req.headerWorkflowSlug ?? null,
-          featureSlug: req.headerFeatureSlug ?? null,
+          brandIds: req.headerBrandIds ?? run.brandIds ?? null,
+          campaignId: req.headerCampaignId ?? run.campaignId ?? null,
+          workflowSlug: req.headerWorkflowSlug ?? run.workflowSlug ?? null,
+          featureSlug: req.headerFeatureSlug ?? run.featureSlug ?? null,
+          goal: existing.goal,
+          brandProfileId: existing.brandProfileId,
+          audienceId: existing.audienceId,
+          workflowContext: existing.workflowContext,
         },
       });
       const [row] = await tx
@@ -822,6 +878,14 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
         identity: {
           orgId: req.orgId,
           userId: req.userId || existing.userId,
+          brandIds: existing.brandIds,
+          campaignId: existing.campaignId,
+          workflowSlug: existing.workflowSlug,
+          featureSlug: existing.featureSlug,
+          goal: existing.goal,
+          brandProfileId: existing.brandProfileId,
+          audienceId: existing.audienceId,
+          workflowContext: existing.workflowContext,
         },
       });
       const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
@@ -845,7 +909,8 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      userId, brandId, campaignId, workflowSlug, featureSlug, serviceName, taskName,
+      userId, brandId, campaignId, workflowSlug, featureSlug, goal, brandProfileId,
+      audienceId, customerProfileId, workflowContext, serviceName, taskName,
       status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
 
@@ -855,6 +920,12 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
     if (workflowSlug) conditions.push(eq(runs.workflowSlug, workflowSlug as string));
     if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
+    if (goal) conditions.push(eq(runs.goal, goal as string));
+    if (brandProfileId) conditions.push(eq(runs.brandProfileId, brandProfileId as string));
+    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+    const audienceFilter = (audienceId ?? customerProfileId) as string | undefined;
+    if (audienceFilter) conditions.push(eq(runs.audienceId, audienceFilter));
+    if (workflowContext) conditions.push(eq(runs.workflowContext, workflowContext as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
     if (status) conditions.push(eq(runs.status, status as string));
@@ -876,6 +947,10 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         campaignId: runs.campaignId,
         workflowSlug: runs.workflowSlug,
         featureSlug: runs.featureSlug,
+        goal: runs.goal,
+        brandProfileId: runs.brandProfileId,
+        audienceId: runs.audienceId,
+        workflowContext: runs.workflowContext,
         serviceName: runs.serviceName,
         taskName: runs.taskName,
         status: runs.status,
@@ -893,6 +968,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       .groupBy(
         runs.id, runs.parentRunId, runs.organizationId, runs.userId, runs.brandIds,
         runs.campaignId, runs.workflowSlug, runs.featureSlug, runs.serviceName, runs.taskName,
+        runs.goal, runs.brandProfileId, runs.audienceId, runs.workflowContext,
         runs.status, runs.startedAt, runs.completedAt, runs.createdAt, runs.updatedAt,
       )
       .orderBy(desc(runs.startedAt));

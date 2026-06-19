@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GOALS = new Set(["signup", "meetingBooked", "purchase"]);
 
 declare global {
   namespace Express {
@@ -13,6 +14,12 @@ declare global {
       headerCampaignId?: string;
       headerWorkflowSlug?: string;
       headerFeatureSlug?: string;
+      headerGoal?: string;
+      headerBrandProfileId?: string;
+      headerAudienceId?: string;
+      /** @deprecated Legacy alias for headerAudienceId (x-customer-profile-id). */
+      headerCustomerProfileId?: string;
+      headerWorkflowContext?: string;
     }
   }
 }
@@ -37,6 +44,46 @@ function extractWorkflowHeaders(req: Request, res: Response): boolean {
 
   const featureSlug = req.headers["x-feature-slug"] as string | undefined;
   if (featureSlug) req.headerFeatureSlug = featureSlug;
+
+  const goal = req.headers["x-goal"] as string | undefined;
+  if (goal) {
+    if (!GOALS.has(goal)) {
+      res.status(400).json({ error: "x-goal header must be one of: signup, meetingBooked, purchase" });
+      return false;
+    }
+    req.headerGoal = goal;
+  }
+
+  const brandProfileId = req.headers["x-brand-profile-id"] as string | undefined;
+  if (brandProfileId) {
+    if (!UUID_RE.test(brandProfileId)) {
+      res.status(400).json({ error: "x-brand-profile-id header must be a valid UUID" });
+      return false;
+    }
+    req.headerBrandProfileId = brandProfileId;
+  }
+
+  const audienceId = req.headers["x-audience-id"] as string | undefined;
+  if (audienceId) {
+    if (!UUID_RE.test(audienceId)) {
+      res.status(400).json({ error: "x-audience-id header must be a valid UUID" });
+      return false;
+    }
+    req.headerAudienceId = audienceId;
+  }
+
+  // Deprecated alias — kept until consumers migrate to x-audience-id.
+  const customerProfileId = req.headers["x-customer-profile-id"] as string | undefined;
+  if (customerProfileId) {
+    if (!UUID_RE.test(customerProfileId)) {
+      res.status(400).json({ error: "x-customer-profile-id header must be a valid UUID" });
+      return false;
+    }
+    req.headerCustomerProfileId = customerProfileId;
+  }
+
+  const workflowContext = req.headers["x-workflow-context"] as string | undefined;
+  if (workflowContext) req.headerWorkflowContext = workflowContext;
 
   return true;
 }
