@@ -115,8 +115,8 @@ Industry-standard event-sourcing + projection layout per Kleppmann (log = source
 |-------|---------------|--------|
 | **Bronze** | `run_lifecycle_events`, `cost_lifecycle_events` (migration 0018) | Live source of truth. Every mutating handler writes here. |
 | **Silver** | `runs`, `runs_costs`, `run_events` | Projection cache. Maintained by `project_run_lifecycle_to_silver` and `project_cost_lifecycle_to_silver` triggers (migration 0020). **App code MUST NOT INSERT/UPDATE these tables directly** (except `tests/helpers/test-db.ts` for test setup, and `POST /internal/transfer-brand` which is tracked as a follow-up). |
-| **Gold** | `v_runs_with_descendants`, `v_run_cost_rollup`, `v_org_platform_spend` (migration 0019) | Read by `POST /v1/runs/costs/batch`, `GET /v1/runs/:id`, `GET /internal/org-usage-total`. |
-| **Semantic predicates** | `runs_costs.is_platform_projected`, `runs_costs.is_platform_committed` (migration 0017) | Generated boolean columns. Used by `GET /internal/runs-expected-totals` and `v_org_platform_spend`. |
+| **Gold** | **Inline bounded recursive CTEs** via the shared SUM-CASE builder in `src/services/cost-aggregator.ts` (NOT views). | Descendant cost rollup read by `POST /v1/runs/costs/batch`, `POST /v1/runs/batch`, `GET /v1/runs/:id`; org spend by `GET /internal/org-usage-total`. See "Gold = bounded CTE, never a view" below. |
+| **Semantic predicates** | `runs_costs.is_platform_projected`, `runs_costs.is_platform_committed` (migration 0017) | Generated boolean columns + partial indexes. The single source for the platform-spend predicate, used by every gold rollup + `GET /internal/runs-expected-totals`. |
 
 ### Doctrine
 
@@ -124,8 +124,8 @@ Industry-standard event-sourcing + projection layout per Kleppmann (log = source
 - **Domain events, not property sourcing.** Event types: `run.created | run.completed | run.failed | cost.added | cost.materialized | cost.cancelled`. Not `field_updated(field='status')`.
 - **Events store delta + reason in `payload`, never the full aggregate** (avoid the "fat event" anti-pattern). `run.created` and `cost.added` carry the canonical row spec so the projection trigger can populate silver.
 - **Idempotent HTTP replays (200 path) do NOT write bronze** — bronze captures state changes, not HTTP traffic. Dedupe happens BEFORE the bronze write via the existing idempotency-key pre-check.
-- **All cost math stays in Postgres.** Generated columns + views encode the semantic predicates once. **Never** copy `cost_source='platform' AND status IN ('actual','provisioned')` as an inline literal — use `is_platform_projected` or the view that already does. Same for `cost_source='platform' AND status='actual'` → `is_platform_committed`.
-- **Gold views are read-only.** Never INSERT/UPDATE/DELETE through them.
+- **All cost math stays in Postgres.** Generated columns encode the semantic predicates once. **Never** copy `cost_source='platform' AND status IN ('actual','provisioned')` as an inline literal — use the `is_platform_projected` generated column. Same for `cost_source='platform' AND status='actual'` → `is_platform_committed`.
+- **Gold = bounded recursive CTE on read, never a view.** A plain VIEW is structurally wrong for a parametrised subtree rollup: an unbounded anchor (`SELECT id FROM runs`) forces PG to materialise the FULL recursive closure before any `WHERE root_run_id = $1` filter (PG can't push a predicate through a recursive CTE + GROUP BY). The 0019 gold views did exactly this and OOMed prod Neon to 20+ GB / 5+ CU on single-run lookups; they were unread after the `df9230e` revert and dropped in migration 0026. Read paths use inline recursive CTEs anchored on `WHERE id = $1` / `id IN (runIds)`, so PG only walks descendants of the requested roots (indexed by `idx_runs_parent`). The SUM-CASE aggregation is shared via `src/services/cost-aggregator.ts` — new rollup sites import it, never re-define a view. If O(1) reads are ever needed at scale, the correct gold is a materialised closure/rollup TABLE maintained on write, not a view.
 - **`UpdateCostRequestSchema` only accepts `actual | cancelled`.** Re-provisioning an actual row has no domain meaning. Phase 5 narrowed the PATCH cost contract.
 - **`POST /internal/transfer-brand` still mutates silver directly** (no domain event yet). Tracked as a follow-up.
 
@@ -143,13 +143,14 @@ Idempotent. DISABLES projection triggers during execution so synthetic events do
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | Generated cols + bronze tables + gold views | ✅ Merged (#129) |
+| 1 | Generated cols + bronze tables + gold views | ✅ Merged (#129) — gold views later dropped (0026), see below |
 | 2 | Bronze writes from handlers | ✅ Merged (#130) |
 | 3 | Backfill script | ✅ Merged (#130) (manual invocation post-deploy) |
-| 4 | Read swap to gold views | ✅ Merged (#130) |
+| 4 | Read swap to gold views | ⚠️ Merged (#130), then REVERTED (`df9230e`) — views OOMed prod; reads use inline bounded CTEs |
 | 5 | Trigger projects silver from bronze | ✅ Merged (#130) |
 | 6 | Rename silver to `_old` + auto-updatable view shim | ✅ This PR |
 | 7 | Drop `_old` tables + view shim | ⏳ Deferred (user-driven, days/weeks later) |
+| — | Drop dead gold views (`v_run_cost_rollup`, `v_org_platform_spend`, `v_runs_with_descendants`) | ✅ Migration 0026 — unread since `df9230e`; gold is now bounded-CTE-on-read |
 
 ### Phase 6 specifics — view shim, not naked rename
 
@@ -157,7 +158,7 @@ Idempotent. DISABLES projection triggers during execution so synthetic events do
 
 - **Zero code change.** Drizzle schema target stays `runs` / `runs_costs`. ~17 raw-SQL references in routes + ~9 in tests keep working.
 - **Trigger function bodies stay intact.** `INSERT INTO runs` from `project_run_lifecycle_to_silver` forwards through the view to `runs_old` because auto-updatable views support write-through including `ON CONFLICT (id) DO NOTHING`.
-- **Gold views auto-follow via OID.** No view recreation needed.
+- **Gold views auto-followed via OID** at the time of Phase 6 (no view recreation needed). Those gold views have since been dropped (migration 0026); the view shim over `runs_old` / `runs_costs_old` is unaffected.
 - **Visible sunset signal in psql / Drizzle Studio.** `\d+ runs` shows VIEW (deprecated wrapper). `\d+ runs_old` shows BASE TABLE (live). Anyone connecting directly knows where the action is.
 
 Auto-updatability requires: single-table reference, no aggregates / joins / DISTINCT / GROUP BY / LIMIT. `SELECT * FROM runs_old` qualifies.
@@ -166,9 +167,9 @@ Auto-updatability requires: single-table reference, no aggregates / joins / DIST
 
 A column change on the live silver tables ripples through the shim — get the order right:
 
-- **Rename a column:** a base-table `ALTER TABLE runs_old RENAME COLUMN x TO y` does **NOT** propagate to the `runs` view's output column — a `SELECT *` view freezes its output column names at creation time (verified on PG 17). You MUST rename it on BOTH the base table and the view: `ALTER TABLE runs_old RENAME COLUMN x TO y;` then `ALTER TABLE runs RENAME COLUMN x TO y;`. `ALTER TABLE <view> RENAME COLUMN` works on views, is metadata-only, and does **NOT** drop the view — so the gold views that `SELECT FROM runs` / `runs_costs` (`v_runs_with_descendants`, `v_run_cost_rollup`, `v_org_platform_spend`) are left untouched. Do NOT `DROP`/`CREATE OR REPLACE` the shim to rename a column: `CREATE OR REPLACE VIEW` can only append columns (not rename/reorder), and a `DROP` is blocked by the gold-view dependency (or would CASCADE into the cost-rollup read path). Also update any projection-trigger function bodies that reference the column + payload key (add a `COALESCE(NEW.payload->>'newKey', NEW.payload->>'oldKey')` fallback for replay of pre-rename bronze events). Reference: migration 0025 (`customer_profile_id` → `audience_id`).
+- **Rename a column:** a base-table `ALTER TABLE runs_old RENAME COLUMN x TO y` does **NOT** propagate to the `runs` view's output column — a `SELECT *` view freezes its output column names at creation time (verified on PG 17). You MUST rename it on BOTH the base table and the view: `ALTER TABLE runs_old RENAME COLUMN x TO y;` then `ALTER TABLE runs RENAME COLUMN x TO y;`. `ALTER TABLE <view> RENAME COLUMN` works on views, is metadata-only, and does **NOT** drop the view. Do NOT `DROP`/`CREATE OR REPLACE` the shim to rename a column: `CREATE OR REPLACE VIEW` can only append columns (not rename/reorder), and a naked `DROP` would CASCADE into whatever reads the shim. (As of migration 0026 the gold views `v_runs_with_descendants` / `v_run_cost_rollup` / `v_org_platform_spend` no longer exist, so they are no longer a DROP-blocker — but the rename-on-both rule still holds because the shim is still a `SELECT *` view.) Also update any projection-trigger function bodies that reference the column + payload key (add a `COALESCE(NEW.payload->>'newKey', NEW.payload->>'oldKey')` fallback for replay of pre-rename bronze events). Reference: migration 0025 (`customer_profile_id` → `audience_id`).
 - **Add a column:** add it to the base table, then `CREATE OR REPLACE VIEW runs AS SELECT * FROM runs_old` (append is allowed) — see migration 0024.
-- The gold views read from the `runs` / `runs_costs` **views** (not the base tables directly), so the shim is a hard dependency — never drop it without `CASCADE`-auditing the gold layer first.
+- The gold views that used to read from the `runs` / `runs_costs` **views** were dropped in migration 0026; the shim now has no gold-layer dependents. Still `CASCADE`-audit before dropping the shim — the projection triggers and raw-SQL routes write through it.
 
 ## CI status checks ↔ branch protection
 
