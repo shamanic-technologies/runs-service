@@ -191,8 +191,9 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
   res.json(response);
 });
 
-// Phase 4 — GET /internal/org-usage-total reads from v_org_platform_spend.
-// Single source of truth for the platform-projected predicate.
+// GET /internal/org-usage-total — inline aggregate bounded by org_id, using the
+// is_platform_projected generated col (single source for the platform-projected
+// predicate). Gold view v_org_platform_spend dropped in migration 0026 (OOM).
 router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) => {
   const parsed = OrgUsageTotalQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -203,7 +204,6 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
   const { org_id } = parsed.data;
 
   // Inline aggregate using is_platform_projected generated col + partial index.
-  // Gold view removed (filter pushdown through GROUP BY caused 20+ GB OOM on prod).
   const result = await db.execute(sql`
     SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
       FROM runs r

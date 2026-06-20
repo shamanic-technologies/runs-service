@@ -40,13 +40,14 @@ import {
 const router = Router();
 
 // ---------------------------------------------------------------------------
-// Phase 4 — Org-level platform spend reads from v_org_platform_spend gold view.
-// All math in Postgres. Single source of truth for the platform-projected
-// predicate (uses runs_costs.is_platform_projected generated column).
+// Org-level platform spend. All math in Postgres. Single source of truth for
+// the platform-projected predicate (runs_costs.is_platform_projected generated
+// column + idx_runs_costs_projected partial index).
 // ---------------------------------------------------------------------------
 async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
-  // Inline JOIN with is_platform_projected generated col + partial index.
-  // Gold view v_org_platform_spend removed (filter pushdown unreliable through GROUP BY).
+  // Inline JOIN bounded by org_id. The gold view v_org_platform_spend was
+  // dropped (migration 0026): filter pushdown through its GROUP BY was unreliable
+  // and the sibling v_runs_with_descendants OOMed prod — see df9230e.
   const result = await db.execute(sql`
     SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0)::text AS spent_cents
       FROM runs r
@@ -253,8 +254,10 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /v1/runs/costs/batch — inline bounded recursive CTE.
-// Gold view v_run_cost_rollup removed (PR — unbounded walk caused 20+ GB OOM
-// on production Neon; PG planner couldn't push filter through GROUP BY).
+// Gold view v_run_cost_rollup dropped (migration 0026): its unbounded walk
+// caused 20+ GB OOM on prod Neon (df9230e) because PG can't push the filter
+// through a recursive CTE + GROUP BY. The bounded CTE below only walks
+// descendants of the requested roots.
 // ---------------------------------------------------------------------------
 router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
   try {
@@ -305,9 +308,9 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /v1/runs/batch — fetch N runs with full RunWithCosts shape in one call.
 // Replaces the N × GET /v1/runs/:id fanout in api-service runs-client.
-// Reads from v_run_cost_rollup (rolled-up aggregates) + runs (row data) +
-// runs_costs (own + descendant cost arrays) + v_runs_with_descendants
-// (descendant tree). Constant 4 SQL round-trips regardless of N (up to 10000).
+// Aggregates via inline bounded recursive CTEs (rolled-up cost aggregates +
+// descendant tree) joined to runs (row data) + runs_costs (own + descendant
+// cost arrays). Constant 4 SQL round-trips regardless of N (up to 10000).
 // ---------------------------------------------------------------------------
 router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
   try {
@@ -492,8 +495,8 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 4 — GET /v1/runs/:id reads aggregates from v_run_cost_rollup.
-// computeCostBreakdown JS helper removed; all math in Postgres per
+// GET /v1/runs/:id — cost aggregates (descendants rolled up) via inline bounded
+// recursive CTEs. computeCostBreakdown JS helper removed; all math in Postgres per
 // CLAUDE.md "Cost & billing precision" rule.
 // ---------------------------------------------------------------------------
 router.get("/v1/runs/:id", requireApiKey, async (req, res) => {

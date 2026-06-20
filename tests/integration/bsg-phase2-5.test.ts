@@ -334,8 +334,8 @@ describe("B/S/G substrate — Phase 2-5", () => {
     });
   });
 
-  describe("Phase 4 view-swap parity", () => {
-    it("POST /v1/runs/costs/batch reads from v_run_cost_rollup — descendant totals match", async () => {
+  describe("descendant cost rollup (bounded recursive CTE)", () => {
+    it("POST /v1/runs/costs/batch rolls up descendant totals", async () => {
       const create = await request(app).post("/v1/runs").set(authHeaders).send({ serviceName: "p", taskName: "p" });
       const parentId = create.body.id;
       const child = await request(app)
@@ -364,7 +364,7 @@ describe("B/S/G substrate — Phase 2-5", () => {
       expect(entry.ownActualPlatformCostInUsdCents).toBe("0.1000000000"); // parent only
     });
 
-    it("GET /v1/runs/:id returns rollup that matches v_run_cost_rollup", async () => {
+    it("GET /v1/runs/:id returns rolled-up cost aggregates", async () => {
       const create = await request(app).post("/v1/runs").set(authHeaders).send({ serviceName: "s", taskName: "t" });
       const id = create.body.id;
       await request(app)
@@ -380,7 +380,7 @@ describe("B/S/G substrate — Phase 2-5", () => {
       expect(res.body.childrenCostInUsdCents).toBe("0.0000000000");
     });
 
-    it("GET /internal/org-usage-total reads v_org_platform_spend", async () => {
+    it("GET /internal/org-usage-total sums platform-projected spend", async () => {
       const create = await request(app).post("/v1/runs").set(authHeaders).send({ serviceName: "s", taskName: "t" });
       await request(app)
         .post(`/v1/runs/${create.body.id}/costs`)
