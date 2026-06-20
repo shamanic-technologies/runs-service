@@ -911,7 +911,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
       userId, brandId, campaignId, workflowSlug, featureSlug, goal, brandProfileId,
-      audienceId, customerProfileId, workflowContext, serviceName, taskName,
+      audienceId, workflowContext, serviceName, taskName,
       status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
 
@@ -923,9 +923,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
     if (goal) conditions.push(eq(runs.goal, goal as string));
     if (brandProfileId) conditions.push(eq(runs.brandProfileId, brandProfileId as string));
-    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
-    const audienceFilter = (audienceId ?? customerProfileId) as string | undefined;
-    if (audienceFilter) conditions.push(eq(runs.audienceId, audienceFilter));
+    if (audienceId) conditions.push(eq(runs.audienceId, audienceId as string));
     if (workflowContext) conditions.push(eq(runs.workflowContext, workflowContext as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));

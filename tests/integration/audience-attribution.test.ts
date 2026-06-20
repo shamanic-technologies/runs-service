@@ -262,11 +262,19 @@ describe("audience cost attribution", () => {
     expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
   });
 
-  // --- Read-side backward compatibility: the deprecated customerProfileId
-  // groupBy/filter vocabulary stays accepted on the stats output until
-  // consumers migrate. (Inbound write-path acceptance was removed.) ---
-  describe("legacy customerProfileId alias (read-side groupBy/filter, deprecated)", () => {
-    it("still accepts groupBy=customerProfileId and round-trips the legacy response key", async () => {
+  // --- The deprecated customerProfileId vocabulary is fully removed: no longer
+  // accepted as a groupBy dimension or a filter param on the stats output. ---
+  describe("legacy customerProfileId alias removed (read-side)", () => {
+    it("rejects groupBy=customerProfileId as an invalid dimension", async () => {
+      const res = await request(app)
+        .get(`/v1/stats/costs?groupBy=customerProfileId&brandId=${BRAND_ID}`)
+        .set(authHeaders);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Invalid groupBy/i);
+    });
+
+    it("ignores the legacy customerProfileId filter param (does not narrow results)", async () => {
       const run = await insertTestRun({
         organizationId: ORG_ID,
         serviceName: "workflow-service",
@@ -284,24 +292,15 @@ describe("audience cost attribution", () => {
         audienceId: AUDIENCE_A,
       });
 
-      // Legacy groupBy token: response dimension is keyed `customerProfileId`,
-      // value is the same audience id, sourced from the renamed column.
-      const legacy = await request(app)
-        .get(`/v1/stats/costs?groupBy=customerProfileId&brandId=${BRAND_ID}&featureSlug=cold-email`)
+      // customerProfileId is no longer a recognized filter: passing a non-matching
+      // value must NOT narrow the result (the param is silently ignored, not honored).
+      const res = await request(app)
+        .get(`/v1/stats/costs?groupBy=audienceId&brandId=${BRAND_ID}&featureSlug=cold-email&customerProfileId=${BRAND_ID}`)
         .set(authHeaders);
 
-      expect(legacy.status).toBe(200);
-      expect(legacy.body.groups).toHaveLength(1);
-      expect(legacy.body.groups[0].dimensions.customerProfileId).toBe(AUDIENCE_A);
-      expect(legacy.body.groups[0].totalCostInUsdCents).toBe("1.0000000000");
-
-      // Legacy filter param still narrows to the same column.
-      const filtered = await request(app)
-        .get(`/v1/stats/costs?groupBy=audienceId&brandId=${BRAND_ID}&customerProfileId=${AUDIENCE_A}`)
-        .set(authHeaders);
-      expect(filtered.status).toBe(200);
-      expect(filtered.body.groups).toHaveLength(1);
-      expect(filtered.body.groups[0].dimensions.audienceId).toBe(AUDIENCE_A);
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.audienceId).toBe(AUDIENCE_A);
     });
   });
 });
