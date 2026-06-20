@@ -75,7 +75,6 @@ export const CreateRunRequestSchema = z
     goal: GoalEnum.optional().openapi({ description: "Optional explicit brand runtime goal attribution. Header x-goal takes precedence when present." }),
     brandProfileId: z.string().uuid().optional().openapi({ description: "Optional real brand-profile attribution ID. Header x-brand-profile-id takes precedence when present." }),
     audienceId: z.string().uuid().optional().openapi({ description: "Optional audience attribution ID (human-service org-scoped saved filter-set, audience.id). Header x-audience-id takes precedence when present. Inherited from the parent run when not set." }),
-    customerProfileId: z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use audienceId / x-audience-id. Legacy alias resolved to audienceId during rollout." }),
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
@@ -131,7 +130,6 @@ export const CostItemSchema = z
     goal: GoalEnum.optional().openapi({ description: "Optional per-cost goal attribution override. Omit to inherit the run/header attribution." }),
     brandProfileId: z.string().uuid().optional().openapi({ description: "Optional per-cost brand-profile attribution override. Omit to inherit the run/header attribution." }),
     audienceId: z.string().uuid().optional().openapi({ description: "Optional per-cost audience attribution override (audience.id). Omit to inherit the run/header attribution." }),
-    customerProfileId: z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use audienceId. Legacy alias resolved to audienceId during rollout." }),
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional per-cost workflow-context attribution override. Omit to inherit the run/header attribution." }),
     idempotencyKey: z.string().min(1).max(256).optional().openapi({
       description:
@@ -325,7 +323,6 @@ const WorkflowTrackingHeadersSchema = z.object({
   "x-goal": GoalEnum.optional().openapi({ description: "Brand runtime goal attribution: signup, meetingBooked, or purchase" }),
   "x-brand-profile-id": z.string().uuid().optional().openapi({ description: "Real brand-profile attribution ID" }),
   "x-audience-id": z.string().uuid().optional().openapi({ description: "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree." }),
-  "x-customer-profile-id": z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout." }),
   "x-workflow-context": z.string().optional().openapi({ description: "Stable workflow-context attribution key" }),
 });
 

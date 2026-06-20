@@ -234,12 +234,6 @@
             "format": "uuid",
             "description": "Optional audience attribution ID (human-service org-scoped saved filter-set, audience.id). Header x-audience-id takes precedence when present. Inherited from the parent run when not set."
           },
-          "customerProfileId": {
-            "type": "string",
-            "format": "uuid",
-            "deprecated": true,
-            "description": "Deprecated: use audienceId / x-audience-id. Legacy alias resolved to audienceId during rollout."
-          },
           "workflowContext": {
             "type": "string",
             "minLength": 1,
@@ -720,12 +714,6 @@
             "type": "string",
             "format": "uuid",
             "description": "Optional per-cost audience attribution override (audience.id). Omit to inherit the run/header attribution."
-          },
-          "customerProfileId": {
-            "type": "string",
-            "format": "uuid",
-            "deprecated": true,
-            "description": "Deprecated: use audienceId. Legacy alias resolved to audienceId during rollout."
           },
           "workflowContext": {
             "type": "string",
@@ -1770,18 +1758,6 @@
           {
             "schema": {
               "type": "string",
-              "format": "uuid",
-              "deprecated": true,
-              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
-            },
-            "required": false,
-            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
-            "name": "x-customer-profile-id",
-            "in": "header"
-          },
-          {
-            "schema": {
-              "type": "string",
               "description": "Stable workflow-context attribution key"
             },
             "required": false,
@@ -2233,18 +2209,6 @@
             "required": false,
             "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree.",
             "name": "x-audience-id",
-            "in": "header"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "deprecated": true,
-              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
-            },
-            "required": false,
-            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
-            "name": "x-customer-profile-id",
             "in": "header"
           },
           {
@@ -3258,18 +3222,6 @@
             "required": false,
             "description": "Audience attribution ID (human-service org-scoped saved filter-set, audience.id). Inherited down the run tree.",
             "name": "x-audience-id",
-            "in": "header"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "deprecated": true,
-              "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout."
-            },
-            "required": false,
-            "description": "Deprecated: use x-audience-id. Legacy alias resolved to audienceId during rollout.",
-            "name": "x-customer-profile-id",
             "in": "header"
           },
           {
