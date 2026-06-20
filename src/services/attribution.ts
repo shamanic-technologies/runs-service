@@ -11,8 +11,6 @@ export type AttributionInput = {
   goal?: string | null;
   brandProfileId?: string | null;
   audienceId?: string | null;
-  /** @deprecated Legacy alias for audienceId. Accepted during rollout; resolves to audienceId. */
-  customerProfileId?: string | null;
   workflowContext?: string | null;
 };
 
@@ -20,14 +18,7 @@ export function requestAttribution(req: Request, body: AttributionInput = {}): A
   return {
     goal: req.headerGoal ?? body.goal ?? null,
     brandProfileId: req.headerBrandProfileId ?? body.brandProfileId ?? null,
-    // Canonical x-audience-id / audienceId wins; legacy x-customer-profile-id /
-    // customerProfileId is still honored until consumers migrate.
-    audienceId:
-      req.headerAudienceId ??
-      body.audienceId ??
-      req.headerCustomerProfileId ??
-      body.customerProfileId ??
-      null,
+    audienceId: req.headerAudienceId ?? body.audienceId ?? null,
     workflowContext: req.headerWorkflowContext ?? body.workflowContext ?? null,
   };
 }
@@ -36,7 +27,7 @@ export function inheritAttribution(current: Attribution, parent: AttributionInpu
   return {
     goal: current.goal ?? parent.goal ?? null,
     brandProfileId: current.brandProfileId ?? parent.brandProfileId ?? null,
-    audienceId: current.audienceId ?? parent.audienceId ?? parent.customerProfileId ?? null,
+    audienceId: current.audienceId ?? parent.audienceId ?? null,
     workflowContext: current.workflowContext ?? parent.workflowContext ?? null,
   };
 }
@@ -47,11 +38,8 @@ export function costAttribution(item: AttributionInput, req: Request, run: Attri
     brandProfileId: item.brandProfileId ?? req.headerBrandProfileId ?? run.brandProfileId ?? null,
     audienceId:
       item.audienceId ??
-      item.customerProfileId ??
       req.headerAudienceId ??
-      req.headerCustomerProfileId ??
       run.audienceId ??
-      run.customerProfileId ??
       null,
     workflowContext: item.workflowContext ?? req.headerWorkflowContext ?? run.workflowContext ?? null,
   };
@@ -68,7 +56,7 @@ export function attributionConflicts(
   if (requested.brandProfileId && parent.brandProfileId && requested.brandProfileId !== parent.brandProfileId) {
     conflicts.push(`brandProfileId: request="${requested.brandProfileId}" vs parent="${parent.brandProfileId}"`);
   }
-  const parentAudienceId = parent.audienceId ?? parent.customerProfileId ?? null;
+  const parentAudienceId = parent.audienceId ?? null;
   if (requested.audienceId && parentAudienceId && requested.audienceId !== parentAudienceId) {
     conflicts.push(`audienceId: request="${requested.audienceId}" vs parent="${parentAudienceId}"`);
   }

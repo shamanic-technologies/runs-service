@@ -82,7 +82,6 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
       serviceName,
       taskName,
@@ -120,7 +119,6 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
     });
 
