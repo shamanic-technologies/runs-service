@@ -33,8 +33,6 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   goal: "COALESCE(rc.goal, r.goal)",
   brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id)",
   audienceId: "COALESCE(rc.audience_id, r.audience_id)",
-  // Deprecated alias — same underlying column, kept until consumers migrate.
-  customerProfileId: "COALESCE(rc.audience_id, r.audience_id)",
   workflowContext: "COALESCE(rc.workflow_context, r.workflow_context)",
   serviceName: "r.service_name",
   taskName: "r.task_name",
@@ -45,9 +43,6 @@ const SELECT_COLUMNS: Record<string, string> = {
   goal: "COALESCE(rc.goal, r.goal) AS goal",
   brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id) AS brand_profile_id",
   audienceId: "COALESCE(rc.audience_id, r.audience_id) AS audience_id",
-  // Deprecated alias — same column, legacy result-column name so consumers
-  // still grouping by customerProfileId get the key they expect.
-  customerProfileId: "COALESCE(rc.audience_id, r.audience_id) AS customer_profile_id",
   workflowContext: "COALESCE(rc.workflow_context, r.workflow_context) AS workflow_context",
 };
 
@@ -60,7 +55,6 @@ const RESULT_COL_NAMES: Record<string, string> = {
   goal: "goal",
   brandProfileId: "brand_profile_id",
   audienceId: "audience_id",
-  customerProfileId: "customer_profile_id",
   workflowContext: "workflow_context",
   serviceName: "service_name",
   taskName: "task_name",
@@ -91,7 +85,6 @@ function buildFilterSql(
     goal?: string;
     brandProfileId?: string;
     audienceId?: string;
-    customerProfileId?: string;
     workflowContext?: string;
     attributionStatus?: string;
     serviceName?: string;
@@ -114,9 +107,7 @@ function buildFilterSql(
 
   if (filters.goal) parts.push(sql`COALESCE(rc.goal, r.goal) = ${filters.goal}`);
   if (filters.brandProfileId) parts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${filters.brandProfileId}`);
-  // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
-  const audienceFilter = filters.audienceId ?? filters.customerProfileId;
-  if (audienceFilter) parts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
+  if (filters.audienceId) parts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${filters.audienceId}`);
   if (filters.workflowContext) parts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${filters.workflowContext}`);
   if (filters.attributionStatus === "tagged") {
     parts.push(sql`(
@@ -249,7 +240,6 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
       attributionStatus,
       serviceName,
@@ -313,7 +303,6 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
       attributionStatus,
       serviceName,
@@ -400,7 +389,6 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
       attributionStatus,
       startedAfter,
@@ -439,9 +427,7 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
     }
     if (goal) baseWhereParts.push(sql`COALESCE(rc.goal, r.goal) = ${goal}`);
     if (brandProfileId) baseWhereParts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${brandProfileId}`);
-    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
-    const audienceFilter = audienceId ?? customerProfileId;
-    if (audienceFilter) baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
+    if (audienceId) baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceId}`);
     if (workflowContext) baseWhereParts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${workflowContext}`);
     if (attributionStatus === "tagged") {
       baseWhereParts.push(sql`(

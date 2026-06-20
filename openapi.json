@@ -1116,7 +1116,7 @@
           "groupBy": {
             "type": "string",
             "minLength": 1,
-            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName. (customerProfileId is a deprecated alias for audienceId.) Dynasty groupBy is NOT supported on POST."
+            "description": "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST."
           },
           "brandId": {
             "type": "string"
@@ -1156,12 +1156,6 @@
           "audienceId": {
             "type": "string",
             "format": "uuid"
-          },
-          "customerProfileId": {
-            "type": "string",
-            "format": "uuid",
-            "deprecated": true,
-            "description": "Deprecated: use audienceId."
           },
           "workflowContext": {
             "type": "string"
@@ -1895,18 +1889,6 @@
             },
             "required": false,
             "name": "audienceId",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "deprecated": true,
-              "description": "Deprecated: use audienceId."
-            },
-            "required": false,
-            "description": "Deprecated: use audienceId.",
-            "name": "customerProfileId",
             "in": "query"
           },
           {
@@ -2653,7 +2635,7 @@
     "/v1/stats/costs": {
       "get": {
         "summary": "Aggregate costs with GROUP BY",
-        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). customerProfileId is a deprecated alias for audienceId and still accepted as a groupBy/filter during rollout (response keys mirror the requested token). The attribution dimensions are explicit stored tags only: runs/costs without audienceId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
+        "description": "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). The attribution dimensions are explicit stored tags only: runs/costs without audienceId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
         "security": [
           {
             "apiKey": []
@@ -2764,18 +2746,6 @@
             "required": false,
             "description": "Filter by explicit audience attribution (audience.id). Matches cost override first, then run attribution.",
             "name": "audienceId",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "deprecated": true,
-              "description": "Deprecated: use audienceId. Legacy alias matching the same column during rollout."
-            },
-            "required": false,
-            "description": "Deprecated: use audienceId. Legacy alias matching the same column during rollout.",
-            "name": "customerProfileId",
             "in": "query"
           },
           {
