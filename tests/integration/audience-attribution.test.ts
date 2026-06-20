@@ -262,19 +262,10 @@ describe("audience cost attribution", () => {
     expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
   });
 
-  // --- Backward compatibility during rollout: the deprecated customerProfileId
-  // vocabulary must keep working until features-service migrates. ---
-  describe("legacy customerProfileId alias (deprecated, additive rollout)", () => {
-    it("resolves the legacy x-customer-profile-id header to audienceId on run creation", async () => {
-      const run = await request(app)
-        .post("/v1/runs")
-        .set({ ...authHeaders, "x-customer-profile-id": AUDIENCE_A })
-        .send({ serviceName: "svc", taskName: "task" });
-
-      expect(run.status).toBe(201);
-      expect(run.body.audienceId).toBe(AUDIENCE_A);
-    });
-
+  // --- Read-side backward compatibility: the deprecated customerProfileId
+  // groupBy/filter vocabulary stays accepted on the stats output until
+  // consumers migrate. (Inbound write-path acceptance was removed.) ---
+  describe("legacy customerProfileId alias (read-side groupBy/filter, deprecated)", () => {
     it("still accepts groupBy=customerProfileId and round-trips the legacy response key", async () => {
       const run = await insertTestRun({
         organizationId: ORG_ID,

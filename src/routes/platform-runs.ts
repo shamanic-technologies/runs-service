@@ -42,7 +42,6 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
       serviceName,
       taskName,
@@ -69,7 +68,6 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       goal,
       brandProfileId,
       audienceId,
-      customerProfileId,
       workflowContext,
     });
     const identity: Identity = {
