@@ -80,6 +80,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       featureSlug,
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
       serviceName,
@@ -117,6 +118,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     let resolvedAttribution = requestAttribution(req, {
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
     });
@@ -130,7 +132,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           featureSlug: runs.featureSlug,
           goal: runs.goal,
           brandProfileId: runs.brandProfileId,
-          customerProfileId: runs.customerProfileId,
+          audienceId: runs.audienceId,
           workflowContext: runs.workflowContext,
           organizationId: runs.organizationId,
           userId: runs.userId,
@@ -369,7 +371,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
         r.status,
         r.goal,
         r.brand_profile_id,
-        r.customer_profile_id,
+        r.audience_id,
         r.workflow_context,
         r.started_at,
         r.completed_at
@@ -455,7 +457,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
           status: d.status,
           goal: d.goal,
           brandProfileId: d.brand_profile_id,
-          customerProfileId: d.customer_profile_id,
+          audienceId: d.audience_id,
           workflowContext: d.workflow_context,
           startedAt: d.started_at,
           completedAt: d.completed_at,
@@ -532,12 +534,12 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     const descendantResult = await db.execute(
       sql`WITH RECURSIVE descendants AS (
         SELECT id, parent_run_id, service_name, task_name, status,
-               goal, brand_profile_id, customer_profile_id, workflow_context,
+               goal, brand_profile_id, audience_id, workflow_context,
                started_at, completed_at
         FROM runs WHERE parent_run_id = ${id}
         UNION ALL
         SELECT r.id, r.parent_run_id, r.service_name, r.task_name, r.status,
-               r.goal, r.brand_profile_id, r.customer_profile_id, r.workflow_context,
+               r.goal, r.brand_profile_id, r.audience_id, r.workflow_context,
                r.started_at, r.completed_at
         FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
       )
@@ -582,7 +584,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         status: r.status,
         goal: r.goal,
         brandProfileId: r.brand_profile_id,
-        customerProfileId: r.customer_profile_id,
+        audienceId: r.audience_id,
         workflowContext: r.workflow_context,
         startedAt: r.started_at,
         completedAt: r.completed_at,
@@ -812,7 +814,7 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
           featureSlug: req.headerFeatureSlug ?? run.featureSlug ?? null,
           goal: existing.goal,
           brandProfileId: existing.brandProfileId,
-          customerProfileId: existing.customerProfileId,
+          audienceId: existing.audienceId,
           workflowContext: existing.workflowContext,
         },
       });
@@ -882,7 +884,7 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
           featureSlug: existing.featureSlug,
           goal: existing.goal,
           brandProfileId: existing.brandProfileId,
-          customerProfileId: existing.customerProfileId,
+          audienceId: existing.audienceId,
           workflowContext: existing.workflowContext,
         },
       });
@@ -908,7 +910,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
       userId, brandId, campaignId, workflowSlug, featureSlug, goal, brandProfileId,
-      customerProfileId, workflowContext, serviceName, taskName,
+      audienceId, customerProfileId, workflowContext, serviceName, taskName,
       status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
 
@@ -920,7 +922,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
     if (goal) conditions.push(eq(runs.goal, goal as string));
     if (brandProfileId) conditions.push(eq(runs.brandProfileId, brandProfileId as string));
-    if (customerProfileId) conditions.push(eq(runs.customerProfileId, customerProfileId as string));
+    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+    const audienceFilter = (audienceId ?? customerProfileId) as string | undefined;
+    if (audienceFilter) conditions.push(eq(runs.audienceId, audienceFilter));
     if (workflowContext) conditions.push(eq(runs.workflowContext, workflowContext as string));
     if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
     if (taskName) conditions.push(eq(runs.taskName, taskName as string));
@@ -945,7 +949,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         featureSlug: runs.featureSlug,
         goal: runs.goal,
         brandProfileId: runs.brandProfileId,
-        customerProfileId: runs.customerProfileId,
+        audienceId: runs.audienceId,
         workflowContext: runs.workflowContext,
         serviceName: runs.serviceName,
         taskName: runs.taskName,
@@ -964,7 +968,7 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       .groupBy(
         runs.id, runs.parentRunId, runs.organizationId, runs.userId, runs.brandIds,
         runs.campaignId, runs.workflowSlug, runs.featureSlug, runs.serviceName, runs.taskName,
-        runs.goal, runs.brandProfileId, runs.customerProfileId, runs.workflowContext,
+        runs.goal, runs.brandProfileId, runs.audienceId, runs.workflowContext,
         runs.status, runs.startedAt, runs.completedAt, runs.createdAt, runs.updatedAt,
       )
       .orderBy(desc(runs.startedAt));

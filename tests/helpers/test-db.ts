@@ -28,7 +28,7 @@ export async function insertTestRun(data: {
   featureSlug?: string;
   goal?: string;
   brandProfileId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
   workflowContext?: string;
   userId?: string;
   parentRunId?: string;
@@ -48,7 +48,7 @@ export async function insertTestRun(data: {
       featureSlug: data.featureSlug || null,
       goal: data.goal || null,
       brandProfileId: data.brandProfileId || null,
-      customerProfileId: data.customerProfileId || null,
+      audienceId: data.audienceId || null,
       workflowContext: data.workflowContext || null,
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
@@ -70,7 +70,7 @@ export async function insertTestRunCost(data: {
   status?: string;
   goal?: string;
   brandProfileId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
   workflowContext?: string;
   idempotencyKey?: string;
 }) {

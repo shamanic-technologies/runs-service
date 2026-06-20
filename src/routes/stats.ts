@@ -32,7 +32,9 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
   featureSlug: "r.feature_slug",
   goal: "COALESCE(rc.goal, r.goal)",
   brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id)",
-  customerProfileId: "COALESCE(rc.customer_profile_id, r.customer_profile_id)",
+  audienceId: "COALESCE(rc.audience_id, r.audience_id)",
+  // Deprecated alias — same underlying column, kept until consumers migrate.
+  customerProfileId: "COALESCE(rc.audience_id, r.audience_id)",
   workflowContext: "COALESCE(rc.workflow_context, r.workflow_context)",
   serviceName: "r.service_name",
   taskName: "r.task_name",
@@ -42,7 +44,10 @@ const GROUP_BY_COLUMNS: Record<string, string> = {
 const SELECT_COLUMNS: Record<string, string> = {
   goal: "COALESCE(rc.goal, r.goal) AS goal",
   brandProfileId: "COALESCE(rc.brand_profile_id, r.brand_profile_id) AS brand_profile_id",
-  customerProfileId: "COALESCE(rc.customer_profile_id, r.customer_profile_id) AS customer_profile_id",
+  audienceId: "COALESCE(rc.audience_id, r.audience_id) AS audience_id",
+  // Deprecated alias — same column, legacy result-column name so consumers
+  // still grouping by customerProfileId get the key they expect.
+  customerProfileId: "COALESCE(rc.audience_id, r.audience_id) AS customer_profile_id",
   workflowContext: "COALESCE(rc.workflow_context, r.workflow_context) AS workflow_context",
 };
 
@@ -54,6 +59,7 @@ const RESULT_COL_NAMES: Record<string, string> = {
   featureSlug: "feature_slug",
   goal: "goal",
   brandProfileId: "brand_profile_id",
+  audienceId: "audience_id",
   customerProfileId: "customer_profile_id",
   workflowContext: "workflow_context",
   serviceName: "service_name",
@@ -84,6 +90,7 @@ function buildFilterSql(
     featureSlugs?: string[];
     goal?: string;
     brandProfileId?: string;
+    audienceId?: string;
     customerProfileId?: string;
     workflowContext?: string;
     attributionStatus?: string;
@@ -107,16 +114,18 @@ function buildFilterSql(
 
   if (filters.goal) parts.push(sql`COALESCE(rc.goal, r.goal) = ${filters.goal}`);
   if (filters.brandProfileId) parts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${filters.brandProfileId}`);
-  if (filters.customerProfileId) parts.push(sql`COALESCE(rc.customer_profile_id, r.customer_profile_id) = ${filters.customerProfileId}`);
+  // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+  const audienceFilter = filters.audienceId ?? filters.customerProfileId;
+  if (audienceFilter) parts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
   if (filters.workflowContext) parts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${filters.workflowContext}`);
   if (filters.attributionStatus === "tagged") {
     parts.push(sql`(
       COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NOT NULL
-      OR COALESCE(rc.customer_profile_id, r.customer_profile_id) IS NOT NULL
+      OR COALESCE(rc.audience_id, r.audience_id) IS NOT NULL
     )`);
   } else if (filters.attributionStatus === "unattributed") {
     parts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NULL`);
-    parts.push(sql`COALESCE(rc.customer_profile_id, r.customer_profile_id) IS NULL`);
+    parts.push(sql`COALESCE(rc.audience_id, r.audience_id) IS NULL`);
   }
 
   // Workflow slug filtering: resolved dynasty slugs > comma-separated > single slug
@@ -239,6 +248,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       featureSlugs: featureSlugsParam,
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
       attributionStatus,
@@ -302,6 +312,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       featureSlugs: dynastyFilters.featureSlugs,
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
       attributionStatus,
@@ -388,6 +399,7 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       featureSlugs,
       goal,
       brandProfileId,
+      audienceId,
       customerProfileId,
       workflowContext,
       attributionStatus,
@@ -427,16 +439,18 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
     }
     if (goal) baseWhereParts.push(sql`COALESCE(rc.goal, r.goal) = ${goal}`);
     if (brandProfileId) baseWhereParts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) = ${brandProfileId}`);
-    if (customerProfileId) baseWhereParts.push(sql`COALESCE(rc.customer_profile_id, r.customer_profile_id) = ${customerProfileId}`);
+    // audienceId is canonical; customerProfileId is the deprecated alias on the same column.
+    const audienceFilter = audienceId ?? customerProfileId;
+    if (audienceFilter) baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) = ${audienceFilter}`);
     if (workflowContext) baseWhereParts.push(sql`COALESCE(rc.workflow_context, r.workflow_context) = ${workflowContext}`);
     if (attributionStatus === "tagged") {
       baseWhereParts.push(sql`(
         COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NOT NULL
-        OR COALESCE(rc.customer_profile_id, r.customer_profile_id) IS NOT NULL
+        OR COALESCE(rc.audience_id, r.audience_id) IS NOT NULL
       )`);
     } else if (attributionStatus === "unattributed") {
       baseWhereParts.push(sql`COALESCE(rc.brand_profile_id, r.brand_profile_id) IS NULL`);
-      baseWhereParts.push(sql`COALESCE(rc.customer_profile_id, r.customer_profile_id) IS NULL`);
+      baseWhereParts.push(sql`COALESCE(rc.audience_id, r.audience_id) IS NULL`);
     }
     if (workflowSlugs && workflowSlugs.length > 0) {
       baseWhereParts.push(sql`r.workflow_slug IN (${sql.join(workflowSlugs.map((n) => sql`${n}`), sql`, `)})`);

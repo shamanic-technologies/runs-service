@@ -12,8 +12,8 @@ const ORG_ID = "12121212-1212-4212-9212-121212121212";
 const USER_ID = "23232323-2323-4232-9232-232323232323";
 const BRAND_ID = "34343434-3434-4434-9434-343434343434";
 const BRAND_PROFILE_ID = "45454545-4545-4454-9454-454545454545";
-const CUSTOMER_PROFILE_A = "56565656-5656-4456-9456-565656565656";
-const CUSTOMER_PROFILE_B = "67676767-6767-4467-9467-676767676767";
+const AUDIENCE_A = "56565656-5656-4456-9456-565656565656";
+const AUDIENCE_B = "67676767-6767-4467-9467-676767676767";
 
 vi.mock("../../src/services/cost-resolver.js", () => ({
   resolveMultipleUnitCosts: vi.fn().mockResolvedValue(new Map([["token", "0.0010000000"]])),
@@ -37,7 +37,7 @@ vi.mock("../../src/services/billing.js", () => ({
   notifyUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
-describe("persona/profile cost attribution", () => {
+describe("audience cost attribution", () => {
   const app = createTestApp();
   const authHeaders = getAuthHeaders({ orgId: ORG_ID, userId: USER_ID });
 
@@ -50,7 +50,7 @@ describe("persona/profile cost attribution", () => {
     await closeDb();
   });
 
-  it("preserves run attribution through child runs and lets cost items override it", async () => {
+  it("inherits audience through child runs and lets cost items override it", async () => {
     const parent = await request(app)
       .post("/v1/runs")
       .set({
@@ -58,7 +58,7 @@ describe("persona/profile cost attribution", () => {
         "x-brand-id": BRAND_ID,
         "x-goal": "signup",
         "x-brand-profile-id": BRAND_PROFILE_ID,
-        "x-customer-profile-id": CUSTOMER_PROFILE_A,
+        "x-audience-id": AUDIENCE_A,
         "x-workflow-context": "lead-selection",
       })
       .send({ serviceName: "campaign-service", taskName: "select-workflow", featureSlug: "cold-email" });
@@ -66,9 +66,10 @@ describe("persona/profile cost attribution", () => {
     expect(parent.status).toBe(201);
     expect(parent.body.goal).toBe("signup");
     expect(parent.body.brandProfileId).toBe(BRAND_PROFILE_ID);
-    expect(parent.body.customerProfileId).toBe(CUSTOMER_PROFILE_A);
+    expect(parent.body.audienceId).toBe(AUDIENCE_A);
     expect(parent.body.workflowContext).toBe("lead-selection");
 
+    // Child run created with only the parent run id (no audience header) inherits it.
     const child = await request(app)
       .post("/v1/runs")
       .set({ ...authHeaders, "x-run-id": parent.body.id })
@@ -78,7 +79,7 @@ describe("persona/profile cost attribution", () => {
     expect(child.body.parentRunId).toBe(parent.body.id);
     expect(child.body.goal).toBe("signup");
     expect(child.body.brandProfileId).toBe(BRAND_PROFILE_ID);
-    expect(child.body.customerProfileId).toBe(CUSTOMER_PROFILE_A);
+    expect(child.body.audienceId).toBe(AUDIENCE_A);
     expect(child.body.workflowContext).toBe("lead-selection");
 
     const costs = await request(app)
@@ -91,7 +92,7 @@ describe("persona/profile cost attribution", () => {
             costName: "token",
             costSource: "platform",
             quantity: 250,
-            customerProfileId: CUSTOMER_PROFILE_B,
+            audienceId: AUDIENCE_B,
           },
         ],
       });
@@ -100,11 +101,11 @@ describe("persona/profile cost attribution", () => {
     expect(costs.body.costs).toHaveLength(2);
     const inherited = costs.body.costs[0];
     const overridden = costs.body.costs[1];
-    expect(inherited.customerProfileId).toBe(CUSTOMER_PROFILE_A);
-    expect(overridden.customerProfileId).toBe(CUSTOMER_PROFILE_B);
+    expect(inherited.audienceId).toBe(AUDIENCE_A);
+    expect(overridden.audienceId).toBe(AUDIENCE_B);
   });
 
-  it("aggregates tagged samples separately by customer profile and workflow context", async () => {
+  it("aggregates tagged samples separately by audience and workflow context", async () => {
     const runA = await insertTestRun({
       organizationId: ORG_ID,
       serviceName: "workflow-service",
@@ -113,7 +114,7 @@ describe("persona/profile cost attribution", () => {
       featureSlug: "cold-email",
       goal: "signup",
       brandProfileId: BRAND_PROFILE_ID,
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
       workflowContext: "lead-selection",
     });
     const runB = await insertTestRun({
@@ -124,7 +125,7 @@ describe("persona/profile cost attribution", () => {
       featureSlug: "cold-email",
       goal: "signup",
       brandProfileId: BRAND_PROFILE_ID,
-      customerProfileId: CUSTOMER_PROFILE_B,
+      audienceId: AUDIENCE_B,
       workflowContext: "lead-selection",
     });
 
@@ -136,7 +137,7 @@ describe("persona/profile cost attribution", () => {
       totalCostInUsdCents: "1.0000000000",
       goal: "signup",
       brandProfileId: BRAND_PROFILE_ID,
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
       workflowContext: "lead-selection",
     });
     await insertTestRunCost({
@@ -147,25 +148,25 @@ describe("persona/profile cost attribution", () => {
       totalCostInUsdCents: "2.5000000000",
       goal: "signup",
       brandProfileId: BRAND_PROFILE_ID,
-      customerProfileId: CUSTOMER_PROFILE_B,
+      audienceId: AUDIENCE_B,
       workflowContext: "lead-selection",
     });
 
     const res = await request(app)
       .get(
-        `/v1/stats/costs?groupBy=customerProfileId,brandProfileId,goal,workflowContext&brandId=${BRAND_ID}&featureSlug=cold-email&goal=signup&attributionStatus=tagged`
+        `/v1/stats/costs?groupBy=audienceId,brandProfileId,goal,workflowContext&brandId=${BRAND_ID}&featureSlug=cold-email&goal=signup&attributionStatus=tagged`
       )
       .set(authHeaders);
 
     expect(res.status).toBe(200);
     expect(res.body.groups).toHaveLength(2);
-    const profileA = res.body.groups.find((g: any) => g.dimensions.customerProfileId === CUSTOMER_PROFILE_A);
-    const profileB = res.body.groups.find((g: any) => g.dimensions.customerProfileId === CUSTOMER_PROFILE_B);
-    expect(profileA.totalCostInUsdCents).toBe("1.0000000000");
-    expect(profileB.totalCostInUsdCents).toBe("2.5000000000");
-    expect(profileA.dimensions.brandProfileId).toBe(BRAND_PROFILE_ID);
-    expect(profileA.dimensions.goal).toBe("signup");
-    expect(profileA.dimensions.workflowContext).toBe("lead-selection");
+    const audienceA = res.body.groups.find((g: any) => g.dimensions.audienceId === AUDIENCE_A);
+    const audienceB = res.body.groups.find((g: any) => g.dimensions.audienceId === AUDIENCE_B);
+    expect(audienceA.totalCostInUsdCents).toBe("1.0000000000");
+    expect(audienceB.totalCostInUsdCents).toBe("2.5000000000");
+    expect(audienceA.dimensions.brandProfileId).toBe(BRAND_PROFILE_ID);
+    expect(audienceA.dimensions.goal).toBe("signup");
+    expect(audienceA.dimensions.workflowContext).toBe("lead-selection");
   });
 
   it("keeps untagged samples in a null group and excludes them when requested", async () => {
@@ -175,7 +176,7 @@ describe("persona/profile cost attribution", () => {
       taskName: "execute",
       brandIds: [BRAND_ID],
       featureSlug: "cold-email",
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
     });
     const untagged = await insertTestRun({
       organizationId: ORG_ID,
@@ -191,7 +192,7 @@ describe("persona/profile cost attribution", () => {
       quantity: "1000",
       unitCostInUsdCents: "0.0010000000",
       totalCostInUsdCents: "1.0000000000",
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
     });
     await insertTestRunCost({
       runId: untagged.id,
@@ -202,22 +203,22 @@ describe("persona/profile cost attribution", () => {
     });
 
     const all = await request(app)
-      .get(`/v1/stats/costs?groupBy=customerProfileId&brandId=${BRAND_ID}&featureSlug=cold-email`)
+      .get(`/v1/stats/costs?groupBy=audienceId&brandId=${BRAND_ID}&featureSlug=cold-email`)
       .set(authHeaders);
 
     expect(all.status).toBe(200);
-    const taggedGroup = all.body.groups.find((g: any) => g.dimensions.customerProfileId === CUSTOMER_PROFILE_A);
-    const untaggedGroup = all.body.groups.find((g: any) => g.dimensions.customerProfileId === null);
+    const taggedGroup = all.body.groups.find((g: any) => g.dimensions.audienceId === AUDIENCE_A);
+    const untaggedGroup = all.body.groups.find((g: any) => g.dimensions.audienceId === null);
     expect(taggedGroup.totalCostInUsdCents).toBe("1.0000000000");
     expect(untaggedGroup.totalCostInUsdCents).toBe("0.5000000000");
 
     const onlyTagged = await request(app)
-      .get(`/v1/stats/costs?groupBy=customerProfileId&brandId=${BRAND_ID}&featureSlug=cold-email&attributionStatus=tagged`)
+      .get(`/v1/stats/costs?groupBy=audienceId&brandId=${BRAND_ID}&featureSlug=cold-email&attributionStatus=tagged`)
       .set(authHeaders);
 
     expect(onlyTagged.status).toBe(200);
     expect(onlyTagged.body.groups).toHaveLength(1);
-    expect(onlyTagged.body.groups[0].dimensions.customerProfileId).toBe(CUSTOMER_PROFILE_A);
+    expect(onlyTagged.body.groups[0].dimensions.audienceId).toBe(AUDIENCE_A);
   });
 
   it("keeps existing brandId aggregation compatible", async () => {
@@ -226,7 +227,7 @@ describe("persona/profile cost attribution", () => {
       serviceName: "svc",
       taskName: "task",
       brandIds: [BRAND_ID],
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
     });
     const untagged = await insertTestRun({
       organizationId: ORG_ID,
@@ -241,7 +242,7 @@ describe("persona/profile cost attribution", () => {
       quantity: "100",
       unitCostInUsdCents: "0.0010000000",
       totalCostInUsdCents: "0.1000000000",
-      customerProfileId: CUSTOMER_PROFILE_A,
+      audienceId: AUDIENCE_A,
     });
     await insertTestRunCost({
       runId: untagged.id,
@@ -259,5 +260,57 @@ describe("persona/profile cost attribution", () => {
     expect(res.body.groups).toHaveLength(1);
     expect(res.body.groups[0].dimensions.brandId).toBe(BRAND_ID);
     expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+  });
+
+  // --- Backward compatibility during rollout: the deprecated customerProfileId
+  // vocabulary must keep working until features-service migrates. ---
+  describe("legacy customerProfileId alias (deprecated, additive rollout)", () => {
+    it("resolves the legacy x-customer-profile-id header to audienceId on run creation", async () => {
+      const run = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-customer-profile-id": AUDIENCE_A })
+        .send({ serviceName: "svc", taskName: "task" });
+
+      expect(run.status).toBe(201);
+      expect(run.body.audienceId).toBe(AUDIENCE_A);
+    });
+
+    it("still accepts groupBy=customerProfileId and round-trips the legacy response key", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "workflow-service",
+        taskName: "execute",
+        brandIds: [BRAND_ID],
+        featureSlug: "cold-email",
+        audienceId: AUDIENCE_A,
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+        audienceId: AUDIENCE_A,
+      });
+
+      // Legacy groupBy token: response dimension is keyed `customerProfileId`,
+      // value is the same audience id, sourced from the renamed column.
+      const legacy = await request(app)
+        .get(`/v1/stats/costs?groupBy=customerProfileId&brandId=${BRAND_ID}&featureSlug=cold-email`)
+        .set(authHeaders);
+
+      expect(legacy.status).toBe(200);
+      expect(legacy.body.groups).toHaveLength(1);
+      expect(legacy.body.groups[0].dimensions.customerProfileId).toBe(AUDIENCE_A);
+      expect(legacy.body.groups[0].totalCostInUsdCents).toBe("1.0000000000");
+
+      // Legacy filter param still narrows to the same column.
+      const filtered = await request(app)
+        .get(`/v1/stats/costs?groupBy=audienceId&brandId=${BRAND_ID}&customerProfileId=${AUDIENCE_A}`)
+        .set(authHeaders);
+      expect(filtered.status).toBe(200);
+      expect(filtered.body.groups).toHaveLength(1);
+      expect(filtered.body.groups[0].dimensions.audienceId).toBe(AUDIENCE_A);
+    });
   });
 });

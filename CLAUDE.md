@@ -162,6 +162,14 @@ Idempotent. DISABLES projection triggers during execution so synthetic events do
 
 Auto-updatability requires: single-table reference, no aggregates / joins / DISTINCT / GROUP BY / LIMIT. `SELECT * FROM runs_old` qualifies.
 
+#### Renaming / adding a silver column while the view shim is live
+
+A column change on the live silver tables ripples through the shim — get the order right:
+
+- **Rename a column:** a base-table `ALTER TABLE runs_old RENAME COLUMN x TO y` does **NOT** propagate to the `runs` view's output column — a `SELECT *` view freezes its output column names at creation time (verified on PG 17). You MUST rename it on BOTH the base table and the view: `ALTER TABLE runs_old RENAME COLUMN x TO y;` then `ALTER TABLE runs RENAME COLUMN x TO y;`. `ALTER TABLE <view> RENAME COLUMN` works on views, is metadata-only, and does **NOT** drop the view — so the gold views that `SELECT FROM runs` / `runs_costs` (`v_runs_with_descendants`, `v_run_cost_rollup`, `v_org_platform_spend`) are left untouched. Do NOT `DROP`/`CREATE OR REPLACE` the shim to rename a column: `CREATE OR REPLACE VIEW` can only append columns (not rename/reorder), and a `DROP` is blocked by the gold-view dependency (or would CASCADE into the cost-rollup read path). Also update any projection-trigger function bodies that reference the column + payload key (add a `COALESCE(NEW.payload->>'newKey', NEW.payload->>'oldKey')` fallback for replay of pre-rename bronze events). Reference: migration 0025 (`customer_profile_id` → `audience_id`).
+- **Add a column:** add it to the base table, then `CREATE OR REPLACE VIEW runs AS SELECT * FROM runs_old` (append is allowed) — see migration 0024.
+- The gold views read from the `runs` / `runs_costs` **views** (not the base tables directly), so the shim is a hard dependency — never drop it without `CASCADE`-auditing the gold layer first.
+
 ## CI status checks ↔ branch protection
 
 Branch protection on `staging` requires status checks named exactly `test-integration` and `test-unit`. The `test-integration` matrix job produces context names like `test-integration (stats, …)` which do NOT match the required name. A separate aggregator job named `test-integration` (depends on `test-integration-shard`, fails if any shard failed) provides the required context. When changing the matrix structure, keep the aggregator job name intact or PRs will sit in `BLOCKED` despite green shards.
