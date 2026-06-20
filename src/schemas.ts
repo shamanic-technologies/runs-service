@@ -409,7 +409,6 @@ registry.registerPath({
       goal: GoalEnum.optional(),
       brandProfileId: z.string().uuid().optional(),
       audienceId: z.string().uuid().optional(),
-      customerProfileId: z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use audienceId." }),
       workflowContext: z.string().optional(),
       serviceName: z.string().optional(),
       taskName: z.string().optional(),
@@ -857,7 +856,6 @@ export const StatsFiltersSchema = z.object({
   goal: GoalEnum.optional().openapi({ description: "Filter by explicit run/cost goal attribution." }),
   brandProfileId: z.string().uuid().optional().openapi({ description: "Filter by explicit brand-profile attribution. Matches cost override first, then run attribution." }),
   audienceId: z.string().uuid().optional().openapi({ description: "Filter by explicit audience attribution (audience.id). Matches cost override first, then run attribution." }),
-  customerProfileId: z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use audienceId. Legacy alias matching the same column during rollout." }),
   workflowContext: z.string().optional().openapi({ description: "Filter by explicit stable workflow-context attribution. Matches cost override first, then run attribution." }),
   attributionStatus: z.enum(["all", "tagged", "unattributed"]).optional().openapi({ description: "Optional attribution filter. tagged means brandProfileId or audienceId is present; unattributed means both are null. Default all." }),
   serviceName: z.string().optional(),
@@ -896,7 +894,7 @@ export const ServiceTaskSchema = z
 
 export const StatsCostsByServiceTasksRequestSchema = z
   .object({
-    groupBy: z.string().min(1).openapi({ description: "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName. (customerProfileId is a deprecated alias for audienceId.) Dynasty groupBy is NOT supported on POST." }),
+    groupBy: z.string().min(1).openapi({ description: "Comma-separated dimensions to aggregate by. Allowed: brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName. Dynasty groupBy is NOT supported on POST." }),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
     workflowSlug: z.string().optional(),
@@ -906,7 +904,6 @@ export const StatsCostsByServiceTasksRequestSchema = z
     goal: GoalEnum.optional(),
     brandProfileId: z.string().uuid().optional(),
     audienceId: z.string().uuid().optional(),
-    customerProfileId: z.string().uuid().optional().openapi({ deprecated: true, description: "Deprecated: use audienceId." }),
     workflowContext: z.string().optional(),
     attributionStatus: z.enum(["all", "tagged", "unattributed"]).optional(),
     startedAfter: z.string().datetime().optional(),
@@ -1016,7 +1013,7 @@ registry.registerPath({
   path: "/v1/stats/costs",
   summary: "Aggregate costs with GROUP BY",
   description:
-    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). customerProfileId is a deprecated alias for audienceId and still accepted as a groupBy/filter during rollout (response keys mirror the requested token). The attribution dimensions are explicit stored tags only: runs/costs without audienceId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
+    "Returns aggregated costs grouped by one or more dimensions (brandId, workflowSlug, campaignId, featureSlug, goal, brandProfileId, audienceId, workflowContext, serviceName, taskName, costName, workflowDynastySlug). The attribution dimensions are explicit stored tags only: runs/costs without audienceId or brandProfileId stay null and are never assigned by name/hash/workflow fallback. When costName is included in groupBy, the response includes totalQuantity and uses INNER JOIN. workflowDynastySlug re-groups versioned slugs under their dynasty. featureSlugs (comma-separated) lets callers that compute feature lineage themselves filter across many slugs in one call. Organization identified via x-org-id header.",
   security: [{ apiKey: [] }],
   request: {
     query: StatsCostsQuerySchema,
