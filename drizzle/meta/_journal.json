@@ -190,6 +190,13 @@
       "when": 1780444800000,
       "tag": "0026_drop_dead_gold_views",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1780531200000,
+      "tag": "0027_index_run_events_campaign",
+      "breakpoints": true
     }
   ]
 }
