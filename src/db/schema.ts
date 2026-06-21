@@ -103,6 +103,11 @@ export const runEvents = pgTable(
   (table) => [
     index("idx_run_events_run_created").on(table.runId, table.createdAt),
     index("idx_run_events_service_created").on(table.service, table.createdAt),
+    // Serves the dashboard launch-progress poll: GET /v1/events?campaignId=X
+    // ORDER BY created_at DESC. Without it, the campaignId filter falls back to a
+    // seq scan + sort over the full bronze log (millions of rows) — the slow read
+    // that saturated the pool and starved trace-event writes (lead-service 5s aborts).
+    index("idx_run_events_campaign_created").on(table.campaignId, table.createdAt.desc()),
   ]
 );
 

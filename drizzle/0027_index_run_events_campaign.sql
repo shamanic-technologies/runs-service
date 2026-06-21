@@ -1,0 +1,14 @@
+-- Bronze read-path index for the dashboard launch-progress poll.
+--
+-- run_events is the append-only bronze telemetry log. The live hot reader is the
+-- dashboard launch modal, which polls GET /v1/events?campaignId=X ORDER BY
+-- created_at DESC. With no index on (campaign_id, created_at) that poll seq-scans
+-- + sorts the full multi-million-row log (observed up to 47s), holding a pool
+-- connection the whole time and starving the cheap trace-event INSERTs — which is
+-- why lead-service's AbortSignal.timeout(5000) fired and dropped trace events.
+--
+-- This index turns that read into an index-range scan. IF NOT EXISTS: prod /
+-- staging / dev are pre-built CONCURRENTLY out-of-band (a non-concurrent build
+-- inside the boot migrator would lock run_events writes during the build), so
+-- this statement no-ops on those envs and only builds on fresh/empty DBs.
+CREATE INDEX IF NOT EXISTS "idx_run_events_campaign_created" ON "run_events" ("campaign_id", "created_at" DESC);
