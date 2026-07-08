@@ -781,6 +781,8 @@ function buildPublicFilterSql(filters: {
   featureSlugs?: string[];
   workflowSlugs?: string[];
   taskName?: string;
+  startedAfter?: string;
+  startedBefore?: string;
 }) {
   const parts: ReturnType<typeof sql>[] = [];
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
@@ -798,6 +800,11 @@ function buildPublicFilterSql(filters: {
   }
 
   if (filters.taskName) parts.push(sql`r.task_name = ${filters.taskName}`);
+  // Optional window bounds — the untimed public endpoint never passes these, so
+  // reconciliation (sum of dated buckets == untimed total) holds for the same
+  // filter. The timeseries endpoint uses them to bound the scanned range.
+  if (filters.startedAfter) parts.push(sql`r.started_at >= ${filters.startedAfter}::timestamptz`);
+  if (filters.startedBefore) parts.push(sql`r.started_at <= ${filters.startedBefore}::timestamptz`);
   return parts.length > 0
     ? parts.reduce((acc, part) => sql`${acc} AND ${part}`)
     : null;
@@ -894,6 +901,112 @@ function handlePublicCosts(req: any, res: any) {
 
 // GET /v1/stats/public/costs
 router.get("/v1/stats/public/costs", handlePublicCosts);
+
+// --- Public cost time-series endpoint ---
+
+const PUBLIC_TIMESERIES_INTERVALS = new Set(["day", "week", "month"]);
+
+/**
+ * Cross-org (no-auth) fleet spend split into dated buckets.
+ *
+ * Same WHERE filters + same cost aggregator (`costAggregateSelectSql`) as
+ * `GET /v1/stats/public/costs`, with one extra partition dimension: the run's
+ * `started_at` truncated to `interval` (day|week|month) in `tz` (default UTC).
+ * Because every run has exactly one `started_at`, each cost row lands in exactly
+ * one bucket — so summing the buckets for a filter equals the untimed total for
+ * the same filter (reconciliation invariant). Empty intervals are simply absent
+ * (never fabricated).
+ */
+function handlePublicCostsTimeseries(req: any, res: any) {
+  (async () => {
+    try {
+      const {
+        interval: intervalParam,
+        tz: tzParam,
+        orgId,
+        brandId,
+        campaignId,
+        featureSlug,
+        featureSlugs: featureSlugsParam,
+        workflowDynastySlug,
+        taskName,
+        startedAfter,
+        startedBefore,
+      } = req.query as Record<string, string | undefined>;
+
+      const interval = intervalParam ?? "day";
+      if (!PUBLIC_TIMESERIES_INTERVALS.has(interval)) {
+        res.status(400).json({
+          error: `Invalid interval value. Allowed: ${Array.from(PUBLIC_TIMESERIES_INTERVALS).join(", ")}`,
+        });
+        return;
+      }
+      const timezone = tzParam ?? "UTC";
+
+      const identity: IdentityHeaders = {
+        orgId: req.orgId ?? (req.headers["x-org-id"] as string),
+        userId: req.userId ?? (req.headers["x-user-id"] as string),
+        runId: req.runId ?? (req.headers["x-run-id"] as string),
+      };
+      const featureSlugs: string[] | undefined = parseCsv(featureSlugsParam);
+      let workflowSlugs: string[] | undefined;
+      if (workflowDynastySlug) {
+        const resolved = await resolveWorkflowDynastySlugs(workflowDynastySlug, identity);
+        if (resolved.length === 0) {
+          res.json({ interval, timezone, buckets: [] });
+          return;
+        }
+        workflowSlugs = resolved;
+      }
+
+      const filterSql = buildPublicFilterSql({
+        orgId,
+        brandId,
+        campaignId,
+        featureSlug,
+        featureSlugs,
+        workflowSlugs,
+        taskName,
+        startedAfter,
+        startedBefore,
+      });
+      const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
+
+      // interval is whitelisted above; tz + interval are bound parameters (not raw).
+      const bucketExpr = sql`DATE_TRUNC(${interval}, r.started_at AT TIME ZONE ${timezone})`;
+
+      const result = await db.execute(sql`
+        SELECT
+          to_char(${bucketExpr}, 'YYYY-MM-DD') AS period,
+          ${costAggregateSelectSql("rc")},
+          COUNT(DISTINCT r.id) as run_count
+        FROM runs r
+        LEFT JOIN runs_costs rc ON rc.run_id = r.id
+        ${whereSql}
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `);
+
+      const rows = result as any[];
+      const buckets = rows.map((row) => ({
+        period: row.period as string,
+        totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+        actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+        provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+        cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        runCount: Number(row.run_count),
+      }));
+
+      res.json({ interval, timezone, buckets });
+    } catch (err) {
+      console.error("[Runs Service] Error in GET /v1/stats/public/costs/timeseries:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  })();
+}
+
+// GET /v1/stats/public/costs/timeseries
+router.get("/v1/stats/public/costs/timeseries", handlePublicCostsTimeseries);
 
 // GET /public/stats/runs — public run counts by status + monthly/weekly breakdown + cumulative cost
 router.get("/public/stats/runs", async (_req, res) => {

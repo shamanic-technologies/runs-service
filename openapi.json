@@ -1375,6 +1375,64 @@
           "costsByName"
         ]
       },
+      "PublicCostsTimeseriesResponse": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "Bucket start date in YYYY-MM-DD (local to timezone). For interval=day with tz=UTC this is the UTC calendar day. Only intervals with at least one run appear — empty intervals are absent, never fabricated.",
+                  "example": "2026-07-01"
+                },
+                "totalCostInUsdCents": {
+                  "type": "string",
+                  "description": "SUM total_cost_in_usd_cents for cost rows of runs started in this bucket, status IN ('actual','provisioned'). 10-decimal string."
+                },
+                "actualCostInUsdCents": {
+                  "type": "string"
+                },
+                "provisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "cancelledCostInUsdCents": {
+                  "type": "string"
+                },
+                "runCount": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "period",
+                "totalCostInUsdCents",
+                "actualCostInUsdCents",
+                "provisionedCostInUsdCents",
+                "cancelledCostInUsdCents",
+                "runCount"
+              ]
+            }
+          }
+        },
+        "required": [
+          "interval",
+          "timezone",
+          "buckets"
+        ]
+      },
       "PublicRunsStatsResponse": {
         "type": "object",
         "properties": {
@@ -3076,6 +3134,144 @@
           },
           "400": {
             "description": "Invalid groupBy value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stats/public/costs/timeseries": {
+      "get": {
+        "summary": "Public cost time-series (no auth)",
+        "description": "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and optional startedAfter/startedBefore window bounds. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "description": "Bucket granularity. UTC-day aligned via DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day."
+            },
+            "required": false,
+            "description": "Bucket granularity. UTC-day aligned via DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day.",
+            "name": "interval",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "IANA timezone name used for bucket-boundary alignment (e.g. America/New_York). Default UTC. Invalid names fail the request."
+            },
+            "required": false,
+            "description": "IANA timezone name used for bucket-boundary alignment (e.g. America/New_York). Default UTC. Invalid names fail the request.",
+            "name": "tz",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug."
+            },
+            "required": false,
+            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug.",
+            "name": "featureSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service."
+            },
+            "required": false,
+            "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service.",
+            "name": "workflowDynastySlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only include runs with started_at >= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only include runs with started_at >= this ISO-8601 timestamp.",
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only include runs with started_at <= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only include runs with started_at <= this ISO-8601 timestamp.",
+            "name": "startedBefore",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dated cost buckets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicCostsTimeseriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid interval value",
             "content": {
               "application/json": {
                 "schema": {
