@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll, afterEach, vi } from "vitest";
+import { Decimal } from "decimal.js";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import {
@@ -975,6 +976,245 @@ describe("Stats endpoints", () => {
       expect(totalRunCount).toBe(2);
     });
 
+  });
+
+  describe("GET /v1/stats/public/costs/timeseries", () => {
+    const FEATURE = "ts-cold-email";
+
+    it("splits fleet spend into UTC-day buckets across orgs (default interval=day)", async () => {
+      const otherOrgId = "99999999-9999-9999-9999-999999999999";
+      // Day 1 — two orgs
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-07-01T03:00:00.000Z"),
+      });
+      const run2 = await insertTestRun({
+        organizationId: otherOrgId,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-07-01T22:00:00.000Z"),
+      });
+      // Day 3 — one org (day 2 intentionally has no runs → must be absent, never fabricated)
+      const run3 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-07-03T10:00:00.000Z"),
+      });
+
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "100",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "200",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.2000000000",
+      });
+      await insertTestRunCost({
+        runId: run3.id,
+        costName: "token",
+        quantity: "400",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.4000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ featureSlug: FEATURE });
+
+      expect(res.status).toBe(200);
+      expect(res.body.interval).toBe("day");
+      expect(res.body.timezone).toBe("UTC");
+      // Only days with runs appear — no fabricated 2026-07-02 bucket.
+      expect(res.body.buckets).toHaveLength(2);
+      const [d1, d3] = res.body.buckets;
+      expect(d1.period).toBe("2026-07-01");
+      expect(d1.totalCostInUsdCents).toBe("0.3000000000");
+      expect(d1.runCount).toBe(2);
+      expect(d3.period).toBe("2026-07-03");
+      expect(d3.totalCostInUsdCents).toBe("0.4000000000");
+      expect(d3.runCount).toBe(1);
+    });
+
+    it("reconciles: sum of daily buckets equals the untimed public total for the same filter", async () => {
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-08-01T01:00:00.000Z"),
+      });
+      const run2 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-08-05T01:00:00.000Z"),
+      });
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "123",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.1230000000",
+      });
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "77",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0770000000",
+        status: "provisioned",
+      });
+
+      const timed = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ featureSlug: FEATURE });
+      const untimed = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureSlug", featureSlug: FEATURE });
+
+      expect(timed.status).toBe(200);
+      expect(untimed.status).toBe(200);
+
+      const sumBuckets = timed.body.buckets.reduce(
+        (acc: any, b: any) => ({
+          total: acc.total.plus(b.totalCostInUsdCents),
+          actual: acc.actual.plus(b.actualCostInUsdCents),
+          provisioned: acc.provisioned.plus(b.provisionedCostInUsdCents),
+        }),
+        { total: new Decimal(0), actual: new Decimal(0), provisioned: new Decimal(0) }
+      );
+
+      const grp = untimed.body.groups.find((g: any) => g.dimensions.featureSlug === FEATURE);
+      expect(grp).toBeDefined();
+      expect(sumBuckets.total.toFixed(10)).toBe(grp.totalCostInUsdCents);
+      expect(sumBuckets.actual.toFixed(10)).toBe(grp.actualCostInUsdCents);
+      expect(sumBuckets.provisioned.toFixed(10)).toBe(grp.provisionedCostInUsdCents);
+    });
+
+    it("filters by featureSlugs (comma-separated) and excludes other features", async () => {
+      const runA = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "ts-feat-a",
+        startedAt: new Date("2026-09-01T01:00:00.000Z"),
+      });
+      const runB = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "ts-feat-b",
+        startedAt: new Date("2026-09-01T02:00:00.000Z"),
+      });
+      const runOther = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "ts-feat-unrelated",
+        startedAt: new Date("2026-09-01T03:00:00.000Z"),
+      });
+      await insertTestRunCost({
+        runId: runA.id,
+        costName: "token",
+        quantity: "10",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0100000000",
+      });
+      await insertTestRunCost({
+        runId: runB.id,
+        costName: "token",
+        quantity: "20",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0200000000",
+      });
+      await insertTestRunCost({
+        runId: runOther.id,
+        costName: "token",
+        quantity: "999",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.9990000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ featureSlugs: "ts-feat-a,ts-feat-b" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(1);
+      expect(res.body.buckets[0].period).toBe("2026-09-01");
+      // 0.01 + 0.02, unrelated 0.999 excluded
+      expect(res.body.buckets[0].totalCostInUsdCents).toBe("0.0300000000");
+      expect(res.body.buckets[0].runCount).toBe(2);
+    });
+
+    it("supports interval=month", async () => {
+      const runJan = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "ts-month",
+        startedAt: new Date("2026-01-15T01:00:00.000Z"),
+      });
+      const runFeb = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "ts-month",
+        startedAt: new Date("2026-02-20T01:00:00.000Z"),
+      });
+      await insertTestRunCost({
+        runId: runJan.id,
+        costName: "token",
+        quantity: "10",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0100000000",
+      });
+      await insertTestRunCost({
+        runId: runFeb.id,
+        costName: "token",
+        quantity: "20",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.0200000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ featureSlug: "ts-month", interval: "month" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.interval).toBe("month");
+      expect(res.body.buckets).toHaveLength(2);
+      expect(res.body.buckets[0].period).toBe("2026-01-01");
+      expect(res.body.buckets[1].period).toBe("2026-02-01");
+    });
+
+    it("rejects an invalid interval", async () => {
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ interval: "hour" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Invalid interval");
+    });
+
+    it("does not require auth", async () => {
+      const res = await request(app).get("/v1/stats/public/costs/timeseries");
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toBeDefined();
+    });
   });
 
   describe("Dynasty slug filtering — GET /v1/stats/costs", () => {
