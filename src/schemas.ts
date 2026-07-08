@@ -1006,6 +1006,65 @@ export const PublicCostsQuerySchema = z
   })
   .openapi("PublicCostsQuery");
 
+export const PublicCostsTimeseriesQuerySchema = z
+  .object({
+    interval: z
+      .enum(["day", "week", "month"])
+      .optional()
+      .openapi({ description: "Bucket granularity. UTC-day aligned via DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day." }),
+    tz: z
+      .string()
+      .optional()
+      .openapi({ description: "IANA timezone name used for bucket-boundary alignment (e.g. America/New_York). Default UTC. Invalid names fail the request." }),
+    orgId: z.string().uuid().optional(),
+    brandId: z.string().optional(),
+    campaignId: z.string().optional(),
+    featureSlug: z.string().optional(),
+    featureSlugs: z
+      .string()
+      .optional()
+      .openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug." }),
+    workflowDynastySlug: z
+      .string()
+      .optional()
+      .openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service." }),
+    taskName: z.string().optional(),
+    startedAfter: z
+      .string()
+      .datetime()
+      .optional()
+      .openapi({ description: "Only include runs with started_at >= this ISO-8601 timestamp." }),
+    startedBefore: z
+      .string()
+      .datetime()
+      .optional()
+      .openapi({ description: "Only include runs with started_at <= this ISO-8601 timestamp." }),
+  })
+  .openapi("PublicCostsTimeseriesQuery");
+
+export const PublicCostsTimeseriesResponseSchema = z
+  .object({
+    interval: z.enum(["day", "week", "month"]),
+    timezone: z.string(),
+    buckets: z.array(
+      z.object({
+        period: z
+          .string()
+          .openapi({
+            description:
+              "Bucket start date in YYYY-MM-DD (local to timezone). For interval=day with tz=UTC this is the UTC calendar day. Only intervals with at least one run appear — empty intervals are absent, never fabricated.",
+            example: "2026-07-01",
+          }),
+        totalCostInUsdCents: z.string().openapi({ description: "SUM total_cost_in_usd_cents for cost rows of runs started in this bucket, status IN ('actual','provisioned'). 10-decimal string." }),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        cancelledCostInUsdCents: z.string(),
+        runCount: z.number(),
+      })
+    ),
+  })
+  .openapi("PublicCostsTimeseriesResponse");
+
 // --- Stats path registrations ---
 
 registry.registerPath({
@@ -1122,6 +1181,27 @@ registry.registerPath({
     },
     400: {
       description: "Invalid groupBy value",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/public/costs/timeseries",
+  summary: "Public cost time-series (no auth)",
+  description:
+    "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and optional startedAfter/startedBefore window bounds. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
+  request: {
+    query: PublicCostsTimeseriesQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Dated cost buckets",
+      content: { "application/json": { schema: PublicCostsTimeseriesResponseSchema } },
+    },
+    400: {
+      description: "Invalid interval value",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },
