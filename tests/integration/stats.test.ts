@@ -1184,6 +1184,55 @@ describe("Stats endpoints", () => {
       expect(orphan).toBeDefined();
       expect(orphan.totalCostInUsdCents).toBe("0.2000000000");
     });
+
+    it("multi-dimension groupBy=audienceId,workflowDynastySlug keeps every audienceId that shares a dynasty (runs-service#174)", async () => {
+      vi.spyOn(dynastyResolver, "fetchAllWorkflowDynasties").mockResolvedValue([
+        { dynastySlug: "cold-email", slugs: ["cold-email", "cold-email-v2"] },
+      ]);
+
+      const AUD_A = "aud-a";
+      const AUD_B = "aud-b";
+
+      // Two distinct audiences both under the SAME dynasty (cold-email), via
+      // different versioned slugs. Pre-fix, regroupByDynasty keyed on dynasty
+      // alone and collapsed both into one row, dropping one audience.
+      const runA1 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "task", workflowSlug: "cold-email", audienceId: AUD_A });
+      const runA2 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "task", workflowSlug: "cold-email-v2", audienceId: AUD_A });
+      const runB1 = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "task", workflowSlug: "cold-email", audienceId: AUD_B });
+
+      await insertTestRunCost({ runId: runA1.id, costName: "token", quantity: "100", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000" });
+      await insertTestRunCost({ runId: runA2.id, costName: "token", quantity: "200", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000" });
+      await insertTestRunCost({ runId: runB1.id, costName: "token", quantity: "300", unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.3000000000" });
+
+      const res = await request(app)
+        .get("/v1/stats/costs?groupBy=audienceId,workflowDynastySlug")
+        .set(authHeaders);
+
+      expect(res.status).toBe(200);
+
+      const audAGroup = res.body.groups.find((g: any) => g.dimensions.audienceId === AUD_A && g.dimensions.workflowDynastySlug === "cold-email");
+      const audBGroup = res.body.groups.find((g: any) => g.dimensions.audienceId === AUD_B && g.dimensions.workflowDynastySlug === "cold-email");
+
+      // Both audiences survive as their own (audienceId, dynasty) group.
+      expect(audAGroup).toBeDefined();
+      expect(audBGroup).toBeDefined();
+
+      // Dynasty rollup applied WITHIN each audience: aud-a's two versioned slugs merge.
+      expect(audAGroup.totalCostInUsdCents).toBe("0.3000000000");
+      expect(audAGroup.runCount).toBe(2);
+      expect(audBGroup.totalCostInUsdCents).toBe("0.3000000000");
+      expect(audBGroup.runCount).toBe(1);
+
+      // Conservation: per-audience multi-dim total == single-dim groupBy=audienceId total.
+      const single = await request(app)
+        .get("/v1/stats/costs?groupBy=audienceId")
+        .set(authHeaders);
+      expect(single.status).toBe(200);
+      const singleA = single.body.groups.find((g: any) => g.dimensions.audienceId === AUD_A);
+      const singleB = single.body.groups.find((g: any) => g.dimensions.audienceId === AUD_B);
+      expect(singleA.totalCostInUsdCents).toBe(audAGroup.totalCostInUsdCents);
+      expect(singleB.totalCostInUsdCents).toBe(audBGroup.totalCostInUsdCents);
+    });
   });
 
   describe("GET /public/stats/runs", () => {
