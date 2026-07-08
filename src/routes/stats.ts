@@ -182,7 +182,15 @@ interface AggRow {
   totalQuantity?: string;
 }
 
-/** Re-group rows by dynasty slug, merging rows whose underlying slug maps to the same dynasty */
+/**
+ * Re-group rows by dynasty slug, merging rows whose underlying slug maps to the
+ * same dynasty. The merge key is the FULL tuple of the OTHER groupBy dimensions
+ * plus the dynasty — so a multi-dimension groupBy (e.g. audienceId,workflowDynastySlug)
+ * yields one row per distinct (otherDim, dynasty) pair, applying the dynasty
+ * rollup WITHIN each value of the other dimension rather than across the whole
+ * result set. Keying on dynasty alone would collapse every row sharing a dynasty
+ * into one, silently dropping the co-grouped dimension (runs-service#174).
+ */
 function regroupByDynasty(
   groups: AggRow[],
   dynastyKey: string,
@@ -195,12 +203,22 @@ function regroupByDynasty(
     const rawSlug = group.dimensions[underlyingKey] ?? "";
     const dynasty = slugToDynasty.get(rawSlug) ?? rawSlug;
 
-    const existing = merged.get(dynasty);
+    // Merge key = every OTHER groupBy dimension (in sorted key order) + the
+    // resolved dynasty. JSON-encode so null and distinct string values never
+    // collide. This preserves the other dimensions instead of dropping them.
+    const otherDims: Record<string, string | null> = {};
+    for (const key of Object.keys(group.dimensions).sort()) {
+      if (key === underlyingKey) continue;
+      otherDims[key] = group.dimensions[key];
+    }
+    const mergeKey = JSON.stringify([otherDims, dynasty]);
+
+    const existing = merged.get(mergeKey);
     if (!existing) {
       const newDimensions = { ...group.dimensions };
       delete newDimensions[underlyingKey];
       newDimensions[dynastyKey] = dynasty;
-      merged.set(dynasty, { ...group, dimensions: newDimensions });
+      merged.set(mergeKey, { ...group, dimensions: newDimensions });
     } else {
       existing.totalCostInUsdCents = new Decimal(existing.totalCostInUsdCents).plus(group.totalCostInUsdCents).toFixed(10);
       existing.actualCostInUsdCents = new Decimal(existing.actualCostInUsdCents).plus(group.actualCostInUsdCents).toFixed(10);
