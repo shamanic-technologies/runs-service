@@ -38,6 +38,28 @@ export function costAggregateSelectSql(rcAlias = "rc") {
 }
 
 /**
+ * NET variant of the 4-column aggregation. Same atomic status predicates as
+ * `costAggregateSelectSql`, but sums the FROZEN net amount instead of gross:
+ * `COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)`. The COALESCE makes
+ * historical rows (written before the discount freeze, net IS NULL) read as
+ * net == gross — the correct semantic (no discount existed then).
+ *
+ * Output columns: net_total_cost, net_actual_cost, net_provisioned_cost.
+ * Added ONLY to the per-attribution stats reads that features-service consumes
+ * so it can display gross OR net. Gross columns are unchanged, so a reader that
+ * ignores the net columns sees today's numbers exactly (backward-compatible).
+ */
+export function costAggregateNetSelectSql(rcAlias = "rc") {
+  const a = sql.raw(rcAlias);
+  const net = sql`COALESCE(${a}.net_cost_in_usd_cents, ${a}.total_cost_in_usd_cents)`;
+  return sql`
+    COALESCE(SUM(CASE WHEN ${a}.status IN ('actual','provisioned') THEN ${net} ELSE 0 END), 0)::text AS net_total_cost,
+    COALESCE(SUM(CASE WHEN ${a}.status = 'actual'      THEN ${net} ELSE 0 END), 0)::text AS net_actual_cost,
+    COALESCE(SUM(CASE WHEN ${a}.status = 'provisioned' THEN ${net} ELSE 0 END), 0)::text AS net_provisioned_cost
+  `;
+}
+
+/**
  * Same as `costAggregateSelectSql` but with optional per-window predicate
  * embedded into every SUM CASE. Used by /v1/stats/budget.
  */

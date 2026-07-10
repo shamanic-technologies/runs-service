@@ -204,8 +204,14 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
   const { org_id } = parsed.data;
 
   // Inline aggregate using is_platform_projected generated col + partial index.
+  // spent_cents = GROSS (unchanged — existing consumers keep today's number).
+  // net_spent_cents = frozen NET (gross reduced by the discount that was in
+  // effect when each cost was written); COALESCE(net, total) so historical rows
+  // read net == gross. billing-service reads net_spent_cents for the spendable
+  // balance once it opts in; gross stays the default.
   const result = await db.execute(sql`
-    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents
+    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents,
+           COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)), 0) AS net_spent_cents
       FROM runs r
       JOIN runs_costs rc ON rc.run_id = r.id
      WHERE r.organization_id = ${org_id}
@@ -214,9 +220,11 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
 
   const rows = result as any[];
   const spentCents = rows[0]?.spent_cents ?? 0;
+  const netSpentCents = rows[0]?.net_spent_cents ?? 0;
   const response = {
     org_id,
     spent_cents: new Decimal(spentCents).toFixed(10),
+    net_spent_cents: new Decimal(netSpentCents).toFixed(10),
     as_of: new Date().toISOString(),
   };
 

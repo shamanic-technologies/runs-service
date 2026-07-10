@@ -56,6 +56,13 @@ export const runsCosts = pgTable(
     quantity: numeric("quantity", { precision: 20, scale: 6 }).notNull(),
     unitCostInUsdCents: numeric("unit_cost_in_usd_cents", { precision: 16, scale: 10 }).notNull(),
     totalCostInUsdCents: numeric("total_cost_in_usd_cents", { precision: 16, scale: 10 }).notNull(),
+    // Frozen net = gross reduced by the org usage discount in effect at write
+    // time (migration 0028). NULL for historical rows (predate the feature);
+    // readers COALESCE(net, total) so those rows correctly read net == gross.
+    netCostInUsdCents: numeric("net_cost_in_usd_cents", { precision: 16, scale: 10 }),
+    // Frozen usage-discount fraction in [0,1] applied to produce the net.
+    // NULL when no discount was applied. Provenance only — never recomputed.
+    usageDiscountPct: numeric("usage_discount_pct", { precision: 9, scale: 8 }),
     status: text("status").notNull().default("actual"),
     goal: text("goal"),
     brandProfileId: text("brand_profile_id"),

@@ -11,6 +11,11 @@ import {
 } from "../services/cost-resolver.js";
 import { notifyUsage } from "../services/billing.js";
 import {
+  resolveUsageDiscount,
+  netFromGross,
+  UsageDiscountError,
+} from "../services/usage-discount.js";
+import {
   logRunLifecycle,
   logCostLifecycle,
   newRunId,
@@ -676,16 +681,22 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       for (const row of existing) existingByKey.set(row.idempotencyKey!, row);
     }
 
-    const itemsToCreate: Array<{ item: typeof items[number]; costId: string; total: string }> = [];
+    // Freeze the org's usage discount at write time. Fails loud (502 below)
+    // when enabled but billing is unreachable — never writes gross-as-net.
+    const discountPct = await resolveUsageDiscount(req.orgId);
+    const discountPctStr = discountPct.gt(0) ? discountPct.toFixed(8) : null;
+
+    const itemsToCreate: Array<{ item: typeof items[number]; costId: string; total: string; net: string }> = [];
     for (const item of items) {
       if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) continue;
       const unitCost = costMap.get(item.costName)!;
       const total = new Decimal(item.quantity).times(unitCost).toFixed(10);
-      itemsToCreate.push({ item, costId: newCostId(), total });
+      const net = netFromGross(total, discountPct);
+      itemsToCreate.push({ item, costId: newCostId(), total, net });
     }
 
     const newRows = await db.transaction(async (tx) => {
-      for (const { item, costId, total } of itemsToCreate) {
+      for (const { item, costId, total, net } of itemsToCreate) {
         const unitCost = costMap.get(item.costName)!;
         const attribution = costAttribution(item, req, run);
         const identity: Identity = {
@@ -708,6 +719,8 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
             quantity: String(item.quantity),
             unitCostInUsdCents: unitCost,
             totalCostInUsdCents: total,
+            netCostInUsdCents: net,
+            usageDiscountPct: discountPctStr,
             status: item.status ?? "actual",
             ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
@@ -758,6 +771,11 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     if (err instanceof UpstreamError) {
       console.error(`[runs-service] costs-service unavailable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `costs-service unavailable: ${err.message}` });
+      return;
+    }
+    if (err instanceof UsageDiscountError) {
+      console.error(`[runs-service] usage-discount unresolvable (${err.statusCode}):`, err.message);
+      res.status(502).json({ error: `usage-discount unresolvable: ${err.message}` });
       return;
     }
     console.error("[runs-service] Error adding run costs:", err);
