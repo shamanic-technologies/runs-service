@@ -67,6 +67,8 @@ export async function insertTestRunCost(data: {
   quantity: string;
   unitCostInUsdCents: string;
   totalCostInUsdCents: string;
+  netCostInUsdCents?: string;
+  usageDiscountPct?: string;
   status?: string;
   goal?: string;
   brandProfileId?: string;

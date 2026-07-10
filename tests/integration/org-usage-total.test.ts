@@ -52,9 +52,10 @@ describe("GET /internal/org-usage-total", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body).sort()).toEqual(["as_of", "org_id", "spent_cents"]);
+    expect(Object.keys(res.body).sort()).toEqual(["as_of", "net_spent_cents", "org_id", "spent_cents"]);
     expect(res.body.org_id).toBe(ORG_ID);
     expect(res.body.spent_cents).toBe("0.0000000000");
+    expect(res.body.net_spent_cents).toBe("0.0000000000");
     expect(Date.parse(res.body.as_of)).not.toBeNaN();
   });
 
@@ -95,10 +96,41 @@ describe("GET /internal/org-usage-total", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body).sort()).toEqual(["as_of", "org_id", "spent_cents"]);
+    expect(Object.keys(res.body).sort()).toEqual(["as_of", "net_spent_cents", "org_id", "spent_cents"]);
     expect(res.body.org_id).toBe(ORG_ID);
     expect(res.body.spent_cents).toBe("3.2345678903");
+    // Rows written directly (no discount frozen, net IS NULL) → net == gross.
+    expect(res.body.net_spent_cents).toBe("3.2345678903");
     expect(Date.parse(res.body.as_of)).not.toBeNaN();
+  });
+
+  it("net_spent_cents reflects the frozen net when a discount was captured", async () => {
+    const run = await insertTestRun({
+      organizationId: ORG_ID,
+      serviceName: "svc-a",
+      taskName: "task-net",
+      status: "completed",
+    });
+    // Gross 10.00; 40% discount frozen at write → net 6.00.
+    await insertTestRunCost({
+      runId: run.id,
+      costName: "tokens-discounted",
+      quantity: "1",
+      unitCostInUsdCents: "10.0000000000",
+      totalCostInUsdCents: "10.0000000000",
+      netCostInUsdCents: "6.0000000000",
+      usageDiscountPct: "0.40000000",
+      status: "actual",
+    });
+
+    const res = await request(app)
+      .get("/internal/org-usage-total")
+      .set(headers)
+      .query({ org_id: ORG_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.spent_cents).toBe("10.0000000000");
+    expect(res.body.net_spent_cents).toBe("6.0000000000");
   });
 
   it("excludes cancelled, org/BYOK, and other-org costs", async () => {

@@ -10,6 +10,7 @@ import {
 } from "../schemas.js";
 import {
   costAggregateSelectSql,
+  costAggregateNetSelectSql,
   costAggregateWithSinceSql,
   platformTotalSelectSql,
 } from "../services/cost-aggregator.js";
@@ -176,6 +177,13 @@ interface AggRow {
   actualCostInUsdCents: string;
   provisionedCostInUsdCents: string;
   cancelledCostInUsdCents: string;
+  // Frozen NET amounts (gross reduced by the per-cost frozen usage discount).
+  // Present only on the per-attribution stats reads features-service consumes;
+  // undefined elsewhere (public/gross-only reads). Gross fields above are
+  // unchanged, so a reader that ignores these sees today's numbers exactly.
+  netTotalCostInUsdCents?: string;
+  netActualCostInUsdCents?: string;
+  netProvisionedCostInUsdCents?: string;
   runCount: number;
   minStartedAt: string | null;
   maxStartedAt: string | null;
@@ -224,6 +232,11 @@ function regroupByDynasty(
       existing.actualCostInUsdCents = new Decimal(existing.actualCostInUsdCents).plus(group.actualCostInUsdCents).toFixed(10);
       existing.provisionedCostInUsdCents = new Decimal(existing.provisionedCostInUsdCents).plus(group.provisionedCostInUsdCents).toFixed(10);
       existing.cancelledCostInUsdCents = new Decimal(existing.cancelledCostInUsdCents).plus(group.cancelledCostInUsdCents).toFixed(10);
+      if (existing.netTotalCostInUsdCents !== undefined && group.netTotalCostInUsdCents !== undefined) {
+        existing.netTotalCostInUsdCents = new Decimal(existing.netTotalCostInUsdCents).plus(group.netTotalCostInUsdCents).toFixed(10);
+        existing.netActualCostInUsdCents = new Decimal(existing.netActualCostInUsdCents!).plus(group.netActualCostInUsdCents!).toFixed(10);
+        existing.netProvisionedCostInUsdCents = new Decimal(existing.netProvisionedCostInUsdCents!).plus(group.netProvisionedCostInUsdCents!).toFixed(10);
+      }
       existing.runCount += group.runCount;
 
       if (group.minStartedAt && (!existing.minStartedAt || group.minStartedAt < existing.minStartedAt)) {
@@ -335,9 +348,11 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       : sql``;
 
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
+    // Gross + frozen net (features-service reads GROSS or NET per-attribution).
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
         ${costAggregateSelectSql("rc")},
+        ${costAggregateNetSelectSql("rc")},
         COUNT(DISTINCT r.id) as run_count,
         MIN(r.started_at) as min_started_at,
         MAX(r.started_at) as max_started_at
@@ -363,6 +378,9 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
+        netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
+        netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
         runCount: Number(row.run_count),
         minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
         maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
@@ -478,9 +496,11 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
       : sql``;
 
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
+    // Gross + frozen net (features-service reads GROSS or NET per-attribution).
     const result = await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
         ${costAggregateSelectSql("rc")},
+        ${costAggregateNetSelectSql("rc")},
         COUNT(DISTINCT r.id) as run_count,
         MIN(r.started_at) as min_started_at,
         MAX(r.started_at) as max_started_at
@@ -519,6 +539,9 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
+        netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
+        netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
         runCount: Number(row.run_count),
         minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
         maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,

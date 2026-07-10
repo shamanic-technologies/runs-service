@@ -493,7 +493,18 @@
             "type": "string"
           },
           "totalCostInUsdCents": {
-            "type": "string"
+            "type": "string",
+            "description": "GROSS cost (undiscounted). Unchanged from before the usage-discount freeze."
+          },
+          "netCostInUsdCents": {
+            "type": "string",
+            "nullable": true,
+            "description": "Frozen NET cost = gross × (1 − usageDiscountPct), captured at write time and never recomputed (non-retroactive). NULL for rows written before the freeze — read as net == gross."
+          },
+          "usageDiscountPct": {
+            "type": "string",
+            "nullable": true,
+            "description": "Frozen usage-discount fraction in [0,1] applied to produce the net. NULL when no discount was applied. Provenance only."
           },
           "status": {
             "$ref": "#/components/schemas/CostStatus"
@@ -532,6 +543,8 @@
           "quantity",
           "unitCostInUsdCents",
           "totalCostInUsdCents",
+          "netCostInUsdCents",
+          "usageDiscountPct",
           "status",
           "goal",
           "brandProfileId",
@@ -957,7 +970,12 @@
             "format": "uuid"
           },
           "spent_cents": {
-            "type": "string"
+            "type": "string",
+            "description": "GROSS platform usage total (undiscounted). Unchanged — existing consumers keep today's number."
+          },
+          "net_spent_cents": {
+            "type": "string",
+            "description": "Frozen NET platform usage total: SUM(COALESCE(net, gross)) over the same platform-projected rows. billing-service reads this for the spendable balance once it opts in; historical rows read net == gross."
           },
           "as_of": {
             "type": "string",
@@ -967,6 +985,7 @@
         "required": [
           "org_id",
           "spent_cents",
+          "net_spent_cents",
           "as_of"
         ]
       },
@@ -995,6 +1014,16 @@
                   "type": "string"
                 },
                 "cancelledCostInUsdCents": {
+                  "type": "string"
+                },
+                "netTotalCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure."
+                },
+                "netActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "netProvisionedCostInUsdCents": {
                   "type": "string"
                 },
                 "runCount": {
@@ -1066,6 +1095,16 @@
                         "type": "string"
                       },
                       "cancelledCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "netTotalCostInUsdCents": {
+                        "type": "string",
+                        "description": "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure."
+                      },
+                      "netActualCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "netProvisionedCostInUsdCents": {
                         "type": "string"
                       },
                       "runCount": {
@@ -2646,7 +2685,7 @@
     "/internal/org-usage-total": {
       "get": {
         "summary": "Org-level platform usage spend total",
-        "description": "Returns the total platform usage spend for one org as SUM(runs_costs.total_cost_in_usd_cents) over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is a decimal string with numeric(16,10) precision for billing-service authorize.",
+        "description": "Returns the total platform usage spend for one org over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is the GROSS total SUM(total_cost_in_usd_cents) (unchanged). net_spent_cents is the frozen NET total SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) — billing-service reads it for the spendable balance once it opts in. Both are decimal strings with numeric(16,10) precision.",
         "security": [
           {
             "apiKey": []

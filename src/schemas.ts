@@ -110,7 +110,9 @@ export const CostSchema = z
     costSource: CostSourceEnum,
     quantity: z.string(),
     unitCostInUsdCents: z.string(),
-    totalCostInUsdCents: z.string(),
+    totalCostInUsdCents: z.string().openapi({ description: "GROSS cost (undiscounted). Unchanged from before the usage-discount freeze." }),
+    netCostInUsdCents: z.string().nullable().openapi({ description: "Frozen NET cost = gross × (1 − usageDiscountPct), captured at write time and never recomputed (non-retroactive). NULL for rows written before the freeze — read as net == gross." }),
+    usageDiscountPct: z.string().nullable().openapi({ description: "Frozen usage-discount fraction in [0,1] applied to produce the net. NULL when no discount was applied. Provenance only." }),
     status: CostStatusEnum,
     goal: GoalEnum.nullable(),
     brandProfileId: z.string().uuid().nullable(),
@@ -729,7 +731,8 @@ export const OrgUsageTotalQuerySchema = z
 export const OrgUsageTotalResponseSchema = z
   .object({
     org_id: z.string().uuid(),
-    spent_cents: z.string(),
+    spent_cents: z.string().openapi({ description: "GROSS platform usage total (undiscounted). Unchanged — existing consumers keep today's number." }),
+    net_spent_cents: z.string().openapi({ description: "Frozen NET platform usage total: SUM(COALESCE(net, gross)) over the same platform-projected rows. billing-service reads this for the spendable balance once it opts in; historical rows read net == gross." }),
     as_of: z.string().datetime(),
   })
   .openapi("OrgUsageTotalResponse");
@@ -762,7 +765,7 @@ registry.registerPath({
   path: "/internal/org-usage-total",
   summary: "Org-level platform usage spend total",
   description:
-    "Returns the total platform usage spend for one org as SUM(runs_costs.total_cost_in_usd_cents) over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is a decimal string with numeric(16,10) precision for billing-service authorize.",
+    "Returns the total platform usage spend for one org over runs belonging to org_id where cost_source='platform' and status IN ('actual', 'provisioned'). Cancelled costs and org/BYOK costs are excluded. spent_cents is the GROSS total SUM(total_cost_in_usd_cents) (unchanged). net_spent_cents is the frozen NET total SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) — billing-service reads it for the spendable balance once it opts in. Both are decimal strings with numeric(16,10) precision.",
   security: [{ apiKey: [] }],
   request: {
     query: OrgUsageTotalQuerySchema,
@@ -877,6 +880,9 @@ export const StatsCostsResponseSchema = z
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
         cancelledCostInUsdCents: z.string(),
+        netTotalCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure." }),
+        netActualCostInUsdCents: z.string().optional(),
+        netProvisionedCostInUsdCents: z.string().optional(),
         runCount: z.number(),
         minStartedAt: z.string().datetime().nullable().openapi({ description: "Earliest started_at across matching runs" }),
         maxStartedAt: z.string().datetime().nullable().openapi({ description: "Latest started_at across matching runs" }),
@@ -925,6 +931,9 @@ export const StatsCostsByServiceTasksResponseSchema = z
             actualCostInUsdCents: z.string(),
             provisionedCostInUsdCents: z.string(),
             cancelledCostInUsdCents: z.string(),
+            netTotalCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure." }),
+            netActualCostInUsdCents: z.string().optional(),
+            netProvisionedCostInUsdCents: z.string().optional(),
             runCount: z.number(),
             minStartedAt: z.string().datetime().nullable(),
             maxStartedAt: z.string().datetime().nullable(),
