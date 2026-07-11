@@ -55,6 +55,16 @@ vi.mock("../../src/services/billing.js", () => ({
   notifyUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock usage-discount resolution — integration has no billing-service stub at
+// BILLING_SERVICE_URL, and resolution now runs unconditionally on every cost
+// write. Resolve to a zero discount (net == gross) and keep the real freeze
+// math (netFromGross) so gross assertions stay byte-identical.
+vi.mock("../../src/services/usage-discount.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/usage-discount.js")>();
+  const { Decimal } = await import("decimal.js");
+  return { ...actual, resolveUsageDiscount: vi.fn().mockResolvedValue(new Decimal(0)) };
+});
+
 const app = createTestApp();
 const authHeaders = getAuthHeaders({ orgId: ORG_ID, userId: USER_ID });
 const platformHeaders = getPlatformAuthHeaders({ serviceName: "stripe-service" });
