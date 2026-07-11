@@ -11,19 +11,17 @@
 //     per-org cache to avoid a billing call on every cost write.
 //   - netFromGross(gross, pct): the pure freeze math, net = gross * (1 - pct).
 //
-// Fail-loud doctrine (CLAUDE.md): when resolution is ENABLED and the discount
-// genuinely cannot be resolved (billing unreachable / 5xx / malformed body),
-// we THROW — we never silently write gross-as-net. The only non-error "zero
-// discount" cases are: resolution disabled, no orgId, or billing returns 404
-// (unknown org / no billing account) — all of which mean net == gross by
-// definition, matching the "no discount / unknown org → net == gross" spec.
+// Fail-loud doctrine (CLAUDE.md): when the discount genuinely cannot be
+// resolved (billing unreachable / 5xx / malformed body), we THROW — we never
+// silently write gross-as-net. The only non-error "zero discount" cases are:
+// no orgId, or billing returns 404 (unknown org / no billing account) — both of
+// which mean net == gross by definition, matching the "no discount / unknown
+// org → net == gross" spec.
 //
-// Rollout gate: USAGE_DISCOUNT_RESOLUTION_ENABLED. Default OFF, so until
-// billing-service ships GET /internal/accounts/by-org/{orgId}/usage-discount
-// and ops flips the flag, every org resolves to 0 (net == gross) with NO
-// billing call added to the hot cost-write path — zero regression, zero added
-// latency. Enable it only once the billing endpoint is live in the same env
-// (deploy-ordering: producer first).
+// Resolution runs UNCONDITIONALLY on every cost write (no env gate): billing's
+// GET /internal/accounts/by-org/{orgId}/usage-discount is live and
+// BILLING_SERVICE_URL / BILLING_SERVICE_API_KEY are present on runs-service.
+// A 60s per-org cache keeps the added latency off the hot path.
 
 import { Decimal } from "decimal.js";
 
@@ -44,10 +42,6 @@ export class UsageDiscountError extends Error {
 
 const ZERO = new Decimal(0);
 const ONE = new Decimal(1);
-
-function isResolutionEnabled(): boolean {
-  return process.env.USAGE_DISCOUNT_RESOLUTION_ENABLED === "true";
-}
 
 function isRetryable(err: unknown): boolean {
   if (err instanceof UsageDiscountError) return RETRYABLE_STATUS_CODES.has(err.statusCode);
@@ -73,19 +67,19 @@ export function __clearUsageDiscountCache(): void {
 
 /**
  * Resolve the org's frozen usage-discount fraction in [0,1].
- * Returns 0 when resolution is disabled, no orgId is present, or billing has no
- * account for the org (404). Throws UsageDiscountError when enabled and billing
- * is unreachable / errors / returns a malformed or out-of-range value.
+ * Returns 0 when no orgId is present, or billing has no account for the org
+ * (404). Throws UsageDiscountError when billing is unreachable / errors /
+ * returns a malformed or out-of-range value.
  */
 export async function resolveUsageDiscount(orgId: string | null | undefined): Promise<Decimal> {
-  if (!isResolutionEnabled() || !orgId) return ZERO;
+  if (!orgId) return ZERO;
 
   const cached = cache.get(orgId);
   if (cached && cached.expiresAt > Date.now()) return cached.pct;
 
   const billingUrl = process.env.BILLING_SERVICE_URL;
   if (!billingUrl) {
-    // Enabled but misconfigured — fail loud rather than silently skip.
+    // Misconfigured — fail loud rather than silently skip.
     throw new UsageDiscountError(502, "BILLING_SERVICE_URL is not configured");
   }
 
