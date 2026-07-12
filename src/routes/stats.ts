@@ -12,6 +12,7 @@ import {
   costAggregateSelectSql,
   costAggregateNetSelectSql,
   costAggregateWithSinceSql,
+  costAggregateNetWithSinceSql,
   platformTotalSelectSql,
 } from "../services/cost-aggregator.js";
 import {
@@ -580,11 +581,16 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
     const baseWhere = filterParts.reduce((acc, part) => sql`${acc} AND ${part}`);
 
     // Build per-window aggregations via cost-aggregator (atomic literals).
+    // Gross window columns (unchanged) + frozen NET window columns so a consumer
+    // can pace / display on what the org actually pays (post-usage-discount).
     const windowSelects = windows.flatMap((w, i) => {
       const sinceCondition = w.since
         ? sql`AND rc.created_at >= ${w.since}::timestamptz`
         : sql``;
-      return [costAggregateWithSinceSql("rc", i, sinceCondition)];
+      return [
+        costAggregateWithSinceSql("rc", i, sinceCondition),
+        costAggregateNetWithSinceSql("rc", i, sinceCondition),
+      ];
     });
 
     const result = await db.execute(sql`
@@ -601,6 +607,12 @@ router.post("/v1/stats/budget", requireApiKey, async (req, res) => {
       totalCostInUsdCents: new Decimal(row[`w${i}_total`] ?? 0).toFixed(10),
       actualCostInUsdCents: new Decimal(row[`w${i}_actual`] ?? 0).toFixed(10),
       provisionedCostInUsdCents: new Decimal(row[`w${i}_provisioned`] ?? 0).toFixed(10),
+      // Frozen NET (post-usage-discount) committed spend per window. Sum of the
+      // per-row frozen net (COALESCE(net, gross) for pre-freeze rows) — no
+      // read-time discount math. Gross fields above stay byte-identical.
+      netTotalCostInUsdCents: new Decimal(row[`w${i}_net_total`] ?? 0).toFixed(10),
+      netActualCostInUsdCents: new Decimal(row[`w${i}_net_actual`] ?? 0).toFixed(10),
+      netProvisionedCostInUsdCents: new Decimal(row[`w${i}_net_provisioned`] ?? 0).toFixed(10),
     }));
 
     res.json({ windows: responseWindows });
