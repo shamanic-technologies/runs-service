@@ -38,22 +38,10 @@ describe("resolveUsageDiscount", () => {
     __clearUsageDiscountCache();
     process.env.BILLING_SERVICE_URL = "http://localhost:9998";
     process.env.BILLING_SERVICE_API_KEY = "test-billing-key";
-    process.env.USAGE_DISCOUNT_RESOLUTION_ENABLED = "true";
   });
 
   afterEach(() => {
-    delete process.env.USAGE_DISCOUNT_RESOLUTION_ENABLED;
     vi.useRealTimers();
-  });
-
-  it("returns 0 without a billing call when resolution is disabled", async () => {
-    process.env.USAGE_DISCOUNT_RESOLUTION_ENABLED = "false";
-    const mockFetch = vi.fn();
-    vi.stubGlobal("fetch", mockFetch);
-
-    const pct = await resolveUsageDiscount(ORG_ID);
-    expect(pct.toNumber()).toBe(0);
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("returns 0 without a billing call when orgId is absent", async () => {
@@ -132,7 +120,7 @@ describe("resolveUsageDiscount", () => {
     await expect(resolveUsageDiscount(ORG_ID)).rejects.toBeInstanceOf(UsageDiscountError);
   });
 
-  it("FAILS LOUD when enabled but BILLING_SERVICE_URL is missing", async () => {
+  it("FAILS LOUD when BILLING_SERVICE_URL is missing", async () => {
     delete process.env.BILLING_SERVICE_URL;
     await expect(resolveUsageDiscount(ORG_ID)).rejects.toBeInstanceOf(UsageDiscountError);
   });

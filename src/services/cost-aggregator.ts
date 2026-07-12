@@ -80,6 +80,37 @@ export function costAggregateWithSinceSql(
 }
 
 /**
+ * NET variant of `costAggregateWithSinceSql`. Same atomic status predicates and
+ * same optional per-window `since` clause, but sums the FROZEN net amount
+ * instead of gross: `COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)`.
+ * The COALESCE makes historical rows (written before the discount freeze, net
+ * IS NULL) read as net == gross — the correct semantic (no discount existed
+ * then), so older windows never under-count.
+ *
+ * Output columns: w{i}_net_total, w{i}_net_actual, w{i}_net_provisioned.
+ * Added to /v1/stats/budget ALONGSIDE the gross window columns so a consumer can
+ * pace / display budgets on what the org ACTUALLY PAYS (post-usage-discount).
+ * The gross window columns are unchanged — a reader that ignores the net columns
+ * sees today's numbers exactly (backward-compatible).
+ */
+export function costAggregateNetWithSinceSql(
+  rcAlias: string,
+  windowIndex: number,
+  sinceClause: ReturnType<typeof sql>
+) {
+  const a = sql.raw(rcAlias);
+  const net = sql`COALESCE(${a}.net_cost_in_usd_cents, ${a}.total_cost_in_usd_cents)`;
+  const wt = sql.raw(`w${windowIndex}_net_total`);
+  const wa = sql.raw(`w${windowIndex}_net_actual`);
+  const wp = sql.raw(`w${windowIndex}_net_provisioned`);
+  return sql`
+    COALESCE(SUM(CASE WHEN ${a}.status IN ('actual','provisioned') ${sinceClause} THEN ${net} ELSE 0 END), 0)::text AS ${wt},
+    COALESCE(SUM(CASE WHEN ${a}.status = 'actual'      ${sinceClause} THEN ${net} ELSE 0 END), 0)::text AS ${wa},
+    COALESCE(SUM(CASE WHEN ${a}.status = 'provisioned' ${sinceClause} THEN ${net} ELSE 0 END), 0)::text AS ${wp}
+  `;
+}
+
+/**
  * Platform-only displayed total. Equivalent to `is_platform_projected` sum.
  * Spelled out as literal `cost_source='platform' AND status IN (...)` so the
  * doctrine stays atomic even when not using the generated column directly.

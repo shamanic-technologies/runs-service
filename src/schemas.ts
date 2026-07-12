@@ -965,9 +965,12 @@ export const BudgetResponseSchema = z
     windows: z.array(
       z.object({
         label: z.string(),
-        totalCostInUsdCents: z.string(),
-        actualCostInUsdCents: z.string(),
-        provisionedCostInUsdCents: z.string(),
+        totalCostInUsdCents: z.string().openapi({ description: "GROSS displayed total for the window (status IN actual,provisioned). Unchanged — list price." }),
+        actualCostInUsdCents: z.string().openapi({ description: "GROSS committed spend for the window (status = actual). Unchanged — list price." }),
+        provisionedCostInUsdCents: z.string().openapi({ description: "GROSS provisioned holds for the window (status = provisioned). Unchanged — list price." }),
+        netTotalCostInUsdCents: z.string().openapi({ description: "NET (post-usage-discount) displayed total = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status IN actual,provisioned. Frozen per-row net, no read-time discount math; pre-freeze rows fall back to gross." }),
+        netActualCostInUsdCents: z.string().openapi({ description: "NET (post-usage-discount) committed spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = actual. Pace / display budgets on this to reflect what the org actually pays." }),
+        netProvisionedCostInUsdCents: z.string().openapi({ description: "NET (post-usage-discount) provisioned holds = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = provisioned." }),
       })
     ),
   })
@@ -1129,7 +1132,7 @@ registry.registerPath({
   path: "/v1/stats/budget",
   summary: "Budget check with temporal windows",
   description:
-    "Returns aggregated actual + provisioned costs across temporal windows. Organization identified via x-org-id header.",
+    "Returns aggregated actual + provisioned costs across temporal windows. Organization identified via x-org-id header. Each window carries GROSS (list-price) total/actual/provisioned AND the frozen NET (post-usage-discount) equivalents (net*CostInUsdCents) so a consumer can pace / display budgets on what the org actually pays. Net is the sum of the per-row frozen net column (COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents) for pre-freeze rows) — no read-time discount math.",
   security: [{ apiKey: [] }],
   request: {
     body: {
