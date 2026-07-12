@@ -579,6 +579,98 @@ describe("Stats endpoints", () => {
       expect(res.body.windows[0].totalCostInUsdCents).toBe("1.5000000000");
       expect(res.body.windows[0].actualCostInUsdCents).toBe("1.0000000000");
       expect(res.body.windows[0].provisionedCostInUsdCents).toBe("0.5000000000");
+      // No frozen net on these rows (null) → net == gross via COALESCE fallback.
+      expect(res.body.windows[0].netTotalCostInUsdCents).toBe("1.5000000000");
+      expect(res.body.windows[0].netActualCostInUsdCents).toBe("1.0000000000");
+      expect(res.body.windows[0].netProvisionedCostInUsdCents).toBe("0.5000000000");
+    });
+
+    it("returns NET committed ≈ half gross for a 50%-discounted org, using gross for null-net rows", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        campaignId: "campaign-discount",
+      });
+
+      // Frozen-net rows: 50% usage discount → net = gross × (1 − 0.5).
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+        netCostInUsdCents: "0.5000000000",
+        usageDiscountPct: "0.50000000",
+        status: "actual",
+      });
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "500",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.5000000000",
+        netCostInUsdCents: "0.2500000000",
+        usageDiscountPct: "0.50000000",
+        status: "provisioned",
+      });
+      // Historical row that predates the freeze (net IS NULL) → net falls back to gross.
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "400",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.4000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/stats/budget")
+        .set(authHeaders)
+        .send({ campaignId: "campaign-discount", windows: [{ label: "all-time" }] });
+
+      expect(res.status).toBe(200);
+      const w = res.body.windows[0];
+      // Gross fields unchanged (list price).
+      expect(w.totalCostInUsdCents).toBe("1.9000000000"); // 1.0 + 0.5 + 0.4
+      expect(w.actualCostInUsdCents).toBe("1.4000000000"); // 1.0 + 0.4
+      expect(w.provisionedCostInUsdCents).toBe("0.5000000000");
+      // NET: frozen net for discounted rows, gross for the null-net historical row.
+      expect(w.netTotalCostInUsdCents).toBe("1.1500000000"); // 0.5 + 0.25 + 0.4
+      expect(w.netActualCostInUsdCents).toBe("0.9000000000"); // 0.5 + 0.4 (null-net → gross)
+      expect(w.netProvisionedCostInUsdCents).toBe("0.2500000000");
+    });
+
+    it("returns NET committed == gross committed for a non-discounted org", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        campaignId: "campaign-nodiscount",
+      });
+
+      // No discount: net frozen equal to gross (usageDiscountPct = 0).
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+        netCostInUsdCents: "1.0000000000",
+        usageDiscountPct: "0.00000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .post("/v1/stats/budget")
+        .set(authHeaders)
+        .send({ campaignId: "campaign-nodiscount", windows: [{ label: "all-time" }] });
+
+      expect(res.status).toBe(200);
+      const w = res.body.windows[0];
+      expect(w.actualCostInUsdCents).toBe("1.0000000000");
+      expect(w.netActualCostInUsdCents).toBe(w.actualCostInUsdCents);
+      expect(w.netTotalCostInUsdCents).toBe(w.totalCostInUsdCents);
     });
 
     it("returns zeros when org has no costs", async () => {
