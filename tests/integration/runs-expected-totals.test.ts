@@ -49,7 +49,7 @@ describe("GET /internal/runs-expected-totals", () => {
       .set(headers)
       .query({ org_id: ORG_ID });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 
   it("sums platform actual costs for completed/failed runs and returns exact decimal", async () => {
@@ -94,6 +94,8 @@ describe("GET /internal/runs-expected-totals", () => {
     expect(map.get(run1.id)).toBe("0.5000000000");
     expect(map.get(run2.id)).toBe("1.2500000000");
     expect(res.body.total_expected_cents).toBe("1.7500000000");
+    // AC2 — no discount on these rows → net == gross.
+    expect(res.body.net_total_expected_cents).toBe("1.7500000000");
   });
 
   it("sums multiple cost rows per run", async () => {
@@ -152,7 +154,7 @@ describe("GET /internal/runs-expected-totals", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 
   it("excludes provisioned and cancelled cost rows (only 'actual' counts)", async () => {
@@ -185,7 +187,7 @@ describe("GET /internal/runs-expected-totals", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 
   it("excludes non-terminal runs (running/pending)", async () => {
@@ -209,7 +211,7 @@ describe("GET /internal/runs-expected-totals", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 
   it("excludes runs with SUM = 0 (free runs)", async () => {
@@ -233,7 +235,7 @@ describe("GET /internal/runs-expected-totals", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 
   it("preserves fractional precision exactly (no rounding)", async () => {
@@ -260,6 +262,81 @@ describe("GET /internal/runs-expected-totals", () => {
     expect(res.body.runs).toHaveLength(1);
     expect(res.body.runs[0].expected_cents).toBe("1.2345678901");
     expect(res.body.total_expected_cents).toBe("1.2345678901");
+    expect(res.body.net_total_expected_cents).toBe("1.2345678901");
+  });
+
+  it("net total == gross for an org with only pre-discount rows (AC2)", async () => {
+    const run = await insertTestRun({
+      organizationId: ORG_ID,
+      serviceName: "svc-a",
+      taskName: "task-nodisc",
+      status: "completed",
+    });
+    // netCostInUsdCents omitted → column NULL → reader COALESCEs to gross.
+    await insertTestRunCost({
+      runId: run.id,
+      costName: "tokens",
+      quantity: "1",
+      unitCostInUsdCents: "4.0000000000",
+      totalCostInUsdCents: "4.0000000000",
+    });
+
+    const res = await request(app)
+      .get("/internal/runs-expected-totals")
+      .set(headers)
+      .query({ org_id: ORG_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.total_expected_cents).toBe("4.0000000000");
+    expect(res.body.net_total_expected_cents).toBe("4.0000000000");
+  });
+
+  it("mid-history discount: net = gross_pre + net_post, strictly below gross (AC3)", async () => {
+    // Pre-discount run — no frozen net (NULL) → contributes gross to both.
+    const preRun = await insertTestRun({
+      organizationId: ORG_ID,
+      serviceName: "svc-a",
+      taskName: "task-pre",
+      status: "completed",
+    });
+    await insertTestRunCost({
+      runId: preRun.id,
+      costName: "tokens",
+      quantity: "1",
+      unitCostInUsdCents: "10.0000000000",
+      totalCostInUsdCents: "10.0000000000",
+    });
+
+    // Post-discount run — 20% usage discount frozen at write → net = gross × 0.8.
+    const postRun = await insertTestRun({
+      organizationId: ORG_ID,
+      serviceName: "svc-a",
+      taskName: "task-post",
+      status: "completed",
+    });
+    await insertTestRunCost({
+      runId: postRun.id,
+      costName: "tokens",
+      quantity: "1",
+      unitCostInUsdCents: "10.0000000000",
+      totalCostInUsdCents: "10.0000000000",
+      netCostInUsdCents: "8.0000000000",
+      usageDiscountPct: "0.20000000",
+    });
+
+    const res = await request(app)
+      .get("/internal/runs-expected-totals")
+      .set(headers)
+      .query({ org_id: ORG_ID });
+
+    expect(res.status).toBe(200);
+    // gross = 10 + 10 = 20; net = 10 (pre, net==gross) + 8 (post) = 18.
+    expect(res.body.total_expected_cents).toBe("20.0000000000");
+    expect(res.body.net_total_expected_cents).toBe("18.0000000000");
+    // Strictly below gross by exactly the discounted portion ($2).
+    expect(
+      Number(res.body.net_total_expected_cents) < Number(res.body.total_expected_cents)
+    ).toBe(true);
   });
 
   it("excludes runs from other organizations", async () => {
@@ -283,6 +360,6 @@ describe("GET /internal/runs-expected-totals", () => {
       .query({ org_id: ORG_ID });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ total_expected_cents: "0", runs: [] });
+    expect(res.body).toEqual({ total_expected_cents: "0", net_total_expected_cents: "0", runs: [] });
   });
 });
