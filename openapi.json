@@ -932,7 +932,12 @@
         "type": "object",
         "properties": {
           "total_expected_cents": {
-            "type": "string"
+            "type": "string",
+            "description": "GROSS (list-price) actualized platform total: SUM(total_cost_in_usd_cents) over every completed/failed run's committed platform rows. Unchanged — existing drift-reconciliation consumers keep today's number."
+          },
+          "net_total_expected_cents": {
+            "type": "string",
+            "description": "Frozen NET (post-usage-discount) actualized platform total over the SAME rows: SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)). Pre-discount rows read net == gross (non-retroactive), so with no discount net == total_expected_cents. billing-service reads this for 'Confirmed charges' / the actual credit balance, consistent with net_spent_cents. numeric(16,10) decimal string."
           },
           "runs": {
             "type": "array",
@@ -943,6 +948,7 @@
         },
         "required": [
           "total_expected_cents",
+          "net_total_expected_cents",
           "runs"
         ]
       },
@@ -2656,7 +2662,7 @@
     "/internal/runs-expected-totals": {
       "get": {
         "summary": "Per-run expected platform-actual cost totals for an org",
-        "description": "Returns, for every completed/failed run in the org, the SUM of runs_costs.total_cost_in_usd_cents over rows where cost_source='platform' AND status='actual'. Runs with zero qualifying total are omitted. The org-level total_expected_cents is the sum of all per-run totals. All values are strings to preserve numeric(16,10) precision — billing-service uses this to detect drift against confirmed transactions.",
+        "description": "Returns, for every completed/failed run in the org, the SUM of runs_costs.total_cost_in_usd_cents over rows where cost_source='platform' AND status='actual'. Runs with zero qualifying gross total are omitted. The org-level total_expected_cents is the GROSS sum of all per-run totals (unchanged). net_total_expected_cents is the frozen NET (post-usage-discount) equivalent over the SAME rows — SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)); pre-discount rows read net == gross so it equals total_expected_cents when the org has no discount. All values are strings to preserve numeric(16,10) precision — billing-service uses total_expected_cents to detect drift against confirmed transactions and net_total_expected_cents for the discounted 'Confirmed charges' / actual credit balance.",
         "security": [
           {
             "apiKey": []
