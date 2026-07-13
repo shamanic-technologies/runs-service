@@ -158,10 +158,16 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
 
   const { org_id } = parsed.data;
 
+  // net_cents = frozen NET actualized amount per run: SUM(COALESCE(net, gross))
+  // over the SAME committed rows the gross sum_cents already covers. COALESCE
+  // makes pre-discount rows read net == gross (non-retroactive). The HAVING gate
+  // stays keyed on GROSS so the per-run set is byte-identical to today — the net
+  // total covers exactly the runs the gross total already covers.
   const result = await db.execute(sql`
     WITH per_run AS (
       SELECT r.id AS run_id,
-             SUM(rc.total_cost_in_usd_cents) AS sum_cents
+             SUM(rc.total_cost_in_usd_cents) AS sum_cents,
+             SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) AS net_cents
         FROM runs r
         JOIN runs_costs rc ON rc.run_id = r.id
        WHERE r.organization_id = ${org_id}
@@ -172,6 +178,7 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
     )
     SELECT
       COALESCE((SELECT SUM(sum_cents)::text FROM per_run), '0') AS total_expected_cents,
+      COALESCE((SELECT SUM(net_cents)::text FROM per_run), '0') AS net_total_expected_cents,
       COALESCE(
         (SELECT json_agg(json_build_object('run_id', run_id, 'expected_cents', sum_cents::text) ORDER BY run_id) FROM per_run),
         '[]'::json
@@ -181,11 +188,12 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
   const row = (result as any[])[0];
   const response = {
     total_expected_cents: row.total_expected_cents as string,
+    net_total_expected_cents: row.net_total_expected_cents as string,
     runs: row.runs as { run_id: string; expected_cents: string }[],
   };
 
   console.log(
-    `[runs-service] runs-expected-totals: org=${org_id} count=${response.runs.length} total=$${response.total_expected_cents}`
+    `[runs-service] runs-expected-totals: org=${org_id} count=${response.runs.length} total=$${response.total_expected_cents} net=$${response.net_total_expected_cents}`
   );
 
   res.json(response);
