@@ -890,6 +890,7 @@ function handlePublicCosts(req: any, res: any) {
       const result = await db.execute(sql`
         SELECT ${sql.raw(col)},
           ${costAggregateSelectSql("rc")},
+          ${costAggregateNetSelectSql("rc")},
           COUNT(DISTINCT r.id) as run_count
           ${quantitySelect}
         FROM runs r
@@ -909,6 +910,12 @@ function handlePublicCosts(req: any, res: any) {
           actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
           provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
           cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+          // Frozen NET (post per-org usage-discount). COALESCE(net, gross) makes
+          // pre-freeze / no-discount rows read net == gross. Additive: gross
+          // fields above unchanged, so a gross-only consumer sees identical numbers.
+          netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
+          netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
+          netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
           runCount: Number(row.run_count),
           minStartedAt: null,
           maxStartedAt: null,
@@ -1014,6 +1021,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         SELECT
           to_char(${bucketExpr}, 'YYYY-MM-DD') AS period,
           ${costAggregateSelectSql("rc")},
+          ${costAggregateNetSelectSql("rc")},
           COUNT(DISTINCT r.id) as run_count
         FROM runs r
         LEFT JOIN runs_costs rc ON rc.run_id = r.id
@@ -1029,6 +1037,13 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        // Frozen NET (post per-org usage-discount). COALESCE(net, gross) makes
+        // pre-freeze / no-discount rows read net == gross. Additive: gross fields
+        // above unchanged, so the fleet-revenue consumer can sum net instead of
+        // gross while every existing gross reader sees identical numbers.
+        netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
+        netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
+        netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
         runCount: Number(row.run_count),
       }));
 
