@@ -1072,6 +1072,9 @@ export const PublicCostsTimeseriesResponseSchema = z
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
         cancelledCostInUsdCents: z.string(),
+        netTotalCostInUsdCents: z.string().openapi({ description: "Frozen NET (post per-org usage-discount) displayed total = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status IN ('actual','provisioned'). Gross fields above are unchanged; sum net when you want the discounted (actually-collected) figure. Pre-freeze / no-discount rows fall back to gross." }),
+        netActualCostInUsdCents: z.string().openapi({ description: "Frozen NET realized spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'actual'. This is the post-usage-discount amount the fleet actually collects." }),
+        netProvisionedCostInUsdCents: z.string().openapi({ description: "Frozen NET provisioned holds = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'provisioned'." }),
         runCount: z.number(),
       })
     ),
@@ -1183,7 +1186,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs",
   summary: "Public cost aggregation (no auth)",
   description:
-    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName. No authentication required.",
+    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName. Each group carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum net for what the fleet actually collects. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
   },
@@ -1204,7 +1207,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs/timeseries",
   summary: "Public cost time-series (no auth)",
   description:
-    "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and optional startedAfter/startedBefore window bounds. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
+    "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and optional startedAfter/startedBefore window bounds. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Each bucket carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum netActual for the fleet's realized post-discount revenue. Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
   request: {
     query: PublicCostsTimeseriesQuerySchema,
   },
