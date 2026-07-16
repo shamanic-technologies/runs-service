@@ -1068,6 +1068,50 @@ describe("Stats endpoints", () => {
       expect(totalRunCount).toBe(2);
     });
 
+    it("surfaces frozen NET alongside gross; pre-freeze / no-discount rows read net == gross", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        campaignId: "camp-net-pub",
+      });
+      // Discounted actual row (50% off): gross 1.0, frozen net 0.5.
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+        netCostInUsdCents: "0.5000000000",
+        usageDiscountPct: "0.50000000",
+        status: "actual",
+      });
+      // Historical row that predates the freeze (net IS NULL) → net falls back to gross.
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        quantity: "400",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.4000000000",
+        status: "actual",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "campaignId", campaignId: "camp-net-pub" });
+
+      expect(res.status).toBe(200);
+      const g = res.body.groups.find((x: any) => x.dimensions.campaignId === "camp-net-pub");
+      expect(g).toBeDefined();
+      // Gross unchanged (list price).
+      expect(g.totalCostInUsdCents).toBe("1.4000000000");
+      expect(g.actualCostInUsdCents).toBe("1.4000000000");
+      // NET realized = frozen net for discounted row + gross for null-net historical row.
+      expect(g.netTotalCostInUsdCents).toBe("0.9000000000"); // 0.5 + 0.4
+      expect(g.netActualCostInUsdCents).toBe("0.9000000000");
+      expect(g.netProvisionedCostInUsdCents).toBe("0.0000000000");
+    });
+
   });
 
   describe("GET /v1/stats/public/costs/timeseries", () => {
@@ -1194,6 +1238,72 @@ describe("Stats endpoints", () => {
       expect(sumBuckets.total.toFixed(10)).toBe(grp.totalCostInUsdCents);
       expect(sumBuckets.actual.toFixed(10)).toBe(grp.actualCostInUsdCents);
       expect(sumBuckets.provisioned.toFixed(10)).toBe(grp.provisionedCostInUsdCents);
+    });
+
+    it("surfaces frozen NET per bucket; net realized reconciles with the untimed net total", async () => {
+      const NETF = "ts-net-feat";
+      const run1 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: NETF,
+        startedAt: new Date("2026-10-01T01:00:00.000Z"),
+      });
+      const run2 = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: NETF,
+        startedAt: new Date("2026-10-02T01:00:00.000Z"),
+      });
+      // Day 1 — discounted actual: gross 1.0, frozen net 0.5.
+      await insertTestRunCost({
+        runId: run1.id,
+        costName: "token",
+        quantity: "1000",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "1.0000000000",
+        netCostInUsdCents: "0.5000000000",
+        usageDiscountPct: "0.50000000",
+        status: "actual",
+      });
+      // Day 2 — historical actual with no discount frozen (net IS NULL → net == gross).
+      await insertTestRunCost({
+        runId: run2.id,
+        costName: "token",
+        quantity: "400",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.4000000000",
+        status: "actual",
+      });
+
+      const timed = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ featureSlug: NETF });
+      const untimed = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureSlug", featureSlug: NETF });
+
+      expect(timed.status).toBe(200);
+      expect(timed.body.buckets).toHaveLength(2);
+      const [d1, d2] = timed.body.buckets;
+      // Gross unchanged.
+      expect(d1.totalCostInUsdCents).toBe("1.0000000000");
+      expect(d2.totalCostInUsdCents).toBe("0.4000000000");
+      // Frozen net: discounted row → 0.5; null-net historical row → gross 0.4.
+      expect(d1.netTotalCostInUsdCents).toBe("0.5000000000");
+      expect(d1.netActualCostInUsdCents).toBe("0.5000000000");
+      expect(d2.netActualCostInUsdCents).toBe("0.4000000000");
+
+      // Reconcile: sum of net-actual buckets == untimed net-actual total for the same filter.
+      const sumNet = timed.body.buckets.reduce(
+        (acc: Decimal, b: any) => acc.plus(b.netActualCostInUsdCents),
+        new Decimal(0)
+      );
+      const grp = untimed.body.groups.find((g: any) => g.dimensions.featureSlug === NETF);
+      expect(grp).toBeDefined();
+      expect(sumNet.toFixed(10)).toBe(grp.netActualCostInUsdCents);
+      expect(grp.netActualCostInUsdCents).toBe("0.9000000000"); // 0.5 + 0.4
     });
 
     it("filters by featureSlugs (comma-separated) and excludes other features", async () => {
