@@ -1397,7 +1397,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(mockedNotify).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mockedNotify).toHaveBeenCalledTimes(1));
 
       // 1000 * 0.0003 + 200 * 0.0012 = 0.3 + 0.24 = 0.54
       const [ctx, payload] = mockedNotify.mock.calls[0];
@@ -1428,7 +1428,7 @@ describe("Runs CRUD", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(mockedNotify).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mockedNotify).toHaveBeenCalledTimes(1));
 
       // Platform-only sum: 1000 * 0.0003 = 0.3 (org row excluded)
       const [, payload] = mockedNotify.mock.calls[0];
@@ -1463,6 +1463,7 @@ describe("Runs CRUD", () => {
       expect(res.status).toBe(201);
       expect(res.body.costs[0].status).toBe("provisioned");
 
+      await vi.waitFor(() => expect(mockedNotify).toHaveBeenCalledTimes(1));
       const [, payload] = mockedNotify.mock.calls[0];
       expect(payload.spentTotalCents).toBe("0.3000000000");
     });
@@ -1496,7 +1497,7 @@ describe("Runs CRUD", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("actual");
-      expect(mockedNotify).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mockedNotify).toHaveBeenCalledTimes(1));
 
       const [, payload] = mockedNotify.mock.calls[0];
       expect(payload.spentTotalCents).toBe("0.3000000000");
@@ -1531,7 +1532,7 @@ describe("Runs CRUD", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("cancelled");
-      expect(mockedNotify).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mockedNotify).toHaveBeenCalledTimes(1));
 
       const [, payload] = mockedNotify.mock.calls[0];
       expect(payload.spentTotalCents).toBe("0.0000000000");
