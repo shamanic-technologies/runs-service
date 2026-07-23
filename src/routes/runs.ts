@@ -748,25 +748,34 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       }
     }
 
-    // Fire-and-forget cache-invalidation hint to billing-service.
+    res.status(201).json({ costs: inserted });
+
+    // Fire-and-forget cache-invalidation hint to billing-service — MUST run AFTER
+    // the response and detached, never on the request path. runs_costs is already
+    // committed above (source of truth); this only proactively invalidates billing's
+    // cache, and billing re-derives on every authorize via GET /internal/org-usage-total.
+    // Awaiting it (the SUM query + up to ~47s of notifyUsage retries) would stall the
+    // cost-write response and hold a pool connection whenever billing-service is slow.
     const billingUserId = req.userId || run.userId;
     if (billingUserId && itemsToCreate.length > 0) {
-      const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
-      await notifyUsage(
-        {
-          orgId: req.orgId,
-          userId: billingUserId,
-          runId: id,
-          brandIds: req.headerBrandIds,
-          campaignId: req.headerCampaignId,
-          workflowSlug: req.headerWorkflowSlug,
-          featureSlug: req.headerFeatureSlug,
-        },
-        { spentTotalCents },
+      void (async () => {
+        const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
+        await notifyUsage(
+          {
+            orgId: req.orgId,
+            userId: billingUserId,
+            runId: id,
+            brandIds: req.headerBrandIds,
+            campaignId: req.headerCampaignId,
+            workflowSlug: req.headerWorkflowSlug,
+            featureSlug: req.headerFeatureSlug,
+          },
+          { spentTotalCents },
+        );
+      })().catch((err) =>
+        console.error("[runs-service] billing usage hint failed:", err),
       );
     }
-
-    res.status(201).json({ costs: inserted });
   } catch (err) {
     if (err instanceof UpstreamError) {
       console.error(`[runs-service] costs-service unavailable (${err.statusCode}):`, err.message);
@@ -845,24 +854,30 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
       return row;
     });
 
+    res.json(updated);
+
+    // Fire-and-forget cache-invalidation hint — detached, runs AFTER the response.
+    // Never block the cost-write on billing (see POST /:id/costs above for rationale).
     const billingUserId = req.userId || run.userId;
     if (billingUserId) {
-      const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
-      await notifyUsage(
-        {
-          orgId: req.orgId,
-          userId: billingUserId,
-          runId: id,
-          brandIds: req.headerBrandIds,
-          campaignId: req.headerCampaignId,
-          workflowSlug: req.headerWorkflowSlug,
-          featureSlug: req.headerFeatureSlug,
-        },
-        { spentTotalCents },
+      void (async () => {
+        const spentTotalCents = await fetchOrgPlatformSpent(req.orgId);
+        await notifyUsage(
+          {
+            orgId: req.orgId,
+            userId: billingUserId,
+            runId: id,
+            brandIds: req.headerBrandIds,
+            campaignId: req.headerCampaignId,
+            workflowSlug: req.headerWorkflowSlug,
+            featureSlug: req.headerFeatureSlug,
+          },
+          { spentTotalCents },
+        );
+      })().catch((err) =>
+        console.error("[runs-service] billing usage hint failed:", err),
       );
     }
-
-    res.json(updated);
   } catch (err) {
     console.error("[runs-service] Error updating cost:", err);
     res.status(500).json({ error: "Internal server error" });
