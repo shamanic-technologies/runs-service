@@ -189,4 +189,44 @@ describe("GET /internal/org-usage-total", () => {
     expect(res.status).toBe(200);
     expect(res.body.spent_cents).toBe("0.1000000000");
   });
+
+  it("reads the denormalized organization_id — a NULL-org cost row is not counted (backfill contract)", async () => {
+    // Post-swap (migration 0029) the SUM keys on runs_costs.organization_id, NOT a
+    // join to runs. A pre-backfill row (org run, but organization_id still NULL)
+    // is therefore excluded — which is exactly why the read swap must ship only
+    // AFTER the out-of-band backfill fills every existing row.
+    const run = await insertTestRun({
+      organizationId: ORG_ID,
+      serviceName: "svc-a",
+      taskName: "task-null-org-cost",
+      status: "completed",
+    });
+    await insertTestRunCost({
+      runId: run.id,
+      costName: "tokens-backfilled",
+      quantity: "1",
+      unitCostInUsdCents: "3.0000000000",
+      totalCostInUsdCents: "3.0000000000",
+      status: "actual",
+      organizationId: ORG_ID,
+    });
+    await insertTestRunCost({
+      runId: run.id,
+      costName: "tokens-pre-backfill",
+      quantity: "1",
+      unitCostInUsdCents: "99.0000000000",
+      totalCostInUsdCents: "99.0000000000",
+      status: "actual",
+      organizationId: null, // force NULL (simulate pre-backfill)
+    });
+
+    const res = await request(app)
+      .get("/internal/org-usage-total")
+      .set(headers)
+      .query({ org_id: ORG_ID });
+
+    expect(res.status).toBe(200);
+    // Only the backfilled row counts; the NULL-org row is excluded.
+    expect(res.body.spent_cents).toBe("3.0000000000");
+  });
 });

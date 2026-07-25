@@ -11,10 +11,12 @@
 //
 //   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/backfill-cost-org.ts
 //
-// Idempotent: only fills rows where organization_id IS NULL. Re-running after
-// completion updates zero rows. Chunked so no single statement locks the table
-// or exceeds a statement timeout. Rows whose run is org-less (run.organization_id
-// IS NULL) are intentionally left NULL — org-spend reads never count them.
+// Walks `created_at` in fixed time windows (bounded by idx_runs_costs_created_at),
+// so it is a SINGLE forward index pass — never a full-table re-scan per batch —
+// with short per-window locks. Idempotent: only fills rows where organization_id
+// IS NULL, so re-running resumes / no-ops. Rows whose run is org-less
+// (run.organization_id IS NULL) are intentionally left NULL — org-spend reads
+// never count them. Window size (default 6h) via BACKFILL_WINDOW_HOURS.
 
 import postgres from "postgres";
 
@@ -24,36 +26,43 @@ if (!url) {
   process.exit(1);
 }
 
-const BATCH = Number(process.env.BACKFILL_BATCH ?? 20000);
+const WINDOW_MS = Number(process.env.BACKFILL_WINDOW_HOURS ?? 6) * 3600 * 1000;
 
 const sql = postgres(url, { max: 1, idle_timeout: 30, connect_timeout: 30 });
 
 async function main() {
-  console.log(`[backfill-cost-org] starting (batch=${BATCH})`);
+  console.log(`[backfill-cost-org] starting (window=${WINDOW_MS / 3600000}h)`);
+
+  const [bounds] = await sql<{ lo: Date | null; hi: Date | null }[]>`
+    SELECT min(created_at) AS lo, max(created_at) AS hi
+    FROM runs_costs_old WHERE organization_id IS NULL
+  `;
+  if (!bounds.lo || !bounds.hi) {
+    console.log("[backfill-cost-org] no NULL-org rows — nothing to do");
+    return;
+  }
+
+  const hi = bounds.hi.getTime();
+  let cursor = bounds.lo.getTime();
   let total = 0;
-  for (;;) {
-    // Grab a bounded batch of NULL-org cost rows whose run HAS an org, and copy
-    // it over. Keyset-free (each pass shrinks the NULL set); terminates when no
-    // fillable rows remain. FOR UPDATE SKIP LOCKED keeps it safe alongside live
-    // writes.
+  while (cursor <= hi) {
+    const from = new Date(cursor).toISOString();
+    const to = new Date(cursor + WINDOW_MS).toISOString();
     const res = await sql`
-      WITH batch AS (
-        SELECT rc.id, r.organization_id AS org
-        FROM runs_costs_old rc
-        JOIN runs_old r ON r.id = rc.run_id
-        WHERE rc.organization_id IS NULL
-          AND r.organization_id IS NOT NULL
-        LIMIT ${BATCH}
-        FOR UPDATE OF rc SKIP LOCKED
-      )
       UPDATE runs_costs_old rc
-        SET organization_id = batch.org
-        FROM batch
-        WHERE rc.id = batch.id
+        SET organization_id = r.organization_id
+        FROM runs_old r
+        WHERE r.id = rc.run_id
+          AND rc.created_at >= ${from}::timestamptz
+          AND rc.created_at <  ${to}::timestamptz
+          AND rc.organization_id IS NULL
+          AND r.organization_id IS NOT NULL
     `;
-    if (res.count === 0) break;
-    total += res.count;
-    console.log(`[backfill-cost-org] filled ${res.count} (running total ${total})`);
+    if (res.count > 0) {
+      total += res.count;
+      console.log(`[backfill-cost-org] ${from} .. ${to}: filled ${res.count} (total ${total})`);
+    }
+    cursor += WINDOW_MS;
   }
 
   const [{ remaining }] = await sql<{ remaining: string }[]>`
