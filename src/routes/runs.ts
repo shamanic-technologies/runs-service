@@ -50,14 +50,14 @@ const router = Router();
 // column + idx_runs_costs_projected partial index).
 // ---------------------------------------------------------------------------
 async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
-  // Inline JOIN bounded by org_id. The gold view v_org_platform_spend was
-  // dropped (migration 0026): filter pushdown through its GROUP BY was unreliable
-  // and the sibling v_runs_with_descendants OOMed prod — see df9230e.
+  // Reads the denormalized runs_costs.organization_id (frozen at write, migration
+  // 0029) — index scan over idx_runs_costs_org_projected, no join, no full-table
+  // scan. Byte-identical to the old runs-join (a run's projected costs all carry
+  // its org). SAFE only after the out-of-band backfill (expand -> backfill -> swap).
   const result = await db.execute(sql`
     SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0)::text AS spent_cents
-      FROM runs r
-      JOIN runs_costs rc ON rc.run_id = r.id
-     WHERE r.organization_id = ${orgId}
+      FROM runs_costs rc
+     WHERE rc.organization_id = ${orgId}
        AND rc.is_platform_projected
   `);
   const rows = result as any[];
