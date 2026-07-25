@@ -215,6 +215,9 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
             netCostInUsdCents: net,
             usageDiscountPct: discountPctStr,
             status: item.status ?? "actual",
+            // Denormalized org (migration 0029): the RUN's org (may be NULL for
+            // org-less platform runs). org-spend SUMs never count NULL-org rows.
+            runOrganizationId: run.organizationId ?? null,
             ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },

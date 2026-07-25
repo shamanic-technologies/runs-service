@@ -19,6 +19,16 @@ describe("Database indexes", () => {
     expect(result[0].indexdef).toContain("quantity");
   });
 
+  it("has the partial covering org-projected index on runs_costs (migration 0029)", async () => {
+    const result = await sql`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE tablename = 'runs_costs_old' AND indexname = 'idx_runs_costs_org_projected'
+    `;
+    expect(result).toHaveLength(1);
+    expect(result[0].indexdef).toContain("organization_id");
+    expect(result[0].indexdef).toContain("is_platform_projected");
+  });
+
   it("has the created_at index on runs_costs for budget queries", async () => {
     const result = await sql`
       SELECT indexname FROM pg_indexes
