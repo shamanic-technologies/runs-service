@@ -722,6 +722,10 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
             netCostInUsdCents: net,
             usageDiscountPct: discountPctStr,
             status: item.status ?? "actual",
+            // Denormalized org (migration 0029): the RUN's org, not any header
+            // override, so org-spend SUMs on runs_costs match the old runs-join
+            // byte-for-byte.
+            runOrganizationId: run.organizationId ?? null,
             ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },
