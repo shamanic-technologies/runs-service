@@ -68,6 +68,11 @@ export const runsCosts = pgTable(
     brandProfileId: text("brand_profile_id"),
     audienceId: text("audience_id"),
     workflowContext: text("workflow_context"),
+    // Denormalized from the owning run at cost-write time (migration 0029), so
+    // org-level platform-spend SUMs read a single indexed table instead of
+    // joining runs. NULL for rows written before the freeze / out-of-band
+    // backfill. Frozen from run.organization_id — never recomputed.
+    organizationId: uuid("organization_id"),
     idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -78,6 +83,12 @@ export const runsCosts = pgTable(
     index("idx_runs_costs_goal").on(table.goal),
     index("idx_runs_costs_brand_profile").on(table.brandProfileId),
     index("idx_runs_costs_audience").on(table.audienceId),
+    // Partial covering index for org-level platform-spend SUMs (migration 0029).
+    // INCLUDE (total/net cost) is applied in the hand-authored migration; drizzle's
+    // index builder can't express INCLUDE, so it is intentionally omitted here.
+    index("idx_runs_costs_org_projected")
+      .on(table.organizationId)
+      .where(sql`is_platform_projected`),
     uniqueIndex("idx_runs_costs_idempotency_key")
       .on(table.runId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
