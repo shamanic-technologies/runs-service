@@ -217,12 +217,18 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
   // effect when each cost was written); COALESCE(net, total) so historical rows
   // read net == gross. billing-service reads net_spent_cents for the spendable
   // balance once it opts in; gross stays the default.
+  // Reads the denormalized runs_costs.organization_id (frozen at write, migration
+  // 0029) instead of joining runs. Serves as an index scan over idx_runs_costs_org_projected
+  // (partial covering, WHERE is_platform_projected) — no join, no full-table scan.
+  // SAFE only because the out-of-band backfill has populated organization_id on
+  // every pre-existing row (expand -> backfill -> swap). Byte-identical to the old
+  // runs-join: the denormalized org is the RUN's org, and a run's projected costs
+  // all carry its org, so the SUM is unchanged.
   const result = await db.execute(sql`
     SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents,
            COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)), 0) AS net_spent_cents
-      FROM runs r
-      JOIN runs_costs rc ON rc.run_id = r.id
-     WHERE r.organization_id = ${org_id}
+      FROM runs_costs rc
+     WHERE rc.organization_id = ${org_id}
        AND rc.is_platform_projected
   `);
 
