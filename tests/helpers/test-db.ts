@@ -77,21 +77,27 @@ export async function insertTestRunCost(data: {
   // undefined → derive from the run (mirrors the migration 0029 freeze);
   // null → force NULL (simulate a pre-backfill row); string → use as-is.
   organizationId?: string | null;
+  // undefined → derive from the run (mirrors the migration 0030 freeze);
+  // null → force NULL (simulate a pre-backfill row); Date → use as-is.
+  runStartedAt?: Date | null;
   idempotencyKey?: string;
 }) {
-  // Mirror the production freeze (migration 0029): the cost row carries its run's
-  // organization_id. This helper inserts silver directly (bypassing the cost.added
-  // trigger), so resolve the run's org here unless the caller overrides it — else
-  // the de-joined org-spend reads (which SUM runs_costs.organization_id) would miss
-  // helper-inserted costs.
+  // Mirror the production freezes: the cost row carries its run's organization_id
+  // (migration 0029) and its run's started_at (migration 0030). This helper inserts
+  // silver directly (bypassing the cost.added trigger), so resolve both from the run
+  // here unless the caller overrides them — else the de-joined reads (org-spend SUMs
+  // on runs_costs.organization_id, the dated spend series on
+  // runs_costs.run_started_at) would miss helper-inserted costs.
   let organizationId = data.organizationId ?? null;
-  if (data.organizationId === undefined) {
+  let runStartedAt = data.runStartedAt ?? null;
+  if (data.organizationId === undefined || data.runStartedAt === undefined) {
     const [run] = await db
-      .select({ organizationId: runs.organizationId })
+      .select({ organizationId: runs.organizationId, startedAt: runs.startedAt })
       .from(runs)
       .where(eq(runs.id, data.runId))
       .limit(1);
-    organizationId = run?.organizationId ?? null;
+    if (data.organizationId === undefined) organizationId = run?.organizationId ?? null;
+    if (data.runStartedAt === undefined) runStartedAt = run?.startedAt ?? null;
   }
 
   const [cost] = await db
@@ -99,6 +105,7 @@ export async function insertTestRunCost(data: {
     .values({
       ...data,
       organizationId,
+      runStartedAt,
       costSource: data.costSource ?? "platform",
       status: data.status ?? "actual",
       idempotencyKey: data.idempotencyKey ?? null,
