@@ -111,13 +111,19 @@ export function costAggregateNetWithSinceSql(
 }
 
 /**
- * Platform-only displayed total. Equivalent to `is_platform_projected` sum.
- * Spelled out as literal `cost_source='platform' AND status IN (...)` so the
- * doctrine stays atomic even when not using the generated column directly.
+ * Platform-only displayed total (`cost_source='platform' AND status IN
+ * ('actual','provisioned')`) for a read whose WHERE clause already carries the
+ * canonical `is_platform_projected` generated column — which is what lets the
+ * partial index drive the scan. Moving the predicate from a SELECT-side CASE into
+ * the WHERE is what turns the dated spend series into an index-only scan of
+ * `idx_runs_costs_projected_started` instead of a full-ledger scan joined to `runs`.
+ *
+ * The caller MUST filter `WHERE <alias>.is_platform_projected`; the generated
+ * column is the single source for that predicate (never the inline literal).
  */
-export function platformTotalSelectSql(rcAlias = "rc") {
+export function platformProjectedSumSql(rcAlias = "rc") {
   const a = sql.raw(rcAlias);
-  return sql`COALESCE(SUM(CASE WHEN ${a}.cost_source = 'platform' AND ${a}.status IN ('actual','provisioned') THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)`;
+  return sql`COALESCE(SUM(${a}.total_cost_in_usd_cents), 0)`;
 }
 
 /**

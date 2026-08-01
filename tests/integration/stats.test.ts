@@ -1007,6 +1007,77 @@ describe("Stats endpoints", () => {
       expect(res.body.error).toMatch(/groupBy/i);
     });
 
+    // The runs-side dimensions are served by a split (counts | sums) aggregation
+    // rather than one LEFT JOIN (runs-service#206). These pin the two behaviours the
+    // split could plausibly change: a group whose runs have NO cost rows at all, and
+    // a NULL dimension value.
+    it("keeps a group whose runs have no cost rows at all", async () => {
+      await insertTestRun({
+        organizationId: ORG_ID, serviceName: "svc", taskName: "task", brandIds: ["brand-costless"],
+      });
+      const paid = await insertTestRun({
+        organizationId: ORG_ID, serviceName: "svc", taskName: "task", brandIds: ["brand-paid"],
+      });
+      await insertTestRunCost({
+        runId: paid.id, costName: "token", quantity: "100",
+        unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      const costless = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-costless");
+      expect(costless).toBeDefined();
+      expect(costless.runCount).toBe(1);
+      expect(costless.totalCostInUsdCents).toBe("0.0000000000");
+      expect(costless.netTotalCostInUsdCents).toBe("0.0000000000");
+    });
+
+    it("keeps a NULL dimension as its own group", async () => {
+      const noCampaign = await insertTestRun({
+        organizationId: ORG_ID, serviceName: "svc", taskName: "task",
+      });
+      await insertTestRunCost({
+        runId: noCampaign.id, costName: "token", quantity: "100",
+        unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "campaignId" });
+
+      expect(res.status).toBe(200);
+      const nullGroup = res.body.groups.find((g: any) => g.dimensions.campaignId === null);
+      expect(nullGroup).toBeDefined();
+      expect(nullGroup.runCount).toBe(1);
+      expect(nullGroup.totalCostInUsdCents).toBe("0.2000000000");
+    });
+
+    it("counts a run once per brand even with several cost rows", async () => {
+      const run = await insertTestRun({
+        organizationId: ORG_ID, serviceName: "svc", taskName: "task", brandIds: ["brand-multi"],
+      });
+      await insertTestRunCost({
+        runId: run.id, costName: "token", quantity: "100",
+        unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.1000000000",
+      });
+      await insertTestRunCost({
+        runId: run.id, costName: "compute", quantity: "10",
+        unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "0.2000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "brandId" });
+
+      expect(res.status).toBe(200);
+      const group = res.body.groups.find((g: any) => g.dimensions.brandId === "brand-multi");
+      expect(group.runCount).toBe(1);
+      expect(group.totalCostInUsdCents).toBe("0.3000000000");
+    });
+
     it("does not require auth", async () => {
       const res = await request(app)
         .get("/v1/stats/public/costs")
@@ -1941,6 +2012,67 @@ describe("Stats endpoints", () => {
 
         expect(res.status).toBe(200);
         expect(res.body.weekly[0].totalCostInUsdCents).toBe("0.0000000123");
+      });
+    });
+
+    // The monthly series, the weekly series, byStatus and the untimed total are all
+    // derived from ONE de-joined UTC-day pass (runs-service#206). These pin the
+    // reconciliation invariant that makes that legal: the dated buckets of either
+    // grain must sum to the untimed total for the same (here: unfiltered) filter set.
+    describe("reconciliation across grains", () => {
+      it("sums monthly and weekly buckets to the same untimed total", async () => {
+        // Deliberately spread across a week that straddles a month boundary, so the
+        // two grains cut the same days differently and can only agree if both are
+        // rolled up from the same daily buckets.
+        const days = [
+          new Date("2026-01-07T12:00:00Z"),
+          new Date("2026-01-29T12:00:00Z"),
+          new Date("2026-01-31T23:59:59Z"),
+          new Date("2026-02-01T00:00:00Z"),
+          new Date("2026-02-16T12:00:00Z"),
+        ];
+        for (const [i, startedAt] of days.entries()) {
+          const run = await insertTestRun({
+            organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed", startedAt,
+          });
+          await insertTestRunCost({
+            runId: run.id, costName: "token", quantity: "1",
+            unitCostInUsdCents: "0.0000000001", totalCostInUsdCents: `0.000000000${i + 1}`,
+          });
+        }
+
+        const res = await request(app).get("/public/stats/runs");
+        expect(res.status).toBe(200);
+
+        const sum = (rows: Array<{ totalCostInUsdCents: string }>) =>
+          rows.reduce((acc, row) => acc.plus(row.totalCostInUsdCents), new Decimal(0)).toFixed(10);
+
+        expect(sum(res.body.monthly)).toBe(res.body.totalCostInUsdCents);
+        expect(sum(res.body.weekly)).toBe(res.body.totalCostInUsdCents);
+        expect(res.body.totalCostInUsdCents).toBe("0.0000000015");
+
+        // Run counts reconcile the same way, per status.
+        const counted = (rows: Array<{ completed: number }>) =>
+          rows.reduce((acc, row) => acc + row.completed, 0);
+        expect(counted(res.body.monthly)).toBe(res.body.byStatus.completed);
+        expect(counted(res.body.weekly)).toBe(res.body.byStatus.completed);
+        expect(res.body.byStatus.completed).toBe(days.length);
+      });
+
+      it("fails loud when a platform cost row carries no frozen run_started_at", async () => {
+        // Simulates the migration-0030 backfill being incomplete. Such a row cannot be
+        // placed in any dated bucket, so serving it would silently drop its spend from
+        // BOTH the dated series and the untimed total — the reconciliation would still
+        // "hold" while under-reporting. Refuse instead.
+        const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "svc", taskName: "t", status: "completed" });
+        await insertTestRunCost({
+          runId: run.id, costName: "token", quantity: "100",
+          unitCostInUsdCents: "0.0010000000", totalCostInUsdCents: "1.0000000000",
+          runStartedAt: null,
+        });
+
+        const res = await request(app).get("/public/stats/runs");
+        expect(res.status).toBe(500);
       });
     });
   });
