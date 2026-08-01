@@ -29,6 +29,37 @@ describe("Database indexes", () => {
     expect(result[0].indexdef).toContain("is_platform_projected");
   });
 
+  it("has the partial covering projected-started index on runs_costs (migration 0030)", async () => {
+    const result = await sql`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE tablename = 'runs_costs_old' AND indexname = 'idx_runs_costs_projected_started'
+    `;
+    expect(result).toHaveLength(1);
+    expect(result[0].indexdef).toContain("run_started_at");
+    expect(result[0].indexdef).toContain("total_cost_in_usd_cents");
+    expect(result[0].indexdef).toContain("is_platform_projected");
+  });
+
+  it("has the started_at + status covering index on runs (migration 0030)", async () => {
+    const result = await sql`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE tablename = 'runs_old' AND indexname = 'idx_runs_started_status'
+    `;
+    expect(result).toHaveLength(1);
+    expect(result[0].indexdef).toContain("started_at");
+    expect(result[0].indexdef).toContain("status");
+  });
+
+  it("has the feature_slug + brand_ids covering index on runs (migration 0030)", async () => {
+    const result = await sql`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE tablename = 'runs_old' AND indexname = 'idx_runs_feature_brands'
+    `;
+    expect(result).toHaveLength(1);
+    expect(result[0].indexdef).toContain("feature_slug");
+    expect(result[0].indexdef).toContain("brand_ids");
+  });
+
   it("has the created_at index on runs_costs for budget queries", async () => {
     const result = await sql`
       SELECT indexname FROM pg_indexes

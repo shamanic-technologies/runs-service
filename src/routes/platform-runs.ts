@@ -218,6 +218,10 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
             // Denormalized org (migration 0029): the RUN's org (may be NULL for
             // org-less platform runs). org-spend SUMs never count NULL-org rows.
             runOrganizationId: run.organizationId ?? null,
+            // Denormalized run start (migration 0030): the RUN's started_at, so the
+            // dated cross-org spend series buckets on the same instant the old
+            // runs-join used — byte-for-byte.
+            runStartedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
             ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },

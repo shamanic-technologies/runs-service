@@ -27,6 +27,13 @@ export const runs = pgTable(
   },
   (table) => [
     index("idx_runs_org_service").on(table.organizationId, table.serviceName),
+    // Covering index for the de-joined per-UTC-day run counts read by
+    // GET /public/stats/runs (migration 0030) — index-only scan, no heap.
+    index("idx_runs_started_status").on(table.startedAt, table.status),
+    // Covering index for the per-brand cross-org cost aggregation (migration 0030).
+    // INCLUDE (id, brand_ids) is applied in the hand-authored migration; drizzle's
+    // index builder can't express INCLUDE, so it is omitted here.
+    index("idx_runs_feature_brands").on(table.featureSlug),
     index("idx_runs_parent").on(table.parentRunId),
     index("idx_runs_brand_ids").using("gin", table.brandIds),
     index("idx_runs_campaign").on(table.campaignId),
@@ -73,6 +80,11 @@ export const runsCosts = pgTable(
     // joining runs. NULL for rows written before the freeze / out-of-band
     // backfill. Frozen from run.organization_id — never recomputed.
     organizationId: uuid("organization_id"),
+    // Denormalized from the owning run at cost-write time (migration 0030), so the
+    // dated cross-org platform-spend series reads a single indexed table instead of
+    // joining runs for `started_at`. NULL for rows written before the freeze /
+    // out-of-band backfill. Frozen from run.started_at — never recomputed.
+    runStartedAt: timestamp("run_started_at", { withTimezone: true }),
     idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -88,6 +100,12 @@ export const runsCosts = pgTable(
     // index builder can't express INCLUDE, so it is intentionally omitted here.
     index("idx_runs_costs_org_projected")
       .on(table.organizationId)
+      .where(sql`is_platform_projected`),
+    // Partial covering index for the dated platform-spend SUM (migration 0030).
+    // INCLUDE (total_cost_in_usd_cents) is applied in the hand-authored migration;
+    // drizzle's index builder can't express INCLUDE, so it is omitted here.
+    index("idx_runs_costs_projected_started")
+      .on(table.runStartedAt)
       .where(sql`is_platform_projected`),
     uniqueIndex("idx_runs_costs_idempotency_key")
       .on(table.runId, table.idempotencyKey)
