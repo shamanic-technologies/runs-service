@@ -726,6 +726,10 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
             // override, so org-spend SUMs on runs_costs match the old runs-join
             // byte-for-byte.
             runOrganizationId: run.organizationId ?? null,
+            // Denormalized run start (migration 0030): the RUN's started_at, so the
+            // dated cross-org spend series buckets on the same instant the old
+            // runs-join used — byte-for-byte.
+            runStartedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
             ...attribution,
             idempotencyKey: item.idempotencyKey ?? null,
           },
