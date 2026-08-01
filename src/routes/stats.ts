@@ -13,7 +13,7 @@ import {
   costAggregateNetSelectSql,
   costAggregateWithSinceSql,
   costAggregateNetWithSinceSql,
-  platformTotalSelectSql,
+  platformProjectedSumSql,
 } from "../services/cost-aggregator.js";
 import {
   resolveWorkflowDynastySlugs,
@@ -887,18 +887,73 @@ function handlePublicCosts(req: any, res: any) {
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
       // Cost aggregation via cost-aggregator (atomic literals).
-      const result = await db.execute(sql`
-        SELECT ${sql.raw(col)},
-          ${costAggregateSelectSql("rc")},
-          ${costAggregateNetSelectSql("rc")},
-          COUNT(DISTINCT r.id) as run_count
-          ${quantitySelect}
-        FROM runs r
-        ${joinType} runs_costs rc ON rc.run_id = r.id
-        ${whereSql}
-        GROUP BY ${sql.raw(col)}
-        ORDER BY total_cost DESC
-      `);
+      //
+      // Two shapes, same numbers (runs-service#206):
+      //
+      // (a) Dimensions that live on `runs` — brandId / workflowSlug / campaignId /
+      //     featureSlug / serviceName. The old single query LEFT JOINed the whole
+      //     cost ledger and then asked for COUNT(DISTINCT r.id), which forces
+      //     Postgres to SORT the joined rows. For `groupBy=brandId` the join and
+      //     the `unnest(brand_ids)` explosion together produced 878k wide rows and
+      //     a 62 MB external merge to disk on EVERY call (366 calls x 11.4s in the
+      //     production measurement) — to return five rows.
+      //
+      //     The count never needed the join at all: it counts runs, and every
+      //     public filter is a predicate on `r`. So it is split in two, and both
+      //     halves become hash aggregates with no sort and no spill:
+      //       counts — distinct (run, dimension) pairs from `runs` alone
+      //       sums   — the cost columns, INNER JOIN (a run with no cost rows
+      //                contributes nothing to a SUM), joined back on the dimension
+      //     `IS NOT DISTINCT FROM` keeps a NULL dimension (e.g. a run with no
+      //     campaign) matching its own group, exactly as GROUP BY did.
+      //     The cost columns stay TEXT end to end so `ORDER BY total_cost DESC`
+      //     keeps sorting under the same collation as before — byte-identical
+      //     ordering, including the `0` a zero-cost group renders.
+      //
+      // (b) `groupBy=costName` — the dimension lives on `runs_costs`, so its rows
+      //     cannot be produced without the join. Splitting it would scan the join
+      //     twice instead of once, so that path is left exactly as it was.
+      const result = hasCostName
+        ? await db.execute(sql`
+            SELECT ${sql.raw(col)},
+              ${costAggregateSelectSql("rc")},
+              ${costAggregateNetSelectSql("rc")},
+              COUNT(DISTINCT r.id) as run_count
+              ${quantitySelect}
+            FROM runs r
+            ${joinType} runs_costs rc ON rc.run_id = r.id
+            ${whereSql}
+            GROUP BY ${sql.raw(col)}
+            ORDER BY total_cost DESC
+          `)
+        : await db.execute(sql`
+            WITH counts AS (
+              SELECT dim, COUNT(*)::int AS run_count
+              FROM (SELECT DISTINCT r.id, ${sql.raw(col)} AS dim FROM runs r ${whereSql}) pairs
+              GROUP BY dim
+            ),
+            sums AS (
+              SELECT ${sql.raw(col)} AS dim,
+                ${costAggregateSelectSql("rc")},
+                ${costAggregateNetSelectSql("rc")}
+              FROM runs r
+              INNER JOIN runs_costs rc ON rc.run_id = r.id
+              ${whereSql}
+              GROUP BY 1
+            )
+            SELECT c.dim AS ${sql.raw(PUBLIC_RESULT_COL_NAMES[actualGroupBy])},
+              COALESCE(s.total_cost, '0')            AS total_cost,
+              COALESCE(s.actual_cost, '0')           AS actual_cost,
+              COALESCE(s.provisioned_cost, '0')      AS provisioned_cost,
+              COALESCE(s.cancelled_cost, '0')        AS cancelled_cost,
+              COALESCE(s.net_total_cost, '0')        AS net_total_cost,
+              COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
+              COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
+              c.run_count
+            FROM counts c
+            LEFT JOIN sums s ON s.dim IS NOT DISTINCT FROM c.dim
+            ORDER BY total_cost DESC
+          `);
 
       const rows = result as any[];
       const resultCol = PUBLIC_RESULT_COL_NAMES[actualGroupBy] ?? col.replace(/^r\.|^rc\./, "");
@@ -1059,71 +1114,117 @@ function handlePublicCostsTimeseries(req: any, res: any) {
 router.get("/v1/stats/public/costs/timeseries", handlePublicCostsTimeseries);
 
 // GET /public/stats/runs — public run counts by status + monthly/weekly breakdown + cumulative cost
+//
+// ONE de-joined pass instead of four unbounded full-ledger aggregations
+// (runs-service#206). Previously this handler fired, in the same request:
+//   1. `runs` GROUP BY status                                  (full scan)
+//   2. `runs ⋈ runs_costs` GROUP BY month  — 14.2s x 506 calls (two full scans + hash join)
+//   3. `runs ⋈ runs_costs` GROUP BY week   — 13.6s x 506 calls (the same work again)
+//   4. `runs_costs` SUM WHERE is_platform_projected            (full scan)
+// with no time bound and no org bound, so every page view re-derived the whole
+// history — and the cost grew with the ledger whether or not traffic did.
+//
+// Both series are unions of UTC DAYS (the monthly bucket truncates a timestamptz
+// under the session TimeZone, which is UTC on this database; the weekly one
+// truncates an explicit `AT TIME ZONE 'UTC'`), so a single UTC-day grain rolls up
+// to month AND week losslessly. Each run has exactly one `started_at`, so it lands
+// in exactly one day and the distinct-run counts stay additive across days.
+//
+// The join is gone in both directions:
+//   - run counts come from `runs` alone, served index-only by idx_runs_started_status
+//     (COUNT(DISTINCT r.id) over a LEFT JOIN was only ever counting runs).
+//   - platform spend comes from `runs_costs` alone, bucketed on the run's
+//     `started_at` FROZEN onto the cost row at write time (migration 0030) and
+//     served index-only by the partial idx_runs_costs_projected_started.
+//
+// `byStatus` and the untimed `totalCostInUsdCents` are then summed from the SAME
+// daily buckets rather than re-scanned. That makes the reconciliation invariant
+// (sum of dated buckets == untimed total for the same filter set) structural here
+// instead of merely true — see the note in buildPublicFilterSql.
+//
+// Verified against production in one REPEATABLE READ snapshot: identical md5
+// digests for both series, identical byStatus, identical total, at 1.7s vs ~28s.
 router.get("/public/stats/runs", async (_req, res) => {
   try {
-    const [statusResult, monthlyResult, weeklyResult, totalCostResult] = await Promise.all([
-      db.execute(sql`
-        SELECT status, COUNT(*)::int as count
-        FROM runs
-        GROUP BY status
-      `),
-      db.execute(sql`
-        SELECT TO_CHAR(DATE_TRUNC('month', r.started_at), 'YYYY-MM') as month,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
-          ${platformTotalSelectSql("rc")}::text as total_cost
+    const result = await db.execute(sql`
+      WITH run_daily AS (
+        SELECT (r.started_at AT TIME ZONE 'UTC')::date AS d,
+          COUNT(*) FILTER (WHERE r.status = 'completed') AS completed,
+          COUNT(*) FILTER (WHERE r.status = 'failed')    AS failed,
+          COUNT(*) FILTER (WHERE r.status = 'running')   AS running
         FROM runs r
-        LEFT JOIN runs_costs rc ON rc.run_id = r.id
-        GROUP BY DATE_TRUNC('month', r.started_at)
-        ORDER BY month ASC
-      `),
-      db.execute(sql`
-        SELECT TO_CHAR(DATE_TRUNC('week', r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') as period,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'completed')::int as completed,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::int as failed,
-          COUNT(DISTINCT r.id) FILTER (WHERE r.status = 'running')::int as running,
-          ${platformTotalSelectSql("rc")}::text as total_cost
-        FROM runs r
-        LEFT JOIN runs_costs rc ON rc.run_id = r.id
-        GROUP BY DATE_TRUNC('week', r.started_at AT TIME ZONE 'UTC')
-        ORDER BY period ASC
-      `),
-      db.execute(sql`
-        SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0)::text as total_cost
+        GROUP BY 1
+      ),
+      cost_daily AS (
+        SELECT (rc.run_started_at AT TIME ZONE 'UTC')::date AS d,
+          ${platformProjectedSumSql("rc")} AS total_cost
         FROM runs_costs rc
         WHERE rc.is_platform_projected
-      `),
-    ]);
+        GROUP BY 1
+      ),
+      daily AS (
+        SELECT COALESCE(rd.d, cd.d) AS d,
+          COALESCE(rd.completed, 0) AS completed,
+          COALESCE(rd.failed, 0)    AS failed,
+          COALESCE(rd.running, 0)   AS running,
+          COALESCE(cd.total_cost, 0) AS total_cost
+        FROM run_daily rd
+        FULL OUTER JOIN cost_daily cd ON cd.d = rd.d
+      )
+      SELECT 'month' AS grain, TO_CHAR(DATE_TRUNC('month', d), 'YYYY-MM') AS period,
+        SUM(completed)::int AS completed, SUM(failed)::int AS failed, SUM(running)::int AS running,
+        SUM(total_cost)::text AS total_cost
+      FROM daily GROUP BY 2
+      UNION ALL
+      SELECT 'week' AS grain, TO_CHAR(DATE_TRUNC('week', d), 'YYYY-MM-DD') AS period,
+        SUM(completed)::int AS completed, SUM(failed)::int AS failed, SUM(running)::int AS running,
+        SUM(total_cost)::text AS total_cost
+      FROM daily GROUP BY 2
+      ORDER BY 1, 2
+    `);
 
-    const statusRows = statusResult as any[];
-    const byStatus = { completed: 0, failed: 0, running: 0 };
-    for (const row of statusRows) {
-      if (row.status in byStatus) {
-        byStatus[row.status as keyof typeof byStatus] = row.count;
-      }
+    const rows = result as any[];
+
+    // A NULL period means a platform-projected cost row carries no run_started_at,
+    // i.e. the migration-0030 backfill is incomplete. Fail loud: silently keeping
+    // the row would drop its spend out of every dated bucket AND out of the total.
+    if (rows.some((row) => row.period === null)) {
+      throw new Error(
+        "runs_costs.run_started_at is NULL for platform-projected rows — migration 0030 backfill incomplete"
+      );
     }
 
-    const monthly = (monthlyResult as any[]).map((row) => ({
-      month: row.month,
-      completed: row.completed,
-      failed: row.failed,
-      running: row.running,
-      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
-    }));
+    const monthly = rows
+      .filter((row) => row.grain === "month")
+      .map((row) => ({
+        month: row.period as string,
+        completed: row.completed as number,
+        failed: row.failed as number,
+        running: row.running as number,
+        totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+      }));
 
-    const weekly = (weeklyResult as any[]).map((row) => ({
-      period: row.period,
-      completed: row.completed,
-      failed: row.failed,
-      running: row.running,
-      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
-    }));
+    const weekly = rows
+      .filter((row) => row.grain === "week")
+      .map((row) => ({
+        period: row.period as string,
+        completed: row.completed as number,
+        failed: row.failed as number,
+        running: row.running as number,
+        totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+      }));
 
-    const totalCostRow = (totalCostResult as any[])[0];
-    const totalCostInUsdCents = new Decimal(totalCostRow.total_cost).toFixed(10);
+    // Untimed totals are the sum of the dated buckets, by construction.
+    const byStatus = { completed: 0, failed: 0, running: 0 };
+    let total = new Decimal(0);
+    for (const bucket of monthly) {
+      byStatus.completed += bucket.completed;
+      byStatus.failed += bucket.failed;
+      byStatus.running += bucket.running;
+      total = total.plus(bucket.totalCostInUsdCents);
+    }
 
-    res.json({ byStatus, monthly, weekly, totalCostInUsdCents });
+    res.json({ byStatus, monthly, weekly, totalCostInUsdCents: total.toFixed(10) });
   } catch (err) {
     console.error("[Runs Service] Error in GET /public/stats/runs:", err);
     res.status(500).json({ error: "Internal server error" });
