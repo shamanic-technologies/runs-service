@@ -20,6 +20,14 @@
 // pass NO fillable row remains — the script exits non-zero if any does, because
 // a NULL would silently drop that row out of every dated bucket.
 // Window size (default 6h) via BACKFILL_WINDOW_HOURS.
+//
+// BACKFILL_FROM / BACKFILL_TO (ISO timestamps) clamp the `created_at` range this
+// invocation walks, so several workers can split the ledger between them. Small
+// computes need it: the same pass that takes ~35 min against a 2 CU production
+// compute projects to ~40 h against a 0.25 CU one, because each row rewrite also
+// maintains nine indexes and the compute is simultaneously serving reads. A
+// bounded worker also exits non-zero only for ITS OWN range, so run the plain
+// unbounded invocation once at the end for the authoritative completeness check.
 
 import postgres from "postgres";
 
@@ -30,6 +38,8 @@ if (!url) {
 }
 
 const WINDOW_MS = Number(process.env.BACKFILL_WINDOW_HOURS ?? 6) * 3600 * 1000;
+const RANGE_FROM = process.env.BACKFILL_FROM ? new Date(process.env.BACKFILL_FROM) : null;
+const RANGE_TO = process.env.BACKFILL_TO ? new Date(process.env.BACKFILL_TO) : null;
 
 const sql = postgres(url, { max: 1, idle_timeout: 30, connect_timeout: 30 });
 
@@ -70,8 +80,13 @@ async function main() {
     return;
   }
 
-  const hi = bounds.hi.getTime();
-  let cursor = bounds.lo.getTime();
+  const hi = Math.min(bounds.hi.getTime(), RANGE_TO?.getTime() ?? Infinity);
+  let cursor = Math.max(bounds.lo.getTime(), RANGE_FROM?.getTime() ?? -Infinity);
+  if (RANGE_FROM || RANGE_TO) {
+    console.log(
+      `[backfill-cost-run-started-at] range-bounded: ${new Date(cursor).toISOString()} .. ${new Date(hi).toISOString()}`
+    );
+  }
   let total = 0;
   while (cursor <= hi) {
     const from = new Date(cursor).toISOString();
@@ -112,6 +127,13 @@ async function main() {
     `
   );
   console.log(`[backfill-cost-run-started-at] done. total filled ${total}, remaining fillable ${remaining}`);
+  if (RANGE_FROM || RANGE_TO) {
+    // A range-bounded worker only owns its slice, so a non-zero global remainder is
+    // expected while its siblings are still running. Completeness is decided by the
+    // final unbounded invocation, not by this one.
+    console.log("[backfill-cost-run-started-at] range-bounded worker — re-run unbounded for the completeness gate");
+    return;
+  }
   if (remaining !== "0") {
     console.error("[backfill-cost-run-started-at] WARNING: fillable rows remain — do NOT deploy the read swap yet");
     process.exit(1);
