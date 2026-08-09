@@ -22,6 +22,25 @@ jobs:
 
   test-integration-shard:
     runs-on: ubuntu-latest
+    # One throwaway Postgres per shard: shards are fully isolated, and nothing is
+    # inherited from a production-shaped parent. Pinned to the server version
+    # production runs (17).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: runs_service_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DB_URL: postgres://postgres:postgres@localhost:5432/runs_service_test
     strategy:
       fail-fast: false
       matrix:
@@ -45,17 +64,11 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - name: Create Neon branch
-        id: neon
-        uses: neondatabase/create-branch-action@v6
-        with:
-          project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch_name: ci-${{ github.run_id }}-${{ matrix.name }}
-          api_key: ${{ secrets.NEON_API_KEY }}
-
-      - name: Set database URL
-        run: echo "DB_URL=${{ steps.neon.outputs.db_url }}" >> "$GITHUB_ENV"
-
+      # Migrations are applied to an EMPTY database, so this also proves the chain
+      # still builds a schema from zero. It did not, until the guard added to
+      # migration 0007 — the Neon-fork setup this replaced only ever applied
+      # migrations incrementally on top of an already-production-shaped schema, so a
+      # chain that could not build an empty database looked green.
       - name: Apply migrations
         run: npx drizzle-kit migrate
         env:
@@ -71,14 +84,6 @@ jobs:
           RUNS_SERVICE_API_KEY: test-api-key
           COSTS_SERVICE_URL: https://costs.mcpfactory.org
           COSTS_SERVICE_API_KEY: ${{ secrets.COSTS_SERVICE_API_KEY }}
-
-      - name: Cleanup Neon branch
-        if: always()
-        uses: neondatabase/delete-branch-action@v3
-        with:
-          project_id: ${{ vars.NEON_PROJECT_ID }}
-          branch: ci-${{ github.run_id }}-${{ matrix.name }}
-          api_key: ${{ secrets.NEON_API_KEY }}
 
   # Aggregator with the literal name `test-integration` so branch protection
   # (which requires a single status check by that name) is satisfied. Fails

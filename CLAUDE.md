@@ -125,7 +125,7 @@ The v0.21.1 hotfix exists because a `let query = …; query = query.limit(limit)
 Integration tests run with `fileParallelism: true, maxWorkers: 4` and a 4-way matrix in CI. Three invariants must hold or the suite goes flaky:
 
 - **Org-scoped per-test cleanup, not TRUNCATE.** `cleanTestData(orgIds)` deletes only rows for the given orgs (cascade clears `runs_costs`/`run_events`). Each integration file declares a file-local `ORG_ID` constant. If a test inserts into a *secondary* org (for cross-org isolation assertions), include that secondary org in the cleanup array — pollution there breaks `/public/*` tests on the same shard.
-- **`tests/global-setup.ts` runs once per shard and TRUNCATEs all 3 tables.** CI Neon branches are forked from a parent that contains production-scale data (~600k rows). Without this wipe, `/public/stats/*` and `/v1/stats/public/*` assertions count inherited rows.
+- **`tests/global-setup.ts` runs once per shard and TRUNCATEs all 3 tables.** Kept as a cheap guard for a re-used local database; on CI each shard now gets its own empty container so there is nothing to inherit (it used to matter a lot — CI forked a Neon branch off a parent carrying ~600k production rows, which `/public/stats/*` assertions would otherwise have counted).
 - **`stats.test.ts` runs on its own shard.** `/public/*` endpoints aggregate across all orgs, so they're immune to org-scoped cleanup. The matrix in `.github/workflows/test.yml` assigns it `name: stats` alone — do not co-locate other files on that shard.
 
 ## Idempotency on silver writes (v0.29.1)
@@ -251,6 +251,29 @@ repo) and re-accumulates ~2.6M rows a month.
   without it every chunk seq-scans 4.9 GB. Built out-of-band `CONCURRENTLY` on
   prod/staging (the migration ships `IF NOT EXISTS` non-concurrent → no-ops there),
   same discipline as 0027 / 0029 / 0030.
+
+## CI runs against an empty Postgres container
+
+Integration shards start a `postgres:17` service container (matching the production
+server version) and apply `drizzle-kit migrate` to it. Each shard gets its own
+database, so shards are isolated and nothing is inherited.
+
+This replaced a Neon-branch-per-shard setup, which stopped working when the Neon
+project was deleted in the self-hosted cutover — every shard failed at
+`Failed to create branch … 404 project not found`, repo-wide, from 2026-08-01.
+
+**The migration chain is now exercised from ZERO on every PR, and it did not build
+an empty database.** The Neon branches were forked from a production-shaped parent,
+so migrations were only ever applied INCREMENTALLY and a broken chain looked green:
+migration 0005 had been edited after the fact to add `cost_source` under its
+post-rename name, so 0007's `RENAME COLUMN cost_bearer TO cost_source` aborted on a
+fresh database. 0007 is now guarded on the old column existing. A from-zero build
+was diffed against the production schema (all columns with types/nullability/
+generated-ness, plus every index) and is identical.
+
+Editing a historical migration file is safe: `drizzle-orm`'s migrator skips by the
+journal's `created_at` timestamp, not by a content hash, so an already-migrated
+database never re-runs an edited file.
 
 ## CI status checks ↔ branch protection
 
