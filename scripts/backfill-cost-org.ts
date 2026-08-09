@@ -35,7 +35,7 @@ async function main() {
 
   const [bounds] = await sql<{ lo: Date | null; hi: Date | null }[]>`
     SELECT min(created_at) AS lo, max(created_at) AS hi
-    FROM runs_costs_old WHERE organization_id IS NULL
+    FROM runs_costs WHERE organization_id IS NULL
   `;
   if (!bounds.lo || !bounds.hi) {
     console.log("[backfill-cost-org] no NULL-org rows — nothing to do");
@@ -49,9 +49,9 @@ async function main() {
     const from = new Date(cursor).toISOString();
     const to = new Date(cursor + WINDOW_MS).toISOString();
     const res = await sql`
-      UPDATE runs_costs_old rc
+      UPDATE runs_costs rc
         SET organization_id = r.organization_id
-        FROM runs_old r
+        FROM runs r
         WHERE r.id = rc.run_id
           AND rc.created_at >= ${from}::timestamptz
           AND rc.created_at <  ${to}::timestamptz
@@ -67,8 +67,8 @@ async function main() {
 
   const [{ remaining }] = await sql<{ remaining: string }[]>`
     SELECT count(*)::text AS remaining
-    FROM runs_costs_old rc
-    JOIN runs_old r ON r.id = rc.run_id
+    FROM runs_costs rc
+    JOIN runs r ON r.id = rc.run_id
     WHERE rc.organization_id IS NULL AND r.organization_id IS NOT NULL
   `;
   console.log(`[backfill-cost-org] done. total filled ${total}, remaining fillable ${remaining}`);
