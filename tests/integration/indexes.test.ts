@@ -2,11 +2,11 @@ import { describe, it, expect, afterAll } from "vitest";
 import { sql } from "../../src/db/index.js";
 import { closeDb } from "../helpers/test-db.js";
 
-describe("Database indexes", () => {
-  afterAll(async () => {
-    await closeDb();
-  });
+afterAll(async () => {
+  await closeDb();
+});
 
+describe("Database indexes", () => {
   it("has the covering aggregation index on runs_costs", async () => {
     const result = await sql`
       SELECT indexname, indexdef FROM pg_indexes
@@ -105,10 +105,6 @@ describe("Database indexes", () => {
 });
 
 describe("Silver table naming (migration 0031)", () => {
-  afterAll(async () => {
-    await closeDb();
-  });
-
   it("serves runs and runs_costs as BASE TABLES, not view shims", async () => {
     const result = await sql<{ table_name: string; table_type: string }[]>`
       SELECT table_name, table_type FROM information_schema.tables

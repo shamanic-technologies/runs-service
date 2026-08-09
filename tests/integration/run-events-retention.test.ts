@@ -76,7 +76,7 @@ describe("run_events retention", () => {
     // service_name. This one just re-stamps the status of the run we made above.
     await sql`
       INSERT INTO run_lifecycle_events (run_id, event_type, payload, source_service, occurred_at)
-      VALUES (${run.id}, 'run.completed', ${sql.json({})}, 'retention-test', ${daysAgo(400)})
+      VALUES (${run.id}, 'run.completed', '{}'::jsonb, 'retention-test', ${daysAgo(400).toISOString()}::timestamptz)
     `;
 
     const costsBefore = await sql<{ count: string }[]>`SELECT count(*)::text AS count FROM cost_lifecycle_events`;

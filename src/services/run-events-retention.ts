@@ -58,7 +58,7 @@ export async function purgeExpiredRunEvents(
       DELETE FROM run_events
       WHERE id IN (
         SELECT id FROM run_events
-        WHERE created_at < ${cutoff}
+        WHERE created_at < ${cutoff.toISOString()}::timestamptz
         ORDER BY created_at
         LIMIT ${CHUNK_SIZE}
       )
