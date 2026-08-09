@@ -218,6 +218,20 @@
       "when": 1780790400000,
       "tag": "0030_denormalize_cost_run_started_at",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1780876800000,
+      "tag": "0031_drop_silver_view_shim",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1780963200000,
+      "tag": "0032_run_events_retention_index",
+      "breakpoints": true
     }
   ]
 }

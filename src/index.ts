@@ -11,6 +11,7 @@ import platformRunsRoutes from "./routes/platform-runs.js";
 import internalRoutes from "./routes/internal.js";
 import eventsRoutes from "./routes/events.js";
 import { db } from "./db/index.js";
+import { startRunEventsRetention } from "./services/run-events-retention.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -52,6 +53,9 @@ if (process.env.NODE_ENV !== "test") {
       console.log("[Runs Service] Migrations complete");
       app.listen(Number(PORT), "::", () => {
         console.log(`[Runs Service] Service running on port ${PORT}`);
+        // AFTER the port bind: the sweep touches the database and must never
+        // delay listen() (CLAUDE.md "Boot-window hazards").
+        startRunEventsRetention();
       });
     })
     .catch((err) => {

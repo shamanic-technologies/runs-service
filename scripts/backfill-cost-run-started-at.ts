@@ -72,7 +72,7 @@ async function main() {
     "bounds",
     () => sql<{ lo: Date | null; hi: Date | null }[]>`
       SELECT min(created_at) AS lo, max(created_at) AS hi
-      FROM runs_costs_old WHERE run_started_at IS NULL
+      FROM runs_costs WHERE run_started_at IS NULL
     `
   );
   if (!bounds.lo || !bounds.hi) {
@@ -91,7 +91,7 @@ async function main() {
   while (cursor <= hi) {
     const from = new Date(cursor).toISOString();
     const to = new Date(cursor + WINDOW_MS).toISOString();
-    // Correlated scalar subquery, NOT `UPDATE ... FROM runs_old r WHERE r.id = rc.run_id`.
+    // Correlated scalar subquery, NOT `UPDATE ... FROM runs r WHERE r.id = rc.run_id`.
     // The FROM-join form lets the planner pick a hash join and seq-scan the whole
     // 2.9M-row `runs` table ONCE PER WINDOW (measured >30s per 6h window on prod);
     // the correlated form is a bitmap index scan on idx_runs_costs_created_at plus
@@ -99,8 +99,8 @@ async function main() {
     const res = await withRetry(
       from,
       () => sql`
-        UPDATE runs_costs_old rc
-          SET run_started_at = (SELECT r.started_at FROM runs_old r WHERE r.id = rc.run_id)
+        UPDATE runs_costs rc
+          SET run_started_at = (SELECT r.started_at FROM runs r WHERE r.id = rc.run_id)
           WHERE rc.created_at >= ${from}::timestamptz
             AND rc.created_at <  ${to}::timestamptz
             AND rc.run_started_at IS NULL
@@ -122,7 +122,7 @@ async function main() {
     "remaining",
     () => sql<{ remaining: string }[]>`
       SELECT count(*)::text AS remaining
-      FROM runs_costs_old
+      FROM runs_costs
       WHERE run_started_at IS NULL
     `
   );
