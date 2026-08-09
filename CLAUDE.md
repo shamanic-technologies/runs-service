@@ -24,6 +24,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
+- `src/services/run-events-retention.ts` — 30-day retention sweep for the `run_events` leaf telemetry log. Started after `app.listen()`, every 6h. Never touches the bronze lifecycle logs.
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
 - `src/index.ts` — Express app setup and server entry point
@@ -55,7 +56,7 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 
 - **One nullable column on `runs_costs`** (`organization_id uuid`) + a **partial covering index** `idx_runs_costs_org_projected ON runs_costs (organization_id) INCLUDE (total_cost_in_usd_cents, net_cost_in_usd_cents) WHERE is_platform_projected`. The org-spend SUM becomes an index scan over only that org's platform-projected rows — no join, no full scan (validated 93ms vs ~4000ms). NULL for pre-feature / pre-backfill rows.
 - **Frozen at write from the RUN's org, not the header override.** `POST /v1/runs/:id/costs` + `POST /v1/platform-runs/:id/costs` write `runOrganizationId: run.organizationId` into the `cost.added` payload; the `project_cost_lifecycle_to_silver` trigger materializes it into `organization_id`. Using `run.organizationId` (not `req`/attribution) keeps the de-joined SUM byte-identical to the old runs-join. Org-less platform runs → NULL (org-spend never counts NULL-org rows).
-- **EXPAND → BACKFILL → SWAP (mandatory ordering — this is money).** The read swap to the denormalized column must ship in a SEPARATE deploy, AFTER the out-of-band backfill (`scripts/backfill-cost-org.ts`, chunked/idempotent, run manually post-deploy — a full-table UPDATE on the multi-million-row ledger would block boot). A read-swap deployed before backfill completes would read the whale's NULL-org rows as ~0 → **billing over-authorizes**. Do NOT collapse expand+swap into one deploy/promote. The partial covering index is built out-of-band `CONCURRENTLY` first on prod/staging (migration ships `IF NOT EXISTS` non-concurrent → no-ops there; a boot-migrator non-concurrent build would lock the large ledger). **Chicken-and-egg — the index is on a NEW column added by the SAME migration, so you can't pre-build the concurrent index before the column exists. Pre-run BOTH on prod/staging before deploying: `ALTER TABLE runs_costs_old ADD COLUMN IF NOT EXISTS organization_id uuid` (instant metadata) THEN `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_costs_org_projected …` (no write lock). Then the boot migration no-ops both DDLs and only applies the view + trigger.** Full prod promote sequence: (1) pre-add column + concurrent index on prod; (2) promote #199 (boot migrate no-ops the DDL, applies view/trigger); (3) run `scripts/backfill-cost-org.ts` on prod → `remaining fillable 0`; (4) promote the read-swap PR. **Promote trap — `release.sh promote` carries the WHOLE staging→main delta, so the expand and swap PRs cannot both sit on staging when you promote (one promote would bundle both to prod, defeating the ordering). Keep the swap PR UNMERGED from staging until the expand is prod-deployed AND prod-backfilled; only then merge swap→staging and promote again.** The backfill is a single forward pass over `idx_runs_costs_created_at` windows (NOT a batch-LIMIT loop — that re-scans the whole NULL set every batch); short per-window locks, resumable. Shipped v0.42.0 (expand) + v0.43.0 (swap); prod validated byte-equal (de-join == old join) at 198ms vs ~4000ms.
+- **EXPAND → BACKFILL → SWAP (mandatory ordering — this is money).** The read swap to the denormalized column must ship in a SEPARATE deploy, AFTER the out-of-band backfill (`scripts/backfill-cost-org.ts`, chunked/idempotent, run manually post-deploy — a full-table UPDATE on the multi-million-row ledger would block boot). A read-swap deployed before backfill completes would read the whale's NULL-org rows as ~0 → **billing over-authorizes**. Do NOT collapse expand+swap into one deploy/promote. The partial covering index is built out-of-band `CONCURRENTLY` first on prod/staging (migration ships `IF NOT EXISTS` non-concurrent → no-ops there; a boot-migrator non-concurrent build would lock the large ledger). **Chicken-and-egg — the index is on a NEW column added by the SAME migration, so you can't pre-build the concurrent index before the column exists. Pre-run BOTH on prod/staging before deploying: `ALTER TABLE runs_costs ADD COLUMN IF NOT EXISTS organization_id uuid` (instant metadata) THEN `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_costs_org_projected …` (no write lock). Then the boot migration no-ops both DDLs and only applies the view + trigger.** Full prod promote sequence: (1) pre-add column + concurrent index on prod; (2) promote #199 (boot migrate no-ops the DDL, applies view/trigger); (3) run `scripts/backfill-cost-org.ts` on prod → `remaining fillable 0`; (4) promote the read-swap PR. **Promote trap — `release.sh promote` carries the WHOLE staging→main delta, so the expand and swap PRs cannot both sit on staging when you promote (one promote would bundle both to prod, defeating the ordering). Keep the swap PR UNMERGED from staging until the expand is prod-deployed AND prod-backfilled; only then merge swap→staging and promote again.** The backfill is a single forward pass over `idx_runs_costs_created_at` windows (NOT a batch-LIMIT loop — that re-scans the whole NULL set every batch); short per-window locks, resumable. Shipped v0.42.0 (expand) + v0.43.0 (swap); prod validated byte-equal (de-join == old join) at 198ms vs ~4000ms.
 - **CPU-spike scope note — org-spend fixed, features group-bys deferred.** The other CPU consumer is the per-workflow / timeseries stats group-bys (`/v1/stats/costs`, `/budget`, features-service reads, ~20% of DB time). They **cannot** use this de-join: they `LEFT JOIN` and 98% of runs in the big features have ZERO cost rows, so a single-table `FROM runs_costs` scan would drop those runs' `run_count` and every zero-cost group (validated). A covering index on the join is also ineffective (the full `runs_costs` scan for the LEFT JOIN survives). The correct fix is the split-aggregate rewrite, now shipped for the PUBLIC group-bys (see migration 0030 below) — the org-scoped `/v1/stats/costs` + `/budget` twins still await their own benchmarked PR.
 
 ## Denormalized run start on cost rows — de-join the cross-org stats reads (migration 0030)
@@ -67,9 +68,9 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **ONE UTC-day pass serves both series.** The monthly bucket truncates a timestamptz under the session TimeZone (UTC on this database) and the weekly one truncates an explicit `AT TIME ZONE 'UTC'`, so both are unions of UTC days and a single day grain rolls up to each losslessly. Each run has exactly one `started_at`, so distinct-run counts stay additive. `byStatus` and the untimed `totalCostInUsdCents` are then summed from those same buckets rather than re-scanned, which makes the **reconciliation invariant structural** here (sum of dated buckets == untimed total) instead of merely true.
 - **A NULL `run_started_at` on a platform-projected row is a 500, not a skipped row.** It means the backfill is incomplete; serving it would drop that spend from the dated series AND the total while the reconciliation still "held". Fail loud.
 - **`GET /v1/stats/public/costs` splits into (counts | sums) for every runs-side dimension.** The old single query LEFT JOINed the cost ledger then asked for `COUNT(DISTINCT r.id)`, forcing a SORT of the joined rows — for `groupBy=brandId` the join plus the `unnest(brand_ids)` explosion made 878k wide rows and a **62 MB external merge to disk on every call** (366 calls × 11.4s) to return five rows. The count never needed the join (it counts runs, and every public filter is a predicate on `r`), so `counts` reads `runs` alone and `sums` INNER JOINs; both are hash aggregates, no sort, no spill. Cost columns stay TEXT end to end so `ORDER BY total_cost DESC` keeps the same collation-dependent ordering, and `IS NOT DISTINCT FROM` keeps a NULL dimension in its own group. **`groupBy=costName` is deliberately NOT split** — its dimension lives on `runs_costs`, so splitting would scan the join twice instead of once.
-- **EXPAND → BACKFILL → SWAP, same ordering and same promote trap as 0029.** Backfill via `scripts/backfill-cost-run-started-at.ts` (windowed on `created_at`, idempotent, retries transient Neon resets). It uses a **correlated scalar subquery**, not `UPDATE … FROM runs_old` — the FROM-join form lets the planner seq-scan all 2.9M runs *once per window* (>30s/window measured on prod). Re-run it after the expand deploys, to catch rows written between the backfill and the deploy.
+- **EXPAND → BACKFILL → SWAP, same ordering and same promote trap as 0029.** Backfill via `scripts/backfill-cost-run-started-at.ts` (windowed on `created_at`, idempotent, retries transient Neon resets). It uses a **correlated scalar subquery**, not `UPDATE … FROM runs` — the FROM-join form lets the planner seq-scan all 2.9M runs *once per window* (>30s/window measured on prod). Re-run it after the expand deploys, to catch rows written between the backfill and the deploy.
 - **Verified byte-equal against production**, old vs new in one `REPEATABLE READ` snapshot: identical md5 digests for the monthly and weekly series, identical `byStatus` (2761944 / 138128 / 35107), identical `1012624.4922729618` total — at **1.72s instead of ~28s**.
-- **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs_old` / `runs_costs_old` are vacuumed; if autovacuum falls behind (it had not run on `runs_old` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
+- **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
 
 ## Cost predicate doctrine
@@ -182,28 +183,74 @@ Idempotent. DISABLES projection triggers during execution so synthetic events do
 | 3 | Backfill script | ✅ Merged (#130) (manual invocation post-deploy) |
 | 4 | Read swap to gold views | ⚠️ Merged (#130), then REVERTED (`df9230e`) — views OOMed prod; reads use inline bounded CTEs |
 | 5 | Trigger projects silver from bronze | ✅ Merged (#130) |
-| 6 | Rename silver to `_old` + auto-updatable view shim | ✅ This PR |
-| 7 | Drop `_old` tables + view shim | ⏳ Deferred (user-driven, days/weeks later) |
+| 6 | Rename silver to `_old` + auto-updatable view shim | ↩️ Merged (#131), then UNDONE (migration 0031) — see below |
+| 7 | Drop `_old` tables + view shim | ❌ Unreachable — depended on Phase 4, which was reverted |
 | — | Drop dead gold views (`v_run_cost_rollup`, `v_org_platform_spend`, `v_runs_with_descendants`) | ✅ Migration 0026 — unread since `df9230e`; gold is now bounded-CTE-on-read |
 
-### Phase 6 specifics — view shim, not naked rename
+### Phases 6-7 undone — silver tables carry their plain names (migration 0031)
 
-`runs` and `runs_costs` are now **auto-updatable PG views** passing through to the renamed base tables `runs_old` / `runs_costs_old`. Reasons this beat the naked-rename:
+`runs` and `runs_costs` are **BASE TABLES** again. There is no `_old` table and no
+view shim anywhere in the schema.
 
-- **Zero code change.** Drizzle schema target stays `runs` / `runs_costs`. ~17 raw-SQL references in routes + ~9 in tests keep working.
-- **Trigger function bodies stay intact.** `INSERT INTO runs` from `project_run_lifecycle_to_silver` forwards through the view to `runs_old` because auto-updatable views support write-through including `ON CONFLICT (id) DO NOTHING`.
-- **Gold views auto-followed via OID** at the time of Phase 6 (no view recreation needed). Those gold views have since been dropped (migration 0026); the view shim over `runs_old` / `runs_costs_old` is unaffected.
-- **Visible sunset signal in psql / Drizzle Studio.** `\d+ runs` shows VIEW (deprecated wrapper). `\d+ runs_old` shows BASE TABLE (live). Anyone connecting directly knows where the action is.
+Phase 6 renamed the silver base tables to `runs_old` / `runs_costs_old` and put
+auto-updatable passthrough views in front of them under the original names. The
+suffix was a *sunset signal* for Phase 7: drop the base tables once every read came
+off the gold views. Phase 4 was then reverted (`df9230e`) — the gold views OOMed
+prod and were dropped outright in migration 0026 — so Phase 7 can never happen and
+the suffix had nothing left to signal. It was permanent naming that read as an
+unfinished rename. Migration 0031 drops the two shims and renames the base tables
+back.
 
-Auto-updatability requires: single-table reference, no aggregates / joins / DISTINCT / GROUP BY / LIMIT. `SELECT * FROM runs_old` qualifies.
+- **No code change, by construction.** The app, the routes' raw SQL, the Drizzle
+  models, the tests and both projection-trigger bodies always addressed `runs` /
+  `runs_costs` — they were pointed at the shim. Those names now resolve to the base
+  table instead of a view. plpgsql resolves `INSERT INTO runs_costs` at execution
+  time and PG invalidates plans that referenced the dropped view, so the triggers
+  keep projecting across the rename with no function change. Verified end to end
+  against a clone of the production schema: bronze inserts before and after the
+  migration both project into silver, including `cost.materialized`.
+- **Everything attached survives the rename**: the generated predicate columns, all
+  30 indexes, and the three foreign keys — none of whose names carried the suffix
+  (`runs_costs_run_id_runs_id_fk`, `runs_parent_run_id_runs_id_fk`,
+  `run_events_run_id_runs_id_fk`).
+- **Boot-window safe.** `DROP VIEW` + `ALTER TABLE … RENAME` are catalog-only: a
+  brief ACCESS EXCLUSIVE lock, no heap rewrite, O(1) on a multi-million-row ledger.
+- **Historical migrations still say `_old`** (0021-0030 were written while the shim
+  was live). That is immutable history, not live naming; `tests/integration/indexes.test.ts`
+  pins the live schema — `runs` / `runs_costs` are BASE TABLEs and no `%_old`
+  relation exists.
 
-#### Renaming / adding a silver column while the view shim is live
+#### Adding or renaming a silver column now
 
-A column change on the live silver tables ripples through the shim — get the order right:
+The shim is gone, so the two-step dance it forced is gone with it: `ALTER TABLE runs
+ADD COLUMN …` / `ALTER TABLE runs RENAME COLUMN x TO y` is the whole change. Still
+update any projection-trigger function body that references the column + its payload
+key, with a `COALESCE(NEW.payload->>'newKey', NEW.payload->>'oldKey')` fallback so
+pre-rename bronze events still replay (reference: migration 0025).
 
-- **Rename a column:** a base-table `ALTER TABLE runs_old RENAME COLUMN x TO y` does **NOT** propagate to the `runs` view's output column — a `SELECT *` view freezes its output column names at creation time (verified on PG 17). You MUST rename it on BOTH the base table and the view: `ALTER TABLE runs_old RENAME COLUMN x TO y;` then `ALTER TABLE runs RENAME COLUMN x TO y;`. `ALTER TABLE <view> RENAME COLUMN` works on views, is metadata-only, and does **NOT** drop the view. Do NOT `DROP`/`CREATE OR REPLACE` the shim to rename a column: `CREATE OR REPLACE VIEW` can only append columns (not rename/reorder), and a naked `DROP` would CASCADE into whatever reads the shim. (As of migration 0026 the gold views `v_runs_with_descendants` / `v_run_cost_rollup` / `v_org_platform_spend` no longer exist, so they are no longer a DROP-blocker — but the rename-on-both rule still holds because the shim is still a `SELECT *` view.) Also update any projection-trigger function bodies that reference the column + payload key (add a `COALESCE(NEW.payload->>'newKey', NEW.payload->>'oldKey')` fallback for replay of pre-rename bronze events). Reference: migration 0025 (`customer_profile_id` → `audience_id`).
-- **Add a column:** add it to the base table, then `CREATE OR REPLACE VIEW runs AS SELECT * FROM runs_old` (append is allowed) — see migration 0024.
-- The gold views that used to read from the `runs` / `runs_costs` **views** were dropped in migration 0026; the shim now has no gold-layer dependents. Still `CASCADE`-audit before dropping the shim — the projection triggers and raw-SQL routes write through it.
+## Retention — leaf telemetry only (migration 0032)
+
+`run_events` is purged at **30 days** by this service, in
+`src/services/run-events-retention.ts`. It was the largest relation in the database
+(4.9 GB / 2.56M rows after 6.0M expired rows were deleted by hand from outside the
+repo) and re-accumulates ~2.6M rows a month.
+
+- **Only the LEAF telemetry log is purgeable.** `run_events` projects to nothing and
+  nothing is derived from it. The bronze LIFECYCLE logs (`run_lifecycle_events`,
+  `cost_lifecycle_events`) are the source silver is projected FROM — purging them
+  would destroy the ability to rebuild `runs` / `runs_costs`, which is the whole
+  point of the bronze layer. They are never swept, at any age. A test asserts a
+  400-day-old lifecycle row survives a sweep.
+- **Sweep shape**: chunked `DELETE … WHERE id IN (SELECT id … ORDER BY created_at
+  LIMIT 5000)`, capped at 400 chunks per sweep so a long-unpurged table cannot run
+  unbounded; the remainder is picked up next sweep. Runs every 6h, started AFTER
+  `app.listen()` (never in front of the port bind), errors logged loudly and retried
+  on the next tick rather than crashing the process.
+- **`idx_run_events_created_at` is what makes it cheap.** The three pre-existing
+  indexes are all prefixed by another column, so none can range-scan `created_at`;
+  without it every chunk seq-scans 4.9 GB. Built out-of-band `CONCURRENTLY` on
+  prod/staging (the migration ships `IF NOT EXISTS` non-concurrent → no-ops there),
+  same discipline as 0027 / 0029 / 0030.
 
 ## CI status checks ↔ branch protection
 
