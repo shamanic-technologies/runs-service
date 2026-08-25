@@ -98,7 +98,26 @@ export type UpdateRunRequest = z.infer<typeof UpdateRunRequestSchema>;
 
 // --- Cost schemas ---
 
-export const CostStatusEnum = z.enum(["actual", "provisioned", "cancelled"]).openapi("CostStatus");
+// Four distinct facts about a cost row, never conflated:
+//   provisioned — a pre-call hold, not yet charged
+//   actual      — the spend happened AND the org is charged for it
+//   cancelled   — it never happened (the call failed; release the hold)
+//   refunded    — it DID happen, but the platform has decided not to charge it
+//
+// `refunded` is an ACCOUNTING-side state only. It leaves every charge predicate
+// (`is_platform_projected`, `is_platform_committed`, the aggregator's atomic
+// status literals) — so the org stops owing it with no credit grant anywhere —
+// while the money stays visible as real spend through the dedicated `refunded`
+// aggregation columns, which is what a PERFORMANCE consumer (cost-per-outcome)
+// adds back. See CLAUDE.md "Refunded costs".
+export const CostStatusEnum = z.enum(["actual", "provisioned", "cancelled", "refunded"]).openapi("CostStatus");
+
+// Statuses a cost row may be CREATED with. `refunded` is deliberately absent:
+// a refund is a transition out of a charged row, never an initial state (a cost
+// that was never charged is a cancel, not a refund).
+export const CostCreateStatusEnum = z
+  .enum(["actual", "provisioned", "cancelled"])
+  .openapi("CostCreateStatus");
 
 export const CostSourceEnum = z.enum(["platform", "org"]).openapi("CostSource");
 
@@ -128,7 +147,7 @@ export const CostItemSchema = z
     costName: z.string().min(1),
     costSource: CostSourceEnum,
     quantity: z.number().positive(),
-    status: CostStatusEnum.default("actual"),
+    status: CostCreateStatusEnum.default("actual"),
     goal: GoalEnum.optional().openapi({ description: "Optional per-cost goal attribution override. Omit to inherit the run/header attribution." }),
     brandProfileId: z.string().uuid().optional().openapi({ description: "Optional per-cost brand-profile attribution override. Omit to inherit the run/header attribution." }),
     audienceId: z.string().uuid().optional().openapi({ description: "Optional per-cost audience attribution override (audience.id). Omit to inherit the run/header attribution." }),
@@ -149,13 +168,42 @@ export const AddCostsRequestSchema = z
 
 export type AddCostsRequest = z.infer<typeof AddCostsRequestSchema>;
 
-// PATCH /v1/runs/:id/costs/:costId only supports forward transitions out of `provisioned`.
-// Phase 5 of γ migration plan: each silver mutation maps to a domain event
-// (`cost.materialized` for actual, `cost.cancelled` for cancelled). Re-provisioning
-// an already-actual row has no domain meaning and is rejected with 400.
+// Refund provenance. A refund with no motive is indistinguishable from an
+// ordinary cancel three months later, and this is money — so both fields are
+// mandatory on every refund and land in the append-only bronze audit
+// (`cost.refunded` payload), never on the silver projection.
+export const RefundReasonSchema = z.string().trim().min(3).max(500).openapi({
+  description: "Why the spend is being comped. Free text, recorded in the bronze audit trail.",
+  example: "zai-glm-5.3 provider incident 2026-08-25 — spend comped for the customer",
+});
+
+export const RefundedBySchema = z.string().trim().min(1).max(200).openapi({
+  description: "Who authorized the refund (staff email / user id / service name). Recorded in the bronze audit trail.",
+  example: "kevin@distribute.you",
+});
+
+// PATCH /v1/runs/:id/costs/:costId supports forward transitions out of `provisioned`
+// plus the refund of a charged row. Phase 5 of γ migration plan: each silver mutation
+// maps to a domain event (`cost.materialized` for actual, `cost.cancelled` for
+// cancelled, `cost.refunded` for refunded). Re-provisioning an already-actual row has
+// no domain meaning and is rejected with 400.
+//
+// `refunded` requires `reason` + `refundedBy`, and is only reachable from `actual`
+// (409 otherwise — refunding something never charged is the existing cancel).
 export const UpdateCostRequestSchema = z
   .object({
-    status: z.enum(["actual", "cancelled"]),
+    status: z.enum(["actual", "cancelled", "refunded"]),
+    reason: RefundReasonSchema.optional(),
+    refundedBy: RefundedBySchema.optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.status !== "refunded") return;
+    if (!val.reason) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: "reason is required when status is 'refunded'" });
+    }
+    if (!val.refundedBy) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["refundedBy"], message: "refundedBy is required when status is 'refunded'" });
+    }
   })
   .openapi("UpdateCostRequest");
 
@@ -498,7 +546,7 @@ registry.registerPath({
   path: "/v1/runs/{id}/costs/{costId}",
   summary: "Update a cost item status",
   description:
-    "Updates a cost item status. Use to realize a provisioned cost (set status to 'actual') or cancel it (set status to 'cancelled').",
+    "Updates a cost item status. Use to realize a provisioned cost (set status to 'actual'), cancel it (set status to 'cancelled'), or refund it (set status to 'refunded'). A refund means the spend really happened and the platform has decided not to charge it: the row leaves every charge predicate (so the org's usage total drops and its spendable balance rises, with no credit granted anywhere) while staying visible as real spend through the refunded aggregation columns on the stats reads. It requires `reason` + `refundedBy`, both recorded in the append-only bronze audit, and is reachable ONLY from a charged row — refunding a provisioned or cancelled cost is refused with 409, because a cost that was never charged is cancelled, not refunded. Refunding an already-refunded row is a no-op 200 with the row unchanged.",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({
@@ -521,6 +569,10 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: {
       description: "Run or cost not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    409: {
+      description: "Refund refused — the cost was never charged (status is not 'actual')",
       content: { "application/json": { schema: ErrorSchema } },
     },
   },
@@ -784,6 +836,116 @@ registry.registerPath({
   },
 });
 
+// --- Refund schemas (staff cost-refund action) ---
+
+// The set of cost rows a refund targets. preview and apply take the SAME filter,
+// so what the preview shows is exactly what apply writes. Only CHARGED
+// (status='actual') PLATFORM (cost_source='platform') rows can ever match:
+// a provisioned hold was never charged (that is the existing cancel) and a BYOK
+// row is paid straight to the provider, so there is nothing to comp.
+export const RefundFilterSchema = z.object({
+  orgId: z.string().uuid().openapi({ description: "Org whose charged costs are being comped. Required — a refund always belongs to one customer." }),
+  rootRunId: z.string().uuid().optional().openapi({ description: "Restrict to this run AND all of its descendants, so staff can refund a whole run's costs without enumerating rows by hand." }),
+  costName: z.string().min(1).optional().openapi({ description: "Exact cost-name match." }),
+  costNamePrefix: z.string().min(1).optional().openapi({ description: "Cost-name prefix match (LIKE 'prefix%', with % and _ escaped).", example: "zai-glm-5.3" }),
+  serviceName: z.string().min(1).optional().openapi({ description: "Restrict to costs whose run has this service name." }),
+  taskName: z.string().min(1).optional().openapi({ description: "Restrict to costs whose run has this task name." }),
+  startedAfter: z.string().datetime().optional().openapi({ description: "Inclusive lower bound on the run's started_at." }),
+  startedBefore: z.string().datetime().optional().openapi({ description: "Exclusive upper bound on the run's started_at." }),
+});
+
+export type RefundFilter = z.infer<typeof RefundFilterSchema>;
+
+export const RefundPreviewRequestSchema = RefundFilterSchema.openapi("RefundPreviewRequest");
+
+export const RefundApplyRequestSchema = RefundFilterSchema.extend({
+  reason: RefundReasonSchema,
+  refundedBy: RefundedBySchema,
+}).openapi("RefundApplyRequest");
+
+export const RefundMatchedCostSchema = z
+  .object({
+    id: z.string().uuid(),
+    runId: z.string().uuid(),
+    costName: z.string(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    totalCostInUsdCents: z.string(),
+    netCostInUsdCents: z.string(),
+    runStartedAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+  })
+  .openapi("RefundMatchedCost");
+
+export const RefundTotalsSchema = z.object({
+  costCount: z.number().openapi({ description: "Number of charged cost rows the filter matches." }),
+  runCount: z.number().openapi({ description: "Number of distinct runs those rows belong to." }),
+  grossTotalInUsdCents: z.string().openapi({ description: "GROSS total of the matched rows. 10-decimal string." }),
+  netTotalInUsdCents: z.string().openapi({ description: "Frozen NET total of the matched rows — what the org is actually charged today, and therefore what its spendable balance rises by once the refund is applied. 10-decimal string." }),
+});
+
+export const RefundPreviewResponseSchema = RefundTotalsSchema.extend({
+  orgId: z.string().uuid(),
+  costsTruncated: z.boolean().openapi({ description: "True when more rows match than the listing cap. The TOTALS always cover the full matched set — only the `costs` array is capped." }),
+  costsListLimit: z.number(),
+  costs: z.array(RefundMatchedCostSchema),
+}).openapi("RefundPreviewResponse");
+
+export const RefundApplyResponseSchema = RefundTotalsSchema.extend({
+  orgId: z.string().uuid(),
+  refundedCostCount: z.number().openapi({ description: "Rows actually flipped to 'refunded' by this call. Zero on a re-apply — already-refunded rows no longer match, so no amount moves twice." }),
+}).openapi("RefundApplyResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/cost-refunds/preview",
+  summary: "Preview which charged costs a refund would comp, and for how much",
+  description:
+    "Returns the charged platform cost rows matching the filter (status='actual', cost_source='platform') plus the gross and net totals over the FULL matched set. Writes nothing. Apply takes the same filter and refunds exactly this set. Rows already refunded never match, so a preview after an apply comes back empty.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: { content: { "application/json": { schema: RefundPreviewRequestSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Matched rows + totals",
+      content: { "application/json": { schema: RefundPreviewResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/cost-refunds/apply",
+  summary: "Refund (comp) the charged costs matching a filter",
+  description:
+    "Flips every matching charged platform cost row to status='refunded', recording the reason and the actor in the append-only bronze audit (`cost.refunded`). The org stops owing that money — its usage total drops and its spendable balance rises by the net amount — with no credit granted anywhere. The spend stays visible as REAL spend through the refunded aggregation columns on the stats reads, so a cost-per-outcome consumer is unaffected. Idempotent: a re-apply matches zero rows. Refuses (422) above a 5000-row cap so a wide filter is narrowed rather than discovered afterwards.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: { content: { "application/json": { schema: RefundApplyRequestSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Refund applied",
+      content: { "application/json": { schema: RefundApplyResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    422: {
+      description: "Too many rows matched for one apply",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
+});
+
 // --- Public runs stats schemas ---
 
 export const PublicRunsStatsStatusBreakdownSchema = z
@@ -881,6 +1043,8 @@ export const StatsCostsResponseSchema = z
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
         cancelledCostInUsdCents: z.string(),
+        refundedCostInUsdCents: z.string().openapi({ description: "GROSS spend that really happened but is NOT charged to the org (status = 'refunded'). Excluded from totalCostInUsdCents / actualCostInUsdCents (accounting view). Add it back to actualCostInUsdCents to reconstruct REAL spend for a cost-per-outcome (performance) view." }),
+        netRefundedCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET refunded spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'refunded'." }),
         netTotalCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure." }),
         netActualCostInUsdCents: z.string().optional(),
         netProvisionedCostInUsdCents: z.string().optional(),
@@ -932,6 +1096,8 @@ export const StatsCostsByServiceTasksResponseSchema = z
             actualCostInUsdCents: z.string(),
             provisionedCostInUsdCents: z.string(),
             cancelledCostInUsdCents: z.string(),
+            refundedCostInUsdCents: z.string().openapi({ description: "GROSS spend that really happened but is NOT charged to the org (status = 'refunded'). Excluded from totalCostInUsdCents / actualCostInUsdCents (accounting view). Add it back to actualCostInUsdCents to reconstruct REAL spend for a cost-per-outcome (performance) view." }),
+            netRefundedCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET refunded spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'refunded'." }),
             netTotalCostInUsdCents: z.string().optional().openapi({ description: "Frozen NET displayed total (gross reduced by each row's frozen usage discount). Gross fields above are unchanged; read net only when you want the discounted figure." }),
             netActualCostInUsdCents: z.string().optional(),
             netProvisionedCostInUsdCents: z.string().optional(),
@@ -1072,6 +1238,8 @@ export const PublicCostsTimeseriesResponseSchema = z
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
         cancelledCostInUsdCents: z.string(),
+        refundedCostInUsdCents: z.string().openapi({ description: "GROSS spend that really happened but is NOT charged to the org (status = 'refunded'). Excluded from totalCostInUsdCents / actualCostInUsdCents (accounting view). Add it back to actualCostInUsdCents to reconstruct REAL spend for a cost-per-outcome (performance) view." }),
+        netRefundedCostInUsdCents: z.string().openapi({ description: "Frozen NET refunded spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'refunded'." }),
         netTotalCostInUsdCents: z.string().openapi({ description: "Frozen NET (post per-org usage-discount) displayed total = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status IN ('actual','provisioned'). Gross fields above are unchanged; sum net when you want the discounted (actually-collected) figure. Pre-freeze / no-discount rows fall back to gross." }),
         netActualCostInUsdCents: z.string().openapi({ description: "Frozen NET realized spend = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'actual'. This is the post-usage-discount amount the fleet actually collects." }),
         netProvisionedCostInUsdCents: z.string().openapi({ description: "Frozen NET provisioned holds = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) where status = 'provisioned'." }),

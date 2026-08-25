@@ -9,6 +9,7 @@ import runsRoutes from "./routes/runs.js";
 import statsRoutes from "./routes/stats.js";
 import platformRunsRoutes from "./routes/platform-runs.js";
 import internalRoutes from "./routes/internal.js";
+import refundRoutes from "./routes/refunds.js";
 import eventsRoutes from "./routes/events.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
@@ -40,6 +41,7 @@ app.use(runsRoutes);
 app.use(statsRoutes);
 app.use(platformRunsRoutes);
 app.use(internalRoutes);
+app.use(refundRoutes);
 app.use(eventsRoutes);
 
 app.use((_req, res) => {

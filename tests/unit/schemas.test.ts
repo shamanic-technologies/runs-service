@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
+  UpdateCostRequestSchema,
+  RefundApplyRequestSchema,
   AddCostsRequestSchema,
 } from "../../src/schemas.js";
 
@@ -128,6 +130,69 @@ describe("schemas", () => {
         items: [{ costName: "test", costSource: "invalid", quantity: 1 }],
       });
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe("UpdateCostRequestSchema — refunds", () => {
+    it("accepts a refund carrying a reason and an actor", () => {
+      const result = UpdateCostRequestSchema.safeParse({
+        status: "refunded",
+        reason: "provider incident, spend comped",
+        refundedBy: "kevin@distribute.you",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects a refund with no motive — a refund with no reason is just a late cancel", () => {
+      const result = UpdateCostRequestSchema.safeParse({
+        status: "refunded",
+        refundedBy: "kevin@distribute.you",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects a refund with no actor", () => {
+      const result = UpdateCostRequestSchema.safeParse({
+        status: "refunded",
+        reason: "provider incident, spend comped",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("still accepts the pre-existing actual / cancelled transitions with no extra fields", () => {
+      expect(UpdateCostRequestSchema.safeParse({ status: "actual" }).success).toBe(true);
+      expect(UpdateCostRequestSchema.safeParse({ status: "cancelled" }).success).toBe(true);
+    });
+  });
+
+  describe("cost creation cannot start out refunded", () => {
+    it("rejects status refunded on a new cost item", () => {
+      const result = AddCostsRequestSchema.safeParse({
+        items: [{ costName: "token", costSource: "platform", quantity: 1, status: "refunded" }],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("still accepts the three creatable statuses", () => {
+      for (const status of ["actual", "provisioned", "cancelled"]) {
+        const result = AddCostsRequestSchema.safeParse({
+          items: [{ costName: "token", costSource: "platform", quantity: 1, status }],
+        });
+        expect(result.success).toBe(true);
+      }
+    });
+  });
+
+  describe("RefundApplyRequestSchema", () => {
+    it("requires an org, a reason and an actor", () => {
+      expect(RefundApplyRequestSchema.safeParse({ orgId: "11111111-1111-4111-8111-111111111111" }).success).toBe(false);
+      expect(
+        RefundApplyRequestSchema.safeParse({
+          orgId: "11111111-1111-4111-8111-111111111111",
+          reason: "provider incident",
+          refundedBy: "kevin@distribute.you",
+        }).success
+      ).toBe(true);
     });
   });
 });
