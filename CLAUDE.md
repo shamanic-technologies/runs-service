@@ -20,6 +20,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs
+- `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/health.ts` — Health check endpoint
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -87,17 +88,20 @@ Atomic-literal predicates allowed inline:
 - `status = 'actual'`
 - `status = 'provisioned'`
 - `status = 'cancelled'`
+- `status = 'refunded'`
 - `status IN ('actual','provisioned')` (== "displayed total")
 - `cost_source = 'platform'`
 - `cost_source = 'org'`
 
 **Banned inline**: `status != 'cancelled'` or `status <> 'cancelled'`. The
 negation form silently includes any future enum value. Use the explicit
-`status IN ('actual','provisioned')` instead so a 4th status (e.g. `pending`,
-`refunded`) defaults to NOT counted until consciously added — fail-safe.
+`status IN ('actual','provisioned')` instead so a 4th status defaults to NOT
+counted until consciously added — fail-safe. **That fourth status shipped:
+`refunded` (migration 0033), and it landed with ZERO change to either generated
+column precisely because the doctrine held.** See "Refunded costs" below.
 
 **Shared SQL builder**: `src/services/cost-aggregator.ts` exports the canonical
-SUM CASE WHEN blocks for total / actual / provisioned / cancelled / own / own-platform.
+SUM CASE WHEN blocks for total / actual / provisioned / cancelled / refunded / own / own-platform.
 Every aggregation endpoint imports + uses these. New aggregation sites MUST
 go through the aggregator — do not copy-paste inline CASE expressions.
 
@@ -105,6 +109,86 @@ go through the aggregator — do not copy-paste inline CASE expressions.
 status enumeration (`if status === 'actual' ... else if status === 'provisioned' ...`).
 Never use `else` as a catch-all — that's the same mistake as `status != 'cancelled'`
 in SQL.
+
+## Refunded costs — spend that happened and that we are not charging (migration 0033)
+
+`refunded` is the fourth cost status. It means: **this money really left the
+building at the provider, and the platform has decided not to charge the customer
+for it.** Neither existing status can say that — `actual` keeps charging, and
+`cancelled` claims the spend never happened, which is a lie about the ledger. The
+only lever before this was a billing credit grant, which misstates both sides.
+
+Four distinct facts, never conflated: `provisioned` (a hold, not charged),
+`actual` (charged), `cancelled` (never happened), `refunded` (happened, not
+charged).
+
+**The line that matters: refunded money affects the ACCOUNTING view, not the
+workflow PERFORMANCE view.**
+
+- **Accounting** ("what does this customer owe / what were they charged") stops
+  counting it, and that fell out **for free** from the predicate doctrine above:
+  every aggregation uses atomic status literals, never `!= 'cancelled'`, so a new
+  status is ignored rather than mis-bucketed. `is_platform_projected` and
+  `is_platform_committed` are UNCHANGED by migration 0033. A refunded row leaves
+  `GET /internal/org-usage-total` (which billing re-derives the spendable balance
+  from on every authorize) and `GET /internal/runs-expected-totals` the moment its
+  status flips — so **the org's balance rises with no credit written anywhere**.
+  `POST /v1/stats/budget` likewise stops counting it: a comped cost is not budget
+  spend.
+- **Performance** ("what did this workflow cost to produce an outcome") keeps
+  counting it, through `refundedCostInUsdCents` / `netRefundedCostInUsdCents` —
+  new columns on the shared aggregator (`refunded_cost` / `net_refunded_cost`),
+  served by `GET`+`POST /v1/stats/costs`, `GET /v1/stats/public/costs` and its
+  `/timeseries`. **Real spend = actual + refunded.** Never fold refunded back into
+  the displayed total; the two views are answers to different questions.
+- The run's own status is untouched. A refund is a fact about a COST ROW; putting
+  money state on the run would create a second source of truth and break
+  "completed means completed".
+
+**State machine.** `refunded` is reachable ONLY from `actual`. Refunding a
+`provisioned` or `cancelled` row is refused with 409 — a cost that was never
+charged is cancelled, not refunded — and a cost can never be CREATED as refunded
+(`CostCreateStatusEnum`). Refunding twice is a no-op: the HTTP layer returns the
+row unchanged and writes NO bronze event (bronze captures state changes, not HTTP
+traffic), and the projection's `UPDATE … WHERE id = … AND status = 'actual'` guard
+makes even a replayed event idempotent. No amount can move twice.
+
+**Provenance is mandatory and lives ONLY in bronze.** Every refund carries
+`reason` + `refundedBy`, recorded in the append-only `cost.refunded` payload
+alongside the frozen gross/net amounts. It is deliberately NOT projected onto
+silver: the audit trail is where "why and by whom" belongs, and duplicating it
+into the projection cache would be a second source of truth. A refund with no
+motive is indistinguishable from an ordinary cancel three months later.
+
+**Surfaces:**
+
+- `PATCH /v1/runs/:id/costs/:costId` with `{status:"refunded", reason, refundedBy}`
+  — one row.
+- `POST /internal/cost-refunds/preview` then `POST /internal/cost-refunds/apply`
+  (`src/routes/refunds.ts`) — the staff action. Both take the SAME filter
+  (`orgId` required; optional `rootRunId` which expands to that run AND its
+  descendants, `costName` / `costNamePrefix`, `serviceName`, `taskName`,
+  `startedAfter` / `startedBefore`) and select the SAME set, so **what the preview
+  shows is exactly what apply writes** — this writes money, and a filter that
+  writes in one shot with no preview is not acceptable. Only CHARGED
+  (`status='actual'`) PLATFORM (`cost_source='platform'`) rows ever match: a hold
+  is a cancel, and a BYOK row is paid straight to the provider so there is nothing
+  to comp. Already-refunded rows stop matching, which is what makes apply
+  idempotent (a re-apply reports `refundedCostCount: 0`). Preview totals always
+  cover the FULL matched set — only the row LISTING is capped at 500, flagged by
+  `costsTruncated`, never silently truncated. Apply refuses above 5000 rows (422)
+  so a wide filter is narrowed rather than discovered afterwards.
+
+**No backfill, no column, no index, no read swap.** Nothing is refunded until
+someone refunds something, so every existing number in this service is
+byte-identical after this migration. The only schema change is the projection
+trigger learning one more domain event.
+
+**Billing invalidation.** The staff apply does not call `notifyUsage` (a
+platform-level action has no `x-user-id` to satisfy billing's `requireOrgHeaders`).
+That is fine and deliberate: `runs_costs` is the source of truth and
+billing-service re-derives from `GET /internal/org-usage-total` on every authorize.
+The per-row PATCH path keeps its existing fire-and-forget hint.
 
 ## Deploy ordering with billing-service
 

@@ -178,6 +178,10 @@ interface AggRow {
   actualCostInUsdCents: string;
   provisionedCostInUsdCents: string;
   cancelledCostInUsdCents: string;
+  // GROSS spend that really happened but is NOT charged (status = 'refunded').
+  // Excluded from total/actual/provisioned (accounting view); a performance
+  // consumer adds it back to actual to reconstruct real spend.
+  refundedCostInUsdCents: string;
   // Frozen NET amounts (gross reduced by the per-cost frozen usage discount).
   // Present only on the per-attribution stats reads features-service consumes;
   // undefined elsewhere (public/gross-only reads). Gross fields above are
@@ -185,6 +189,7 @@ interface AggRow {
   netTotalCostInUsdCents?: string;
   netActualCostInUsdCents?: string;
   netProvisionedCostInUsdCents?: string;
+  netRefundedCostInUsdCents?: string;
   runCount: number;
   minStartedAt: string | null;
   maxStartedAt: string | null;
@@ -233,10 +238,12 @@ function regroupByDynasty(
       existing.actualCostInUsdCents = new Decimal(existing.actualCostInUsdCents).plus(group.actualCostInUsdCents).toFixed(10);
       existing.provisionedCostInUsdCents = new Decimal(existing.provisionedCostInUsdCents).plus(group.provisionedCostInUsdCents).toFixed(10);
       existing.cancelledCostInUsdCents = new Decimal(existing.cancelledCostInUsdCents).plus(group.cancelledCostInUsdCents).toFixed(10);
+      existing.refundedCostInUsdCents = new Decimal(existing.refundedCostInUsdCents).plus(group.refundedCostInUsdCents).toFixed(10);
       if (existing.netTotalCostInUsdCents !== undefined && group.netTotalCostInUsdCents !== undefined) {
         existing.netTotalCostInUsdCents = new Decimal(existing.netTotalCostInUsdCents).plus(group.netTotalCostInUsdCents).toFixed(10);
         existing.netActualCostInUsdCents = new Decimal(existing.netActualCostInUsdCents!).plus(group.netActualCostInUsdCents!).toFixed(10);
         existing.netProvisionedCostInUsdCents = new Decimal(existing.netProvisionedCostInUsdCents!).plus(group.netProvisionedCostInUsdCents!).toFixed(10);
+        existing.netRefundedCostInUsdCents = new Decimal(existing.netRefundedCostInUsdCents!).plus(group.netRefundedCostInUsdCents!).toFixed(10);
       }
       existing.runCount += group.runCount;
 
@@ -379,9 +386,11 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        refundedCostInUsdCents: new Decimal(row.refunded_cost).toFixed(10),
         netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
         netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
         netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
+        netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
         runCount: Number(row.run_count),
         minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
         maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
@@ -540,9 +549,11 @@ router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        refundedCostInUsdCents: new Decimal(row.refunded_cost).toFixed(10),
         netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
         netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
         netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
+        netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
         runCount: Number(row.run_count),
         minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
         maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
@@ -946,9 +957,11 @@ function handlePublicCosts(req: any, res: any) {
               COALESCE(s.actual_cost, '0')           AS actual_cost,
               COALESCE(s.provisioned_cost, '0')      AS provisioned_cost,
               COALESCE(s.cancelled_cost, '0')        AS cancelled_cost,
+              COALESCE(s.refunded_cost, '0')         AS refunded_cost,
               COALESCE(s.net_total_cost, '0')        AS net_total_cost,
               COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
               COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
+              COALESCE(s.net_refunded_cost, '0')     AS net_refunded_cost,
               c.run_count
             FROM counts c
             LEFT JOIN sums s ON s.dim IS NOT DISTINCT FROM c.dim
@@ -965,12 +978,14 @@ function handlePublicCosts(req: any, res: any) {
           actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
           provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
           cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+          refundedCostInUsdCents: new Decimal(row.refunded_cost).toFixed(10),
           // Frozen NET (post per-org usage-discount). COALESCE(net, gross) makes
           // pre-freeze / no-discount rows read net == gross. Additive: gross
           // fields above unchanged, so a gross-only consumer sees identical numbers.
           netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
           netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
           netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
+          netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
           runCount: Number(row.run_count),
           minStartedAt: null,
           maxStartedAt: null,
@@ -1092,6 +1107,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
         cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+        refundedCostInUsdCents: new Decimal(row.refunded_cost).toFixed(10),
         // Frozen NET (post per-org usage-discount). COALESCE(net, gross) makes
         // pre-freeze / no-discount rows read net == gross. Additive: gross fields
         // above unchanged, so the fleet-revenue consumer can sum net instead of
@@ -1099,6 +1115,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
         netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
         netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
+        netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
         runCount: Number(row.run_count),
       }));
 

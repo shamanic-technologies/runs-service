@@ -833,14 +833,43 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
     }
 
     const newStatus = parsed.data.status;
-    const eventType = newStatus === "actual" ? "cost.materialized" : "cost.cancelled";
+
+    // Refund is an ACCOUNTING-side transition out of a CHARGED row, and only
+    // that. Refunding something that was never charged is the existing cancel,
+    // so `provisioned` / `cancelled` are refused rather than silently accepted.
+    // Re-refunding an already-refunded row is a no-op: the row is returned
+    // unchanged and NO bronze event is written (bronze captures state changes,
+    // not HTTP traffic), so no amount can move twice.
+    if (newStatus === "refunded") {
+      if (existing.status === "refunded") {
+        res.json(existing);
+        return;
+      }
+      if (existing.status !== "actual") {
+        res.status(409).json({
+          error: `Cannot refund a cost with status '${existing.status}'. Only a charged cost (status 'actual') can be refunded; a cost that was never charged is cancelled, not refunded.`,
+        });
+        return;
+      }
+    }
+
+    const eventType =
+      newStatus === "actual" ? "cost.materialized" : newStatus === "refunded" ? "cost.refunded" : "cost.cancelled";
+
+    // Refund provenance (why + who) lives in the append-only bronze payload —
+    // the audit trail, never projected onto silver. Validated as required by
+    // UpdateCostRequestSchema when status is 'refunded'.
+    const payload: Record<string, unknown> =
+      newStatus === "refunded"
+        ? { from: existing.status, to: newStatus, reason: parsed.data.reason, refundedBy: parsed.data.refundedBy }
+        : { from: existing.status, to: newStatus };
 
     const updated = await db.transaction(async (tx) => {
       await logCostLifecycle(tx, {
         runId: id,
         costId,
         eventType,
-        payload: { from: existing.status, to: newStatus },
+        payload,
         identity: {
           orgId: req.orgId,
           userId: req.userId || run.userId,

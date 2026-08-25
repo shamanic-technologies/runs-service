@@ -24,8 +24,16 @@ import { sql } from "drizzle-orm";
  * - actual_cost          = SUM where status = 'actual'
  * - provisioned_cost     = SUM where status = 'provisioned'
  * - cancelled_cost       = SUM where status = 'cancelled'                       // audit only
+ * - refunded_cost        = SUM where status = 'refunded'                        // real spend, not charged
  *
  * Invariant: total_cost === actual_cost + provisioned_cost (always).
+ *
+ * ACCOUNTING vs PERFORMANCE. `refunded` money really was spent at the provider but
+ * the platform decided not to charge it, so it is absent from total/actual/provisioned
+ * (what the org owes) and carried in its own column instead. A consumer answering
+ * "what did this workflow cost to produce an outcome" reconstructs real spend as
+ * actual_cost + refunded_cost; a consumer answering "what does this customer owe"
+ * uses total_cost and ignores refunded_cost. Never fold refunded back into total.
  */
 export function costAggregateSelectSql(rcAlias = "rc") {
   const a = sql.raw(rcAlias);
@@ -33,7 +41,8 @@ export function costAggregateSelectSql(rcAlias = "rc") {
     COALESCE(SUM(CASE WHEN ${a}.status IN ('actual','provisioned') THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS total_cost,
     COALESCE(SUM(CASE WHEN ${a}.status = 'actual'      THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS actual_cost,
     COALESCE(SUM(CASE WHEN ${a}.status = 'provisioned' THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS provisioned_cost,
-    COALESCE(SUM(CASE WHEN ${a}.status = 'cancelled'   THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS cancelled_cost
+    COALESCE(SUM(CASE WHEN ${a}.status = 'cancelled'   THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS cancelled_cost,
+    COALESCE(SUM(CASE WHEN ${a}.status = 'refunded'    THEN ${a}.total_cost_in_usd_cents ELSE 0 END), 0)::text AS refunded_cost
   `;
 }
 
@@ -44,7 +53,7 @@ export function costAggregateSelectSql(rcAlias = "rc") {
  * historical rows (written before the discount freeze, net IS NULL) read as
  * net == gross — the correct semantic (no discount existed then).
  *
- * Output columns: net_total_cost, net_actual_cost, net_provisioned_cost.
+ * Output columns: net_total_cost, net_actual_cost, net_provisioned_cost, net_refunded_cost.
  * Added ONLY to the per-attribution stats reads that features-service consumes
  * so it can display gross OR net. Gross columns are unchanged, so a reader that
  * ignores the net columns sees today's numbers exactly (backward-compatible).
@@ -55,7 +64,8 @@ export function costAggregateNetSelectSql(rcAlias = "rc") {
   return sql`
     COALESCE(SUM(CASE WHEN ${a}.status IN ('actual','provisioned') THEN ${net} ELSE 0 END), 0)::text AS net_total_cost,
     COALESCE(SUM(CASE WHEN ${a}.status = 'actual'      THEN ${net} ELSE 0 END), 0)::text AS net_actual_cost,
-    COALESCE(SUM(CASE WHEN ${a}.status = 'provisioned' THEN ${net} ELSE 0 END), 0)::text AS net_provisioned_cost
+    COALESCE(SUM(CASE WHEN ${a}.status = 'provisioned' THEN ${net} ELSE 0 END), 0)::text AS net_provisioned_cost,
+    COALESCE(SUM(CASE WHEN ${a}.status = 'refunded'    THEN ${net} ELSE 0 END), 0)::text AS net_refunded_cost
   `;
 }
 
