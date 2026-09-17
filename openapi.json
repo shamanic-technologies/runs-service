@@ -37,6 +37,7 @@
             "type": "string",
             "enum": [
               "ok",
+              "slow",
               "unreachable"
             ]
           }
@@ -2065,7 +2066,7 @@
             }
           },
           "503": {
-            "description": "Service is degraded (database unreachable)",
+            "description": "Service is degraded (database unreachable, or too slow to answer inside the probe budget)",
             "content": {
               "application/json": {
                 "schema": {
