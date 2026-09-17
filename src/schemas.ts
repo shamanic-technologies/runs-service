@@ -318,7 +318,7 @@ export const HealthResponseSchema = z
   .object({
     status: z.enum(["ok", "degraded"]),
     service: z.string(),
-    database: z.enum(["ok", "unreachable"]),
+    database: z.enum(["ok", "slow", "unreachable"]),
   })
   .openapi("HealthResponse");
 
@@ -389,7 +389,8 @@ registry.registerPath({
       content: { "application/json": { schema: HealthResponseSchema } },
     },
     503: {
-      description: "Service is degraded (database unreachable)",
+      description:
+        "Service is degraded (database unreachable, or too slow to answer inside the probe budget)",
       content: { "application/json": { schema: HealthResponseSchema } },
     },
   },

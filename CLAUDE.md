@@ -190,6 +190,38 @@ That is fine and deliberate: `runs_costs` is the source of truth and
 billing-service re-derives from `GET /internal/org-usage-total` on every authorize.
 The per-row PATCH path keeps its existing fire-and-forget hint.
 
+## `/health` answers about the pool, and never queues behind it
+
+`/health` runs `SELECT 1` through the same postgres.js pool as the cost
+aggregations, so a saturated pool used to make the route HANG rather than report
+anything. That is the worst possible failure for a health route: the fleet
+health watchdog on the box probes with a 10s timeout and records `ERR`, which is
+the same thing it records for a dead container — so "the pool is busy" and "the
+service is gone" were indistinguishable, and the mail it sends says nothing
+about which.
+
+- **The probe is raced against a 2s budget** (`src/routes/health-probe.ts`).
+  Fast → `200 {database:"ok"}`. Rejected → `503 {database:"unreachable"}`. Still
+  running at the budget → `503 {database:"slow"}`, which is the new state and
+  the whole point: it names pool saturation instead of hanging. The abandoned
+  query keeps running on its own connection and its rejection is caught, so it
+  cannot surface later as an unhandled rejection.
+- **`database` is a three-value enum** (`ok | slow | unreachable`) on
+  `HealthResponseSchema`. `deploy.sh` and the watchdog both key on the STATUS
+  CODE, so a `slow` still reads as unhealthy to them — the extra value is for
+  whoever reads the body.
+- **Pool is `max: 20`, and `idle_timeout` is deliberately UNSET.** postgres.js
+  defaults `idle_timeout` to null (idle connections are never closed); setting a
+  value buys a fresh TCP+TLS handshake after every quiet stretch, which is the
+  mis-transplanted node-postgres setting the global notes warn about. 10
+  connections were not enough for a service whose hot read is a multi-second
+  aggregation over the ledger.
+- **The load itself is not fixed here.** `GET /internal/org-usage-total` got the
+  denormalized org column (migration 0029); `GET /internal/runs-expected-totals`
+  did not, and billing polls it hard — on the whale org it sums ~691k
+  platform-projected rows per call. A de-join or a cache for it is its own
+  benchmarked PR.
+
 ## Deploy ordering with billing-service
 
 Any change to runs-service's billing call shape (amount type/precision, headers, endpoint path) MUST land in billing-service first and deploy to the target env before the runs-service PR merges. Squash-merge to `staging` triggers Railway auto-deploy; merging ahead of billing-service breaks the env. Document the upstream dependency in the PR body under `⚠️ Deployment ordering` and defer merge until billing-service is live in the same env.
