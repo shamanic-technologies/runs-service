@@ -819,6 +819,36 @@ const ALL_PUBLIC_GROUP_BY: Record<string, string> = {
   ...PUBLIC_DYNASTY_GROUP_BY,
 };
 
+// Optional PAYER filter for the two public cost reads.
+//
+//   platform — the platform paid the provider, so this is spend an org can be
+//              billed for. This is the figure a "what does this customer burn
+//              per day" projection must use.
+//   org      — BYOK: the org pays its own provider key directly. Tracked here,
+//              never billed, deliberately excluded from every billing read
+//              (`/internal/org-usage-total`, `is_platform_projected`).
+//
+// ABSENT = both, which is exactly what these endpoints have always counted, so
+// an unfiltered request stays byte-identical to today. There is no default and
+// no fallback: an unrecognised value is a 400, never a silently unfiltered
+// answer to a question the caller did not ask.
+const PUBLIC_COST_SOURCES = ["platform", "org"] as const;
+
+/**
+ * Build the payer predicate as a JOIN-ON fragment.
+ *
+ * It MUST go on the JOIN, never in the WHERE. In the WHERE it would collapse the
+ * timeseries' LEFT JOIN into an inner one — dropping cost-less runs out of
+ * `run_count` and deleting whole buckets — and in the split public read it would
+ * have to be duplicated into the `counts` CTE, which has no `rc` in scope at all.
+ * On the ON clause it narrows only the rows that get summed; every run-side
+ * number (run_count, bucket set) is untouched.
+ */
+function costSourceJoinSql(costSource: string | undefined, rcAlias = "rc") {
+  if (!costSource) return sql``;
+  return sql`AND ${sql.raw(rcAlias)}.cost_source = ${costSource}`;
+}
+
 function buildPublicFilterSql(filters: {
   orgId?: string;
   brandId?: string;
@@ -859,7 +889,7 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, workflowDynastySlug, taskName } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, workflowDynastySlug, taskName, costSource } = req.query as Record<string, string | undefined>;
 
       if (!groupBy || !ALL_PUBLIC_GROUP_BY[groupBy]) {
         res.status(400).json({
@@ -867,6 +897,14 @@ function handlePublicCosts(req: any, res: any) {
         });
         return;
       }
+
+      if (costSource && !(PUBLIC_COST_SOURCES as readonly string[]).includes(costSource)) {
+        res.status(400).json({
+          error: `Invalid costSource value. Allowed: ${PUBLIC_COST_SOURCES.join(", ")}`,
+        });
+        return;
+      }
+      const costSourceJoin = costSourceJoinSql(costSource);
 
       const isDynastyGroupBy = !!PUBLIC_DYNASTY_GROUP_BY[groupBy];
       const actualGroupBy = isDynastyGroupBy ? "workflowSlug" : groupBy;
@@ -932,7 +970,7 @@ function handlePublicCosts(req: any, res: any) {
               COUNT(DISTINCT r.id) as run_count
               ${quantitySelect}
             FROM runs r
-            ${joinType} runs_costs rc ON rc.run_id = r.id
+            ${joinType} runs_costs rc ON rc.run_id = r.id ${costSourceJoin}
             ${whereSql}
             GROUP BY ${sql.raw(col)}
             ORDER BY total_cost DESC
@@ -948,7 +986,7 @@ function handlePublicCosts(req: any, res: any) {
                 ${costAggregateSelectSql("rc")},
                 ${costAggregateNetSelectSql("rc")}
               FROM runs r
-              INNER JOIN runs_costs rc ON rc.run_id = r.id
+              INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoin}
               ${whereSql}
               GROUP BY 1
             )
@@ -1044,6 +1082,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         taskName,
         startedAfter,
         startedBefore,
+        costSource,
       } = req.query as Record<string, string | undefined>;
 
       const interval = intervalParam ?? "day";
@@ -1053,6 +1092,13 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         });
         return;
       }
+      if (costSource && !(PUBLIC_COST_SOURCES as readonly string[]).includes(costSource)) {
+        res.status(400).json({
+          error: `Invalid costSource value. Allowed: ${PUBLIC_COST_SOURCES.join(", ")}`,
+        });
+        return;
+      }
+      const costSourceJoin = costSourceJoinSql(costSource);
       const timezone = tzParam ?? "UTC";
 
       const identity: IdentityHeaders = {
@@ -1094,7 +1140,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
           ${costAggregateNetSelectSql("rc")},
           COUNT(DISTINCT r.id) as run_count
         FROM runs r
-        LEFT JOIN runs_costs rc ON rc.run_id = r.id
+        LEFT JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoin}
         ${whereSql}
         GROUP BY 1
         ORDER BY 1 ASC
