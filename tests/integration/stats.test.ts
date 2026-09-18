@@ -1490,6 +1490,184 @@ describe("Stats endpoints", () => {
     });
   });
 
+  // The payer filter. billing-service projects an org's next charge date from its
+  // recent burn rate, so it needs dated, org-scoped spend counting ONLY what the
+  // platform actually paid for — a BYOK row is paid straight to the org's own
+  // provider key and is never billed, so counting it inflates the rate and makes
+  // the predicted charge date too early.
+  describe("costSource filter — GET /v1/stats/public/costs{,/timeseries}", () => {
+    const FEATURE = "cs-payer";
+    // One day, one org, both payers: $0.30 platform + $0.70 BYOK.
+    async function seedMixedPayerDay() {
+      const run = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-09-01T06:00:00.000Z"),
+      });
+      // Platform row, carrying a frozen 50% usage discount → net 0.15.
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        costSource: "platform",
+        quantity: "300",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.3000000000",
+        netCostInUsdCents: "0.1500000000",
+        usageDiscountPct: "0.50000000",
+      });
+      // BYOK row — never billed, so it must vanish under costSource=platform.
+      await insertTestRunCost({
+        runId: run.id,
+        costName: "token",
+        costSource: "org",
+        quantity: "700",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.7000000000",
+      });
+      return run;
+    }
+
+    it("timeseries: platform-only excludes BYOK, and the unfiltered call is unchanged", async () => {
+      await seedMixedPayerDay();
+
+      const unfiltered = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ orgId: ORG_ID, featureSlug: FEATURE });
+      const platformOnly = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ orgId: ORG_ID, featureSlug: FEATURE, costSource: "platform" });
+      const byokOnly = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ orgId: ORG_ID, featureSlug: FEATURE, costSource: "org" });
+
+      expect(unfiltered.status).toBe(200);
+      expect(platformOnly.status).toBe(200);
+      expect(byokOnly.status).toBe(200);
+
+      // Unfiltered keeps today's meaning: both payers counted.
+      expect(unfiltered.body.buckets).toHaveLength(1);
+      expect(unfiltered.body.buckets[0].totalCostInUsdCents).toBe("1.0000000000");
+
+      // Filtered: only what the platform paid for.
+      expect(platformOnly.body.buckets).toHaveLength(1);
+      expect(platformOnly.body.buckets[0].period).toBe("2026-09-01");
+      expect(platformOnly.body.buckets[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(platformOnly.body.buckets[0].actualCostInUsdCents).toBe("0.3000000000");
+
+      // NET of the frozen per-org usage discount — what the org actually owes.
+      expect(platformOnly.body.buckets[0].netTotalCostInUsdCents).toBe("0.1500000000");
+      expect(platformOnly.body.buckets[0].netActualCostInUsdCents).toBe("0.1500000000");
+
+      // The difference between the two answers is EXACTLY the BYOK spend.
+      expect(byokOnly.body.buckets[0].totalCostInUsdCents).toBe("0.7000000000");
+
+      // run_count and the bucket set are run-side facts: the payer filter is on
+      // the JOIN, so it narrows the summed rows only.
+      expect(unfiltered.body.buckets[0].runCount).toBe(1);
+      expect(platformOnly.body.buckets[0].runCount).toBe(1);
+    });
+
+    it("timeseries: keeps a cost-less run's bucket (the filter is on the JOIN, not the WHERE)", async () => {
+      await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: "cs-costless",
+        startedAt: new Date("2026-09-04T06:00:00.000Z"),
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ orgId: ORG_ID, featureSlug: "cs-costless", costSource: "platform" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(1);
+      expect(res.body.buckets[0].runCount).toBe(1);
+      expect(res.body.buckets[0].totalCostInUsdCents).toBe("0.0000000000");
+    });
+
+    it("timeseries: a date window bounds the platform-only figure", async () => {
+      await seedMixedPayerDay();
+      const later = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "task",
+        featureSlug: FEATURE,
+        startedAt: new Date("2026-09-20T06:00:00.000Z"),
+      });
+      await insertTestRunCost({
+        runId: later.id,
+        costName: "token",
+        costSource: "platform",
+        quantity: "500",
+        unitCostInUsdCents: "0.0010000000",
+        totalCostInUsdCents: "0.5000000000",
+      });
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({
+          orgId: ORG_ID,
+          featureSlug: FEATURE,
+          costSource: "platform",
+          startedAfter: "2026-09-10T00:00:00.000Z",
+          startedBefore: "2026-09-30T00:00:00.000Z",
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(1);
+      expect(res.body.buckets[0].period).toBe("2026-09-20");
+      expect(res.body.buckets[0].totalCostInUsdCents).toBe("0.5000000000");
+    });
+
+    it("untimed public costs honours the same filter", async () => {
+      await seedMixedPayerDay();
+
+      const unfiltered = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureSlug", orgId: ORG_ID, featureSlug: FEATURE });
+      const platformOnly = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureSlug", orgId: ORG_ID, featureSlug: FEATURE, costSource: "platform" });
+
+      expect(unfiltered.body.groups[0].totalCostInUsdCents).toBe("1.0000000000");
+      expect(platformOnly.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(platformOnly.body.groups[0].netTotalCostInUsdCents).toBe("0.1500000000");
+      // The count is a run-side fact and never moves with the payer filter.
+      expect(platformOnly.body.groups[0].runCount).toBe(unfiltered.body.groups[0].runCount);
+    });
+
+    it("untimed public costs honours the filter on the costName path too", async () => {
+      await seedMixedPayerDay();
+
+      const res = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "costName", orgId: ORG_ID, featureSlug: FEATURE, costSource: "platform" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.groups).toHaveLength(1);
+      expect(res.body.groups[0].dimensions.costName).toBe("token");
+      expect(res.body.groups[0].totalCostInUsdCents).toBe("0.3000000000");
+      expect(res.body.groups[0].totalQuantity).toBe("300.000000");
+    });
+
+    it("rejects an unrecognised costSource rather than silently answering unfiltered", async () => {
+      const ts = await request(app)
+        .get("/v1/stats/public/costs/timeseries")
+        .query({ costSource: "platfrom" });
+      expect(ts.status).toBe(400);
+      expect(ts.body.error).toContain("Invalid costSource");
+
+      const untimed = await request(app)
+        .get("/v1/stats/public/costs")
+        .query({ groupBy: "featureSlug", costSource: "stripe" });
+      expect(untimed.status).toBe(400);
+      expect(untimed.body.error).toContain("Invalid costSource");
+    });
+  });
+
   describe("Dynasty slug filtering — GET /v1/stats/costs", () => {
     it("filters by workflowDynastySlug (resolved to versioned slugs)", async () => {
       vi.spyOn(dynastyResolver, "resolveWorkflowDynastySlugs").mockResolvedValue([

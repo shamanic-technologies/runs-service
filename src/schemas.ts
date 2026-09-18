@@ -1183,6 +1183,13 @@ export const PublicCostsQuerySchema = z
     featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug." }),
     workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service." }),
     taskName: z.string().optional(),
+    costSource: z
+      .enum(["platform", "org"])
+      .optional()
+      .openapi({
+        description:
+          "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). An unrecognised value is a 400 — never a silently unfiltered answer.",
+      }),
   })
   .openapi("PublicCostsQuery");
 
@@ -1219,6 +1226,13 @@ export const PublicCostsTimeseriesQuerySchema = z
       .datetime()
       .optional()
       .openapi({ description: "Only include runs with started_at <= this ISO-8601 timestamp." }),
+    costSource: z
+      .enum(["platform", "org"])
+      .optional()
+      .openapi({
+        description:
+          "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for — this is the figure to divide by the window length for a per-day burn rate. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). run_count and the bucket set are unaffected by the filter: it narrows only the summed cost rows. An unrecognised value is a 400 — never a silently unfiltered answer.",
+      }),
   })
   .openapi("PublicCostsTimeseriesQuery");
 
@@ -1355,7 +1369,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs",
   summary: "Public cost aggregation (no auth)",
   description:
-    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName. Each group carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum net for what the fleet actually collects. No authentication required.",
+    "Returns aggregated costs across all organizations, grouped by brandId, workflowSlug, campaignId, featureSlug, serviceName, costName, or workflowDynastySlug. Supports optional filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and costSource (platform = spend the platform paid for and can bill; org = BYOK, paid by the org to its own provider key and never billed; omitted counts both, as it always has). Each group carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum net for what the fleet actually collects. No authentication required.",
   request: {
     query: PublicCostsQuerySchema,
   },
@@ -1376,7 +1390,7 @@ registry.registerPath({
   path: "/v1/stats/public/costs/timeseries",
   summary: "Public cost time-series (no auth)",
   description:
-    "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, and optional startedAfter/startedBefore window bounds. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Each bucket carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum netActual for the fleet's realized post-discount revenue. Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
+    "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, optional startedAfter/startedBefore window bounds, and costSource. costSource=platform counts ONLY spend the platform paid the provider for — i.e. what an org can actually be billed — excluding BYOK rows the org paid directly to its own provider key; combined with an orgId, a date window and netActualCostInUsdCents, that is the org's realized post-discount burn per day. Omitting costSource counts both payers, as this endpoint always has, and the filter never changes run_count or which buckets appear. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Each bucket carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum netActual for the fleet's realized post-discount revenue. Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
   request: {
     query: PublicCostsTimeseriesQuerySchema,
   },
