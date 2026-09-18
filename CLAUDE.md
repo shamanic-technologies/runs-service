@@ -74,6 +74,36 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
 
+## The payer filter — a dated org read that answers what the PLATFORM paid (v0.47.2)
+
+`GET /v1/stats/public/costs/timeseries` and `GET /v1/stats/public/costs` take an
+optional `costSource=platform|org`.
+
+- `platform` — the platform paid the provider, so this is spend an org can be
+  BILLED for. With `orgId` + `startedAfter`/`startedBefore` + `interval=day` +
+  `netActualCostInUsdCents`, that is the org's realized post-discount burn per
+  day — the denominator billing-service projects a next-charge date from.
+- `org` — BYOK. The org pays its own provider key directly and is never billed
+  for it, which is why `is_platform_projected` excludes it and why counting it
+  in a burn rate predicts a charge date that is too early.
+- ABSENT — both payers, which is what these endpoints always counted, so every
+  pre-existing request is byte-identical. No default, no fallback: an
+  unrecognised value is a **400**, never a silently unfiltered answer.
+
+**The predicate lives on the JOIN's ON clause, never in the WHERE.** In the
+WHERE it would collapse the timeseries' `LEFT JOIN` into an inner one — dropping
+cost-less runs out of `run_count` and deleting whole buckets — and in the split
+public read it would have to be duplicated into the `counts` CTE, which has no
+`rc` in scope at all. On the ON clause it narrows only the summed rows, so
+`run_count` and the bucket set are untouched by the filter. `costSourceJoinSql`
+in `src/routes/stats.ts` is the single builder; it returns empty SQL when the
+param is absent.
+
+Verified against production (org `b645207b…`, 2026-07-20 → 2026-08-02, daily):
+unfiltered and platform-only agree on every day with no BYOK, and differ by
+exactly the BYOK spend on the two days that have some (18.00 on 07-23, 2.00 on
+07-31); `run_count` is identical in both readings.
+
 ## Cost predicate doctrine
 
 Every cost aggregation in this codebase uses atomic status literals only. The
