@@ -1034,18 +1034,28 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       // then the newest of those overall: exactly the global page, since a run
       // carries one campaign and a run outside its member's top (limit + offset)
       // cannot be in the global top (limit + offset) either.
+      //
+      // Bitmap scans are off for this one statement. The planner estimates a few
+      // hundred matches per member, so once `limit` nears that estimate it swaps the
+      // ordered index walk for a BitmapAnd with idx_runs_org_service (220k rows for
+      // a large org) plus a sort, per member: 2s instead of 0.3s at limit=201 on
+      // the 47-row family in prod. With bitmaps off it walks the index in order
+      // and stops at the limit, or uses a selective btree when a filter has one.
       const perMember = limit + offset;
-      const rows = await db.execute(sql`
-        SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
-        CROSS JOIN LATERAL (
-          SELECT ${runs.id} AS id, ${runs.startedAt} AS started_at FROM ${runs}
-          WHERE ${runs.campaignId} = m.cid AND ${and(...conditions)}
-          ORDER BY ${runs.startedAt} DESC, ${runs.id} DESC
-          LIMIT ${perMember}
-        ) p
-        ORDER BY p.started_at DESC, p.id DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `);
+      const rows = await db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL enable_bitmapscan = off`);
+        return tx.execute(sql`
+          SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
+          CROSS JOIN LATERAL (
+            SELECT ${runs.id} AS id, ${runs.startedAt} AS started_at FROM ${runs}
+            WHERE ${runs.campaignId} = m.cid AND ${and(...conditions)}
+            ORDER BY ${runs.startedAt} DESC, ${runs.id} DESC
+            LIMIT ${perMember}
+          ) p
+          ORDER BY p.started_at DESC, p.id DESC
+          LIMIT ${limit} OFFSET ${offset}
+        `);
+      });
       pageIds = (rows as unknown as Array<{ id: string }>).map((r) => r.id);
     } else {
       if (campaignIds) conditions.push(inArray(runs.campaignId, campaignIds));
