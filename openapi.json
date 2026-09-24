@@ -1779,6 +1779,11 @@
                   "description": "Bucket start date in YYYY-MM-DD (local to timezone). For interval=day with tz=UTC this is the UTC calendar day. Only intervals with at least one run appear — empty intervals are absent, never fabricated.",
                   "example": "2026-07-01"
                 },
+                "campaignId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy=campaignId: the campaign this bucket belongs to (null for runs with no campaign)."
+                },
                 "totalCostInUsdCents": {
                   "type": "string",
                   "description": "SUM total_cost_in_usd_cents for cost rows of runs started in this bucket, status IN ('actual','provisioned'). 10-decimal string."
@@ -3293,6 +3298,16 @@
           {
             "schema": {
               "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "description": "Filter by a single workflow slug"
             },
             "required": false,
@@ -3658,6 +3673,16 @@
           },
           {
             "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string"
             },
             "required": false,
@@ -3784,6 +3809,29 @@
             },
             "required": false,
             "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "campaignId"
+              ],
+              "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged)."
+            },
+            "required": false,
+            "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged).",
+            "name": "groupBy",
             "in": "query"
           },
           {

@@ -260,6 +260,13 @@
       "when": 1781308800000,
       "tag": "0036_runs_campaign_started_index",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1781395200000,
+      "tag": "0037_stats_rollup_campaign_day",
+      "breakpoints": true
     }
   ]
 }
