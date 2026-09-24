@@ -196,6 +196,31 @@ dashboard budget, and the ledger only grows. So the total is KEPT.
 - `POST /internal/transfer-brand` now also moves `runs_costs.organization_id`
   with the run, so `org-usage-total` (0029's denormalized org) follows the move.
 
+## Runs of a campaign FAMILY in one request (migration 0036)
+
+A campaign as the customer knows it is often many stored campaign rows
+(campaign-service keeps every superseded row; one real campaign has 47).
+`GET /v1/runs?campaignIds=a,b,c` answers for the whole set in one call instead of
+one call per id (features-service `observedPicks` fanned out 47 calls).
+
+- **Page first, then sum costs.** With a `limit`, the handler picks the page's run
+  ids first and only then LEFT JOINs `runs_costs` for those ids. The old single
+  query grouped every matching run before the LIMIT, so a 50-row read of a busy
+  campaign summed costs for all 27k of its runs. Applies to every `GET /v1/runs`
+  caller, not only `campaignIds`; response shape unchanged, order is now
+  `startedAt DESC, id DESC` (the tie-break is new, ties were arbitrary before).
+- **`campaignIds` + `limit` = per-member LATERAL top-(limit+offset) on
+  `idx_runs_campaign_started (campaign_id, started_at DESC)`, then the global
+  top.** Exact by construction: a run carries one campaign, so a run outside its
+  member's top (limit+offset) cannot be in the global one. The two obvious plans
+  are both bad on prod: `campaign_id = ANY(...) ORDER BY started_at DESC LIMIT`
+  either top-N-sorts the family's 58k runs (1.7s) or walks
+  `idx_runs_started_status` backwards (4.1s for a family whose runs are old).
+- Without `limit` the list is a plain `campaign_id IN (...)`. Blank/duplicate ids
+  are dropped; empty list or more than 500 ids is a 400. ANDs with `campaignId`.
+- The index was built `CONCURRENTLY` out-of-band on prod (21.5s); the migration's
+  `IF NOT EXISTS` no-ops there.
+
 ## Cost predicate doctrine
 
 Every cost aggregation in this codebase uses atomic status literals only. The

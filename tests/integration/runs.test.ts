@@ -1372,6 +1372,102 @@ describe("Runs CRUD", () => {
       expect(res.body.runs).toHaveLength(3);
       expect(res.body.limit).toBe(3);
     });
+
+    describe("campaignIds (one request for a campaign family)", () => {
+      const A = "campaign-family-a";
+      const B = "campaign-family-b";
+      const C = "campaign-family-c";
+      const OUTSIDE = "campaign-outside";
+
+      // Minutes-apart starts across three members, interleaved, plus noise the
+      // filters must exclude: another campaign, another service, another org.
+      async function seedFamily() {
+        const at = (m: number) => new Date(Date.UTC(2026, 8, 1, 12, m));
+        const plan: Array<[string, number]> = [
+          [A, 1], [B, 2], [A, 3], [C, 4], [B, 5], [A, 6], [B, 7], [C, 8], [A, 9], [B, 10],
+        ];
+        for (const [campaignId, m] of plan) {
+          const run = await insertTestRun({
+            organizationId: ORG_ID, serviceName: "campaign-service", taskName: `trigger-${m}`,
+            campaignId, startedAt: at(m),
+          });
+          await insertTestRunCost({
+            runId: run.id, costName: "token", quantity: "1",
+            unitCostInUsdCents: "0.0000000001", totalCostInUsdCents: "0.0000000001",
+          });
+        }
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "campaign-service", taskName: "x", campaignId: OUTSIDE, startedAt: at(11) });
+        await insertTestRun({ organizationId: ORG_ID, serviceName: "lead-service", taskName: "x", campaignId: A, startedAt: at(12) });
+        await insertTestRun({ organizationId: "99999999-9999-9999-9999-999999999999", serviceName: "campaign-service", taskName: "x", campaignId: B, startedAt: at(13) });
+      }
+
+      async function perMemberUnion(ids: string[], limit: number) {
+        const all: any[] = [];
+        for (const id of ids) {
+          const res = await request(app)
+            .get(`/v1/runs?campaignId=${id}&serviceName=campaign-service&limit=${limit}`)
+            .set(authHeaders);
+          expect(res.status).toBe(200);
+          all.push(...res.body.runs);
+        }
+        return all.sort((x, y) => y.startedAt.localeCompare(x.startedAt)).slice(0, limit);
+      }
+
+      it("returns exactly what one call per member returns, merged and cut to limit", async () => {
+        await seedFamily();
+        for (const limit of [1, 3, 4, 50]) {
+          const res = await request(app)
+            .get(`/v1/runs?campaignIds=${A},${B},${C}&serviceName=campaign-service&limit=${limit}`)
+            .set(authHeaders);
+          expect(res.status).toBe(200);
+          expect(res.body.limit).toBe(limit);
+          expect(res.body.runs).toEqual(await perMemberUnion([A, B, C], limit));
+        }
+      });
+
+      it("orders newest first across members and carries each run's own cost", async () => {
+        await seedFamily();
+        const res = await request(app)
+          .get(`/v1/runs?campaignIds=${A},${B},${C}&serviceName=campaign-service&limit=4`)
+          .set(authHeaders);
+        expect(res.body.runs.map((r: any) => r.taskName)).toEqual(["trigger-10", "trigger-9", "trigger-8", "trigger-7"]);
+        expect(res.body.runs.every((r: any) => r.ownCostInUsdCents === "0.0000000001")).toBe(true);
+      });
+
+      it("pages with offset across the whole set", async () => {
+        await seedFamily();
+        const res = await request(app)
+          .get(`/v1/runs?campaignIds=${A},${B},${C}&serviceName=campaign-service&limit=3&offset=3`)
+          .set(authHeaders);
+        expect(res.body.runs.map((r: any) => r.taskName)).toEqual(["trigger-7", "trigger-6", "trigger-5"]);
+      });
+
+      it("without limit returns every matching run of the set", async () => {
+        await seedFamily();
+        const res = await request(app)
+          .get(`/v1/runs?campaignIds=${A},${B}&serviceName=campaign-service`)
+          .set(authHeaders);
+        expect(res.status).toBe(200);
+        expect(res.body.runs).toHaveLength(8);
+        expect(res.body.runs.every((r: any) => [A, B].includes(r.campaignId))).toBe(true);
+      });
+
+      it("ignores blanks and duplicates, and ANDs with campaignId", async () => {
+        await seedFamily();
+        const res = await request(app)
+          .get(`/v1/runs?campaignIds=${A},,${A}, ${C}&campaignId=${C}&serviceName=campaign-service&limit=50`)
+          .set(authHeaders);
+        expect(res.body.runs.map((r: any) => r.taskName)).toEqual(["trigger-8", "trigger-4"]);
+      });
+
+      it("rejects an empty list and more than 500 ids", async () => {
+        const empty = await request(app).get("/v1/runs?campaignIds=,").set(authHeaders);
+        expect(empty.status).toBe(400);
+        const many = Array.from({ length: 501 }, (_, i) => `c${i}`).join(",");
+        const tooMany = await request(app).get(`/v1/runs?campaignIds=${many}`).set(authHeaders);
+        expect(tooMany.status).toBe(400);
+      });
+    });
   });
 
   describe("Usage notification (notifyUsage)", () => {
