@@ -10,6 +10,7 @@ import {
   UpstreamError,
 } from "../services/cost-resolver.js";
 import { notifyUsage } from "../services/billing.js";
+import { parseCampaignIds } from "../services/campaign-ids.js";
 import {
   resolveUsageDiscount,
   netFromGross,
@@ -986,8 +987,6 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 // runs on it. Summing before the LIMIT made a 50-row read of a busy campaign
 // aggregate every one of its runs (27k for one member of the 47-row family).
 // ---------------------------------------------------------------------------
-const MAX_CAMPAIGN_IDS = 500;
-
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
@@ -996,16 +995,11 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
       status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
 
-    let campaignIds: string[] | undefined;
-    if (campaignIdsStr !== undefined) {
-      campaignIds = [...new Set(String(campaignIdsStr).split(",").map((id) => id.trim()).filter(Boolean))];
-      if (campaignIds.length === 0) {
-        return res.status(400).json({ error: "campaignIds must list at least one campaign id" });
-      }
-      if (campaignIds.length > MAX_CAMPAIGN_IDS) {
-        return res.status(400).json({ error: `campaignIds accepts at most ${MAX_CAMPAIGN_IDS} ids` });
-      }
+    const parsedCampaignIds = parseCampaignIds(campaignIdsStr);
+    if (parsedCampaignIds.error) {
+      return res.status(400).json({ error: parsedCampaignIds.error });
     }
+    const campaignIds = parsedCampaignIds.ids;
 
     const conditions = [eq(runs.organizationId, req.orgId)];
     if (userId) conditions.push(eq(runs.userId, userId as string));

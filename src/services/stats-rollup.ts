@@ -30,15 +30,15 @@ export const ROLLUP_GROUP_BY_COLUMNS: Record<string, string> = {
 // Checked on EVERY request (a primary-key probe of a one-row table): a rebuild
 // un-stamps readiness while it re-derives the rollup, and a per-process cache
 // of "ready" would keep serving the half-built tables through that window.
-export async function isStatsRollupReady(): Promise<boolean> {
+export async function isStatsRollupReady(name: string = STATS_ROLLUP_NAME): Promise<boolean> {
   const rows = (await db.execute(
-    sql`SELECT 1 AS ok FROM stats_rollups WHERE name = ${STATS_ROLLUP_NAME}`
+    sql`SELECT 1 AS ok FROM stats_rollups WHERE name = ${name}`
   )) as unknown as Array<{ ok: number }>;
   return rows.length > 0;
 }
 
 /** `'0'` when no row of the status matched, else the sum at scale 10. */
-function money(countExpr: string, sumExpr: string) {
+export function money(countExpr: string, sumExpr: string) {
   return `CASE WHEN SUM(${countExpr}) > 0 THEN round(SUM(${sumExpr}), 10)::text ELSE '0' END`;
 }
 
@@ -109,9 +109,22 @@ export async function readPublicCostsFromRollup(opts: {
   return result as unknown as any[];
 }
 
+export interface RollupRebuildSpec {
+  /** `stats_rollups.name` stamped once the rebuild lands. */
+  name: string;
+  /** The rollup's own tables, cleared under the lock. */
+  tables: string[];
+  /** Aggregate the exported snapshot into session temp tables (session B). */
+  aggregate: (b: postgres.Sql) => Promise<void>;
+  /** Add the temp tables on top of the deltas landed meanwhile, then drop them. */
+  merge: (tx: postgres.Sql) => Promise<{ runGroups: number; costGroups: number }>;
+}
+
 /**
- * Rebuild both rollup tables from the ledger and stamp them ready — exactly,
+ * Rebuild a rollup's tables from the ledger and stamp it ready — exactly,
  * without holding writers for the length of the aggregate (~20 s on production).
+ * Shared by every write-maintained rollup (0034 feature_workflow, 0037
+ * campaign_day); each supplies its own aggregate + merge.
  *
  * Three steps on two dedicated connections:
  *
@@ -131,7 +144,10 @@ export async function readPublicCostsFromRollup(opts: {
  * before the lock, in a trigger delta if after. `lock_timeout` bounds the wait
  * for the lock so a slow writer cannot queue every other writer behind it.
  */
-export async function rebuildStatsRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
+export async function rebuildRollup(
+  url: string,
+  spec: RollupRebuildSpec,
+): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
   const a = postgres(url, { max: 1, connect_timeout: 10, connection: { jit: "off" } });
   const b = postgres(url, { max: 1, connect_timeout: 10, connection: { jit: "off" } });
   try {
@@ -141,9 +157,8 @@ export async function rebuildStatsRollup(url: string): Promise<{ runGroups: numb
     try {
       await a`SET LOCAL lock_timeout = '10s'`;
       await a`LOCK TABLE runs, runs_costs IN SHARE ROW EXCLUSIVE MODE`;
-      await a`DELETE FROM stats_rollups WHERE name = ${STATS_ROLLUP_NAME}`;
-      await a`DELETE FROM stats_rollup_runs`;
-      await a`DELETE FROM stats_rollup_costs`;
+      await a`DELETE FROM stats_rollups WHERE name = ${spec.name}`;
+      for (const table of spec.tables) await a.unsafe(`DELETE FROM ${table}`);
       const [{ snapshot }] = await a`SELECT pg_export_snapshot() AS snapshot`;
       await b`BEGIN ISOLATION LEVEL REPEATABLE READ`;
       await b.unsafe(`SET TRANSACTION SNAPSHOT '${String(snapshot).replace(/'/g, "")}'`);
@@ -156,6 +171,36 @@ export async function rebuildStatsRollup(url: string): Promise<{ runGroups: numb
     }
 
     try {
+      await spec.aggregate(b);
+      await b`COMMIT`;
+    } catch (err) {
+      await b`ROLLBACK`.catch(() => undefined);
+      throw err;
+    }
+
+    // C — same session as B (the temp tables live there).
+    return await b.begin(async (txn) => {
+      // postgres.js's TransactionSql type drops the tagged-template call signature
+      // (a known typing gap); at runtime it is the same callable client.
+      const tx = txn as unknown as postgres.Sql;
+      const counts = await spec.merge(tx);
+      await tx`
+        INSERT INTO stats_rollups (name, ready_at) VALUES (${spec.name}, now())
+        ON CONFLICT (name) DO UPDATE SET ready_at = EXCLUDED.ready_at
+      `;
+      return { ...counts, lockedMs };
+    });
+  } finally {
+    await a.end();
+    await b.end();
+  }
+}
+
+export async function rebuildStatsRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
+  return rebuildRollup(url, {
+    name: STATS_ROLLUP_NAME,
+    tables: ["stats_rollup_runs", "stats_rollup_costs"],
+    aggregate: async (b) => {
       await b`
         CREATE TEMP TABLE rebuild_runs ON COMMIT PRESERVE ROWS AS
         SELECT feature_slug, workflow_slug, count(*) AS run_count FROM runs GROUP BY 1, 2
@@ -179,17 +224,8 @@ export async function rebuildStatsRollup(url: string): Promise<{ runGroups: numb
         WHERE rc.status IN ('actual', 'provisioned', 'cancelled', 'refunded')
         GROUP BY 1, 2, 3
       `;
-      await b`COMMIT`;
-    } catch (err) {
-      await b`ROLLBACK`.catch(() => undefined);
-      throw err;
-    }
-
-    // C — same session as B (the temp tables live there).
-    return await b.begin(async (txn) => {
-      // postgres.js's TransactionSql type drops the tagged-template call signature
-      // (a known typing gap); at runtime it is the same callable client.
-      const tx = txn as unknown as postgres.Sql;
+    },
+    merge: async (tx) => {
       const runGroups = await tx`
         INSERT INTO stats_rollup_runs (feature_slug, workflow_slug, run_count)
         SELECT feature_slug, workflow_slug, run_count FROM rebuild_runs
@@ -221,15 +257,8 @@ export async function rebuildStatsRollup(url: string): Promise<{ runGroups: numb
           net_provisioned   = stats_rollup_costs.net_provisioned   + EXCLUDED.net_provisioned,
           net_refunded      = stats_rollup_costs.net_refunded      + EXCLUDED.net_refunded
       `;
-      await tx`
-        INSERT INTO stats_rollups (name, ready_at) VALUES (${STATS_ROLLUP_NAME}, now())
-        ON CONFLICT (name) DO UPDATE SET ready_at = EXCLUDED.ready_at
-      `;
       await tx`DROP TABLE rebuild_runs, rebuild_costs`;
-      return { runGroups: runGroups.count, costGroups: costGroups.count, lockedMs };
-    });
-  } finally {
-    await a.end();
-    await b.end();
-  }
+      return { runGroups: runGroups.count, costGroups: costGroups.count };
+    },
+  });
 }
