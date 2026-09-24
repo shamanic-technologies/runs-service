@@ -21,6 +21,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
+- `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -73,6 +74,41 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **Verified byte-equal against production**, old vs new in one `REPEATABLE READ` snapshot: identical md5 digests for the monthly and weekly series, identical `byStatus` (2761944 / 138128 / 35107), identical `1012624.4922729618` total — at **1.72s instead of ~28s**.
 - **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
+
+## Org actualized total — maintained on write, read in O(1) (migration 0034)
+
+billing-service reads an org's ACTUALIZED platform charges (net of the usage
+discount) on every dashboard page. `GET /internal/runs-expected-totals` computes
+it by scanning the ledger: 5.4s / 33 MB for the heaviest org, and even the totals
+alone are >=400ms on prod because ~700k rows must be summed. A scan cannot meet a
+dashboard budget, and the ledger only grows. So the total is KEPT.
+
+- **`org_actual_totals`** — one row per org: gross + net, unconstrained `numeric`
+  (a lifetime total overflows `numeric(16,10)`; every addend is scale 10, so the
+  `::text` stays byte-identical to `SUM(...)::text`). App code never writes it.
+- **Maintained by triggers, in the same transaction as the write** — so it is
+  never stale, which is what separates it from a cache:
+  `trg_org_actual_totals_cost` (runs_costs INSERT/UPDATE/DELETE),
+  `trg_org_actual_totals_run_update` (runs status/org change),
+  `trg_org_actual_totals_run_delete` (BEFORE DELETE, while the FK-cascaded costs
+  still exist). Included row = `is_platform_committed` AND run status IN
+  ('completed','failed') AND run org NOT NULL, keyed on the RUN's org — exactly
+  runs-expected-totals' definition.
+- **Concurrency: every trigger locks the org's row FIRST, then reads run status /
+  sums costs.** Each plpgsql statement takes a fresh snapshot, so whichever
+  transaction takes the lock second sees the other's committed write. A trigger
+  that reads before locking loses money under concurrency: the first version
+  skipped the lock on a running→completed transition with an unchanged org, and
+  a 20-run concurrent test lost ~5% of the total. The concurrent test in
+  `tests/integration/org-actual-total.test.ts` is what catches it — keep it.
+- **Read:** `GET /internal/org-actual-total?org_id=` → `{org_id,
+  total_expected_cents, net_total_expected_cents, as_of}`, one PK lookup. '0'
+  when no row or gross is 0 (exactly when runs-expected-totals' per-run set is
+  empty, since costs are never negative).
+- **TRUNCATE fires no row triggers** — anything that truncates runs/runs_costs
+  (tests/global-setup.ts) must truncate `org_actual_totals` too.
+- `POST /internal/transfer-brand` now also moves `runs_costs.organization_id`
+  with the run, so `org-usage-total` (0029's denormalized org) follows the move.
 
 ## Cost predicate doctrine
 
