@@ -74,6 +74,63 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
 
+## Write-maintained rollup for the cross-org per-workflow read (migration 0034)
+
+`GET /v1/stats/public/costs?featureSlugs=X&groupBy=workflowSlug` is the fleet
+benchmark features-service builds its workflow ranking from, once per viewed
+brand / campaign / leg cell. Live, it re-scanned the feature's whole history on
+every call — 1.16M runs for `sales-cold-email-outreach`, a 60 MB spilling
+distinct-hash, 1.4 s of JIT, 5-9 s per call with 3-8 in flight (2026-09-24,
+shared Postgres at ~400% CPU) — to return ~160 groups that only change when a
+row lands. So it is maintained at WRITE time.
+
+- **Tables**: `stats_rollup_runs (feature_slug, workflow_slug, run_count)` and
+  `stats_rollup_costs (feature_slug, workflow_slug, cost_source, n_/gross_/net_
+  per status)`, `UNIQUE NULLS NOT DISTINCT` (a NULL workflow is its own group,
+  as in `GROUP BY`). Maintained by triggers on `runs` (insert, feature/workflow
+  update, BEFORE delete — which also removes the run's costs, because the
+  cascaded cost deletes can no longer see the run) and `runs_costs` (insert,
+  delete, update of run/payer/status/amounts). A write that touches neither
+  table's rows (`run.completed`) fires nothing.
+- **Served shape only**: filters ⊆ {featureSlug(s), workflowSlugs incl. a
+  resolved dynasty, costSource}, groupBy ∈ {workflowSlug, workflowDynastySlug,
+  featureSlug}. An org/brand/campaign/task filter or any other grouping keeps the
+  live query — the rollup does not carry those dimensions, and serving them from
+  it would silently answer for the whole fleet.
+- **Byte-identical, text included.** The live money columns are
+  `SUM(CASE … ELSE 0 END)::text`: scale 10 when a row of that status matched,
+  `'0'` when none did — and the response is ORDERed by that text. Hence the
+  matched-row COUNT per status beside each sum; the read renders `'0'` on a zero
+  count, `round(sum, 10)::text` otherwise. `tests/integration/stats-rollup.test.ts`
+  compares rollup vs live (JSON and raw text) through inserts, every status
+  transition, deletes, a run moved to another workflow, and a rebuild racing
+  live writes.
+- **Readiness**: the read uses the rollup only while `stats_rollups` holds the
+  `feature_workflow` stamp (checked per request, a one-row PK probe — no
+  in-process cache, because a rebuild un-stamps it). A fresh database is stamped
+  by the migration. An existing one is stamped by
+  `scripts/rebuild-stats-rollup.ts` (re-runnable any time): writers QUEUE for
+  well under a second while it clears the rollup and exports a snapshot under a
+  SHARE ROW EXCLUSIVE lock, then the ~20 s aggregate runs lock-free on that
+  snapshot and is ADDED on top of the deltas that landed meanwhile. Every row
+  counts once — in the aggregate if committed before the lock, as a delta after.
+  In prod it runs inside the container against the compiled
+  `dist/services/stats-rollup.js`.
+- **`TRUNCATE` fires no row triggers.** Anything that truncates `runs` /
+  `runs_costs` (tests/global-setup.ts) truncates the two rollup tables too.
+- **JIT is off for the whole pool** (`connection: { jit: "off" }` in
+  `src/db/index.ts`): it compiled 72 functions (1.4 s) per call on the read
+  above, and no query here runs long enough to repay it.
+- **Org-scoped sibling** (`GET /v1/stats/costs`): when every groupBy key and
+  every filter is run-side (`workflowSlug,campaignId`, `workflowSlug`,
+  `brandId`…), it now runs the same (counts | sums) split as the public read —
+  the joined `COUNT(DISTINCT r.id)` sorted 435k rows for one brand's history.
+  Measured 9.9 s → 2.5 s, identical rows in one snapshot. A cost-row dimension or
+  filter (`audienceId`, `goal`, `brandProfileId`, `workflowContext`,
+  `attributionStatus`, `costName`) can put one run in several groups, so
+  `audienceId,workflowSlug` keeps the joined query (JIT-off only). Taking the
+  brand-scoped reads to O(groups) needs a brand-grain rollup — its own PR.
+
 ## Cost predicate doctrine
 
 Every cost aggregation in this codebase uses atomic status literals only. The

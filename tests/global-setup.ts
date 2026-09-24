@@ -14,7 +14,9 @@ export async function setup() {
   try {
     // `runs` and `runs_costs` are plain base tables again (migration 0031 dropped
     // the Phase 6 passthrough view shims), so TRUNCATE addresses them directly.
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs CASCADE`;
+    // TRUNCATE fires no row triggers, so the write-maintained stats rollup
+    // (migration 0034) is emptied alongside the ledger it summarises.
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs CASCADE`;
   } finally {
     await sql.end();
   }
