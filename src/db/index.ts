@@ -19,8 +19,15 @@ if (!connectionString) {
 // handshake on the next request after any quiet stretch. `connect_timeout`
 // stays bounded so a database that is not accepting connections fails fast
 // instead of hanging the caller.
+//
+// `jit` is OFF for every connection of this pool. The stats reads here are
+// aggregations whose plans Postgres costs high enough to JIT-compile, and the
+// compile itself dominated them: the cross-org per-workflow cost read spent
+// 1.4 s of its 5 s compiling 72 functions, on every call (2026-09-24). None of
+// these queries runs long enough for compiled expressions to repay that.
 export const sql = postgres(connectionString, {
   max: 20,
   connect_timeout: 10,
+  connection: { jit: "off" },
 });
 export const db = drizzle(sql, { schema });

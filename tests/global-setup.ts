@@ -14,9 +14,10 @@ export async function setup() {
   try {
     // `runs` and `runs_costs` are plain base tables again (migration 0031 dropped
     // the Phase 6 passthrough view shims), so TRUNCATE addresses them directly.
-    // org_actual_totals is trigger-maintained from runs/runs_costs, and TRUNCATE
-    // fires no row triggers, so it must be wiped alongside them.
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, org_actual_totals CASCADE`;
+    // TRUNCATE fires no row triggers, so the write-maintained rollups (stats
+    // rollup, migration 0034; org_actual_totals, migration 0035) are emptied
+    // alongside the ledger they summarise.
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs, org_actual_totals CASCADE`;
   } finally {
     await sql.end();
   }
