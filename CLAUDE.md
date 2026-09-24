@@ -216,6 +216,12 @@ one call per id (features-service `observedPicks` fanned out 47 calls).
   are both bad on prod: `campaign_id = ANY(...) ORDER BY started_at DESC LIMIT`
   either top-N-sorts the family's 58k runs (1.7s) or walks
   `idx_runs_started_status` backwards (4.1s for a family whose runs are old).
+- **That page query runs with `SET LOCAL enable_bitmapscan = off`** (own
+  transaction). Once `limit` nears the planner's per-member estimate (~500) it
+  otherwise swaps the ordered walk for a BitmapAnd with `idx_runs_org_service`
+  (220k rows for a big org) plus a sort per member: 2s instead of 0.3s at
+  limit=201 in prod (v0.47.5 → v0.47.6). Do not remove it without re-measuring
+  limit 1 / 51 / 201 / 1000 on the 47-row family.
 - Without `limit` the list is a plain `campaign_id IN (...)`. Blank/duplicate ids
   are dropped; empty list or more than 500 ids is a 400. ANDs with `campaignId`.
 - The index was built `CONCURRENTLY` out-of-band on prod (21.5s); the migration's
