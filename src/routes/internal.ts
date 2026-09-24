@@ -1,14 +1,15 @@
 import { Router } from "express";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
-import { runs } from "../db/schema.js";
+import { runs, runsCosts } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import { logRunLifecycle } from "../services/bronze.js";
 import {
   TransferBrandRequestSchema,
   RunsExpectedTotalsQuerySchema,
   OrgUsageTotalQuerySchema,
+  OrgActualTotalQuerySchema,
   DeleteRunsByOrgParamsSchema,
 } from "../schemas.js";
 
@@ -50,6 +51,15 @@ router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) =>
         )
       )
       .returning({ id: runs.id });
+
+    // Keep the cost rows' denormalized org (migration 0029) on the run's org, or
+    // GET /internal/org-usage-total keeps counting moved spend under the source org.
+    if (step1.length > 0) {
+      await db
+        .update(runsCosts)
+        .set({ organizationId: targetOrgId })
+        .where(inArray(runsCosts.runId, step1.map((r) => r.id)));
+    }
 
     let rewriteCount = 0;
     if (targetBrandId) {
@@ -197,6 +207,40 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
   );
 
   res.json(response);
+});
+
+// GET /internal/org-actual-total — the org's actualized platform total, gross and
+// net, read from org_actual_totals (migration 0035): one primary-key lookup.
+// The row is maintained by triggers inside every cost / run write transaction,
+// so this is the same figure runs-expected-totals computes, never a stale copy.
+// '0' when the org has no row or its gross total is 0 — exactly when
+// runs-expected-totals' per-run set is empty (costs are never negative), which is
+// when it answers '0'.
+router.get("/internal/org-actual-total", requireInternalAuth, async (req, res) => {
+  const parsed = OrgActualTotalQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  const { org_id } = parsed.data;
+
+  const result = await db.execute(sql`
+    SELECT total_cost_in_usd_cents::text AS total,
+           net_cost_in_usd_cents::text AS net,
+           (total_cost_in_usd_cents = 0) AS is_zero
+      FROM org_actual_totals
+     WHERE organization_id = ${org_id}
+  `);
+
+  const row = (result as any[])[0];
+  const charged = row !== undefined && row.is_zero === false;
+  res.json({
+    org_id,
+    total_expected_cents: charged ? (row.total as string) : "0",
+    net_total_expected_cents: charged ? (row.net as string) : "0",
+    as_of: new Date().toISOString(),
+  });
 });
 
 // GET /internal/org-usage-total — inline aggregate bounded by org_id, using the

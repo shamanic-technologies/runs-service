@@ -21,6 +21,11 @@ import {
   buildSlugToDynastyMap,
   type IdentityHeaders,
 } from "../services/dynasty-resolver.js";
+import {
+  ROLLUP_GROUP_BY_COLUMNS,
+  isStatsRollupReady,
+  readPublicCostsFromRollup,
+} from "../services/stats-rollup.js";
 
 const router = Router();
 
@@ -264,6 +269,63 @@ function regroupByDynasty(
   );
 }
 
+// groupBy keys whose value lives on `runs` (never on the cost row).
+const RUN_SIDE_GROUP_BY_KEYS = new Set(["brandId", "workflowSlug", "campaignId", "featureSlug", "serviceName", "taskName"]);
+
+/**
+ * Split (counts | sums) form of the GET /v1/stats/costs aggregation, for run-side
+ * dimensions and run-side filters only. Same columns, same TEXT money rendering
+ * (`COALESCE(…, '0')` for a group with no cost row reproduces the `'0'` the
+ * LEFT JOIN's `SUM(CASE … ELSE 0 END)` renders), same ORDER BY.
+ *
+ * `COUNT(*)` equals `COUNT(DISTINCT r.id)` when each run lands in exactly one
+ * group; `brandId` unnests an array that could repeat a brand, so it keeps the
+ * DISTINCT.
+ */
+function splitRunSideCostsSql(keys: string[], whereSql: ReturnType<typeof sql>) {
+  const dimExprs = keys.map((k, i) => sql.raw(`${GROUP_BY_COLUMNS[k]} AS d${i}`));
+  const dimRefs = sql.raw(keys.map((_, i) => `${i + 1}`).join(", "));
+  const outCols = sql.raw(keys.map((k, i) => `c.d${i} AS "${RESULT_COL_NAMES[k]}"`).join(", "));
+  const joinOn = sql.raw(keys.map((_, i) => `s.d${i} IS NOT DISTINCT FROM c.d${i}`).join(" AND "));
+  const runCount = keys.includes("brandId") ? sql`COUNT(DISTINCT r.id)` : sql`COUNT(*)`;
+  return sql`
+    WITH counts AS (
+      SELECT ${sql.join(dimExprs, sql`, `)},
+        ${runCount} AS run_count,
+        MIN(r.started_at) AS min_started_at,
+        MAX(r.started_at) AS max_started_at
+      FROM runs r
+      WHERE ${whereSql}
+      GROUP BY ${dimRefs}
+    ),
+    sums AS (
+      SELECT ${sql.join(dimExprs, sql`, `)},
+        ${costAggregateSelectSql("rc")},
+        ${costAggregateNetSelectSql("rc")}
+      FROM runs r
+      INNER JOIN runs_costs rc ON rc.run_id = r.id
+      WHERE ${whereSql}
+      GROUP BY ${dimRefs}
+    )
+    SELECT ${outCols},
+      COALESCE(s.total_cost, '0')            AS total_cost,
+      COALESCE(s.actual_cost, '0')           AS actual_cost,
+      COALESCE(s.provisioned_cost, '0')      AS provisioned_cost,
+      COALESCE(s.cancelled_cost, '0')        AS cancelled_cost,
+      COALESCE(s.refunded_cost, '0')         AS refunded_cost,
+      COALESCE(s.net_total_cost, '0')        AS net_total_cost,
+      COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
+      COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
+      COALESCE(s.net_refunded_cost, '0')     AS net_refunded_cost,
+      c.run_count,
+      c.min_started_at,
+      c.max_started_at
+    FROM counts c
+    LEFT JOIN sums s ON ${joinOn}
+    ORDER BY total_cost DESC
+  `;
+}
+
 // GET /v1/stats/costs — aggregation with GROUP BY
 router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
   try {
@@ -355,9 +417,26 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       ? sql`, COALESCE(SUM(rc.quantity::numeric), 0) as total_quantity`
       : sql``;
 
+    // Split read (same idea as the public read, runs-service#206): when every
+    // grouping dimension AND every filter lives on `runs`, the run count does not
+    // need the cost ledger at all, and computing it over the LEFT JOIN is what
+    // forced COUNT(DISTINCT r.id) to SORT every joined row (435k rows for one
+    // brand's cold-email history, 3-10 s). So `counts` reads `runs` alone and
+    // `sums` INNER JOINs (a run with no cost row adds nothing to a SUM); both are
+    // hash aggregates. A dimension or filter on the cost row (goal, audienceId,
+    // brandProfileId, workflowContext, attributionStatus, costName) can put one
+    // run in several groups, so those keep the single joined query.
+    const splitServes =
+      !hasCostName &&
+      uniqueSqlGroupByKeys.every((k) => RUN_SIDE_GROUP_BY_KEYS.has(k)) &&
+      !goal && !brandProfileId && !audienceId && !workflowContext &&
+      (!attributionStatus || attributionStatus === "all");
+
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = await db.execute(sql`
+    const result = splitServes
+      ? await db.execute(splitRunSideCostsSql(uniqueSqlGroupByKeys, whereSql))
+      : await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
         ${costAggregateSelectSql("rc")},
         ${costAggregateNetSelectSql("rc")},
@@ -932,6 +1011,17 @@ function handlePublicCosts(req: any, res: any) {
         workflowSlugs = resolved;
       }
 
+      // Rollup path (migration 0034): the cross-org fleet benchmark shape — filters
+      // on feature / workflow / payer only, grouped by workflow (or its dynasty) or
+      // feature — is served from the write-maintained (feature, workflow, payer)
+      // rollup in O(groups) instead of re-scanning the feature's whole history.
+      // Byte-identical rows, same ORDER BY text; see src/services/stats-rollup.ts.
+      // Any other filter or grouping falls through to the live query below.
+      const rollupServes =
+        !!ROLLUP_GROUP_BY_COLUMNS[actualGroupBy] &&
+        !orgId && !brandId && !campaignId && !taskName &&
+        (await isStatsRollupReady());
+
       const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, featureSlugs, workflowSlugs, taskName });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
@@ -962,7 +1052,15 @@ function handlePublicCosts(req: any, res: any) {
       // (b) `groupBy=costName` — the dimension lives on `runs_costs`, so its rows
       //     cannot be produced without the join. Splitting it would scan the join
       //     twice instead of once, so that path is left exactly as it was.
-      const result = hasCostName
+      const result = rollupServes
+        ? await readPublicCostsFromRollup({
+            groupBy: actualGroupBy,
+            resultCol: PUBLIC_RESULT_COL_NAMES[actualGroupBy],
+            featureSlugs: featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined,
+            workflowSlugs,
+            costSource,
+          })
+        : hasCostName
         ? await db.execute(sql`
             SELECT ${sql.raw(col)},
               ${costAggregateSelectSql("rc")},
