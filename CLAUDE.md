@@ -23,6 +23,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
+- `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -196,6 +197,42 @@ one call per id (features-service `observedPicks` fanned out 47 calls).
   are dropped; empty list or more than 500 ids is a 400. ANDs with `campaignId`.
 - The index was built `CONCURRENTLY` out-of-band on prod (21.5s); the migration's
   `IF NOT EXISTS` no-ops there.
+
+## Campaign-family cost reads — (campaign, UTC day) rollup (migration 0037)
+
+A campaign as the customer knows it is a FAMILY of stored campaign rows (one per
+workflow switch; the busiest has 47). features-service refreshes a campaign
+Overview every few seconds and used to ask the dated spend once per row (47
+timeseries reads per refresh, features-service#1045). Asked live for the whole
+family, it is 322k runs joined to their costs: 3.3 s. So it is maintained at write
+time, same pattern and same byte-identity rules as 0034.
+
+- **`campaignIds`** (comma-separated, ≤500, blanks/dupes dropped, empty or >500 =
+  400; shared parser `src/services/campaign-ids.ts`, also used by `GET /v1/runs`)
+  on `GET /v1/stats/public/costs/timeseries`, `GET /v1/stats/public/costs` and
+  `GET /v1/stats/costs`. ANDs with `campaignId`.
+- **Timeseries `groupBy=campaignId`** — one bucket per (period, campaign), each
+  carrying `campaignId`, ordered by period then campaign. Absent = unchanged shape.
+  Per-row totals = `GET /v1/stats/public/costs?groupBy=campaignId&campaignIds=…`.
+- **Tables** `stats_rollup_campaign_runs` / `stats_rollup_campaign_costs`, key
+  `(campaign_id, day, organization_id, brand_ids, feature_slug, workflow_slug[,
+  cost_source])`, `day` = `started_at` as a UTC date. Runs with no campaign are not
+  rolled up. Triggers on `runs` (insert, update of any key column incl.
+  `started_at`/`brand_ids`, BEFORE delete) and `runs_costs`.
+- **Served shape**: a campaign filter (`campaignId` and/or `campaignIds`) and
+  otherwise only orgId / brandId / featureSlug(s) / workflowDynastySlug /
+  costSource. Timeseries also needs tz UTC and no startedAfter/startedBefore; public
+  costs needs groupBy ∈ {campaignId, workflowSlug, workflowDynastySlug,
+  featureSlug}. A taskName or anything finer than a campaign's UTC day keeps the
+  live query. `GET /v1/stats/costs` (org-scoped, returns exact min/maxStartedAt)
+  is NOT served from the rollup — `campaignIds` there is a live filter.
+- **Readiness** stamp `campaign_day` in `stats_rollups`; on an existing database run
+  `scripts/rebuild-stats-rollup.ts campaign_day` after the deploy (in prod: inside
+  the container against the compiled `dist/`). `rebuildRollup` in
+  `src/services/stats-rollup.ts` is the shared lock/snapshot protocol for both
+  rollups.
+- **TRUNCATE fires no row triggers** — `tests/global-setup.ts` truncates these two
+  tables with the ledger.
 
 ## Cost predicate doctrine
 

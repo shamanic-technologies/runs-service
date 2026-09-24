@@ -1057,6 +1057,7 @@ export const PublicRunsStatsResponseSchema = z
 export const StatsFiltersSchema = z.object({
   brandId: z.string().optional().openapi({ description: "Filter by brand ID. Matches runs where this brand is in brandIds array." }),
   campaignId: z.string().optional(),
+  campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400." }),
   workflowSlug: z.string().optional().openapi({ description: "Filter by a single workflow slug" }),
   workflowSlugs: z.string().optional().openapi({ description: "Filter by multiple workflow slugs (comma-separated). Takes precedence over workflowSlug when both are provided." }),
   workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service. Takes precedence over workflowSlug/workflowSlugs." }),
@@ -1221,6 +1222,7 @@ export const PublicCostsQuerySchema = z
     orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
+    campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400." }),
     featureSlug: z.string().optional(),
     featureSlugs: z.string().optional().openapi({ description: "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug." }),
     workflowDynastySlug: z.string().optional().openapi({ description: "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service." }),
@@ -1248,6 +1250,14 @@ export const PublicCostsTimeseriesQuerySchema = z
     orgId: z.string().uuid().optional(),
     brandId: z.string().optional(),
     campaignId: z.string().optional(),
+    campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400." }),
+    groupBy: z
+      .enum(["campaignId"])
+      .optional()
+      .openapi({
+        description:
+          "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged).",
+      }),
     featureSlug: z.string().optional(),
     featureSlugs: z
       .string()
@@ -1291,6 +1301,11 @@ export const PublicCostsTimeseriesResponseSchema = z
               "Bucket start date in YYYY-MM-DD (local to timezone). For interval=day with tz=UTC this is the UTC calendar day. Only intervals with at least one run appear — empty intervals are absent, never fabricated.",
             example: "2026-07-01",
           }),
+        campaignId: z
+          .string()
+          .nullable()
+          .optional()
+          .openapi({ description: "Present only with groupBy=campaignId: the campaign this bucket belongs to (null for runs with no campaign)." }),
         totalCostInUsdCents: z.string().openapi({ description: "SUM total_cost_in_usd_cents for cost rows of runs started in this bucket, status IN ('actual','provisioned'). 10-decimal string." }),
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),

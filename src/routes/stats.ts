@@ -26,6 +26,13 @@ import {
   isStatsRollupReady,
   readPublicCostsFromRollup,
 } from "../services/stats-rollup.js";
+import {
+  CAMPAIGN_DAY_ROLLUP_NAME,
+  CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS,
+  readCampaignCostsFromRollup,
+  readCampaignTimeseriesFromRollup,
+} from "../services/stats-rollup-campaign.js";
+import { parseCampaignIds } from "../services/campaign-ids.js";
 
 const router = Router();
 
@@ -85,6 +92,7 @@ function buildFilterSql(
   filters: {
     brandId?: string;
     campaignId?: string;
+    campaignIds?: string[];
     workflowSlug?: string;
     workflowSlugs?: string[];
     featureSlug?: string;
@@ -104,6 +112,7 @@ function buildFilterSql(
 
   if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
+  if (filters.campaignIds) parts.push(campaignIdsSql(filters.campaignIds));
 
   // Feature slug filtering: list takes precedence over singular
   if (filters.featureSlugs && filters.featureSlugs.length > 0) {
@@ -139,6 +148,11 @@ function buildFilterSql(
   if (filters.startedBefore) parts.push(sql`r.started_at <= ${filters.startedBefore}::timestamptz`);
 
   return parts.reduce((acc, part) => sql`${acc} AND ${part}`);
+}
+
+/** `r.campaign_id IN (...)` for a parsed, non-empty `campaignIds` list. */
+function campaignIdsSql(ids: string[]) {
+  return sql`r.campaign_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`;
 }
 
 function parseCsv(value: string | undefined): string[] | undefined {
@@ -333,6 +347,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       groupBy,
       brandId,
       campaignId,
+      campaignIds: campaignIdsParam,
       workflowSlug,
       workflowSlugs: workflowSlugsParam,
       workflowDynastySlug,
@@ -351,6 +366,12 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     if (!groupBy) {
       res.status(400).json({ error: "groupBy is required" });
+      return;
+    }
+
+    const parsedCampaignIds = parseCampaignIds(campaignIdsParam);
+    if (parsedCampaignIds.error) {
+      res.status(400).json({ error: parsedCampaignIds.error });
       return;
     }
 
@@ -397,6 +418,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     const whereSql = buildFilterSql(req.orgId, {
       brandId,
       campaignId,
+      campaignIds: parsedCampaignIds.ids,
       workflowSlug,
       workflowSlugs: dynastyFilters.workflowSlugs,
       featureSlug,
@@ -932,6 +954,7 @@ function buildPublicFilterSql(filters: {
   orgId?: string;
   brandId?: string;
   campaignId?: string;
+  campaignIds?: string[];
   featureSlug?: string;
   featureSlugs?: string[];
   workflowSlugs?: string[];
@@ -943,6 +966,7 @@ function buildPublicFilterSql(filters: {
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
   if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
+  if (filters.campaignIds) parts.push(campaignIdsSql(filters.campaignIds));
 
   if (filters.featureSlugs && filters.featureSlugs.length > 0) {
     parts.push(sql`r.feature_slug IN (${sql.join(filters.featureSlugs.map((n) => sql`${n}`), sql`, `)})`);
@@ -968,7 +992,7 @@ function buildPublicFilterSql(filters: {
 function handlePublicCosts(req: any, res: any) {
   (async () => {
     try {
-      const { groupBy, orgId, brandId, campaignId, featureSlug, featureSlugs: featureSlugsParam, workflowDynastySlug, taskName, costSource } = req.query as Record<string, string | undefined>;
+      const { groupBy, orgId, brandId, campaignId, campaignIds: campaignIdsParam, featureSlug, featureSlugs: featureSlugsParam, workflowDynastySlug, taskName, costSource } = req.query as Record<string, string | undefined>;
 
       if (!groupBy || !ALL_PUBLIC_GROUP_BY[groupBy]) {
         res.status(400).json({
@@ -984,6 +1008,13 @@ function handlePublicCosts(req: any, res: any) {
         return;
       }
       const costSourceJoin = costSourceJoinSql(costSource);
+
+      const parsedCampaignIds = parseCampaignIds(campaignIdsParam);
+      if (parsedCampaignIds.error) {
+        res.status(400).json({ error: parsedCampaignIds.error });
+        return;
+      }
+      const campaignIds = parsedCampaignIds.ids;
 
       const isDynastyGroupBy = !!PUBLIC_DYNASTY_GROUP_BY[groupBy];
       const actualGroupBy = isDynastyGroupBy ? "workflowSlug" : groupBy;
@@ -1019,10 +1050,21 @@ function handlePublicCosts(req: any, res: any) {
       // Any other filter or grouping falls through to the live query below.
       const rollupServes =
         !!ROLLUP_GROUP_BY_COLUMNS[actualGroupBy] &&
-        !orgId && !brandId && !campaignId && !taskName &&
+        !orgId && !brandId && !campaignId && !campaignIds && !taskName &&
         (await isStatsRollupReady());
 
-      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, featureSlug, featureSlugs, workflowSlugs, taskName });
+      // Campaign rollup path (migration 0037): a request scoped to one or more
+      // campaigns (a campaign FAMILY) whose other filters are all carried by the
+      // (campaign, day) rollup — org, brand, feature, workflow, payer — and whose
+      // grouping is one of its columns. Same byte-identical row shape.
+      const effectiveFeatureSlugs = featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined;
+      const campaignRollupServes =
+        !rollupServes &&
+        !!CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[actualGroupBy] &&
+        (!!campaignId || !!campaignIds) && !taskName &&
+        (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
+
+      const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, campaignIds, featureSlug, featureSlugs, workflowSlugs, taskName });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
       // Cost aggregation via cost-aggregator (atomic literals).
@@ -1056,8 +1098,15 @@ function handlePublicCosts(req: any, res: any) {
         ? await readPublicCostsFromRollup({
             groupBy: actualGroupBy,
             resultCol: PUBLIC_RESULT_COL_NAMES[actualGroupBy],
-            featureSlugs: featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined,
+            featureSlugs: effectiveFeatureSlugs,
             workflowSlugs,
+            costSource,
+          })
+        : campaignRollupServes
+        ? await readCampaignCostsFromRollup({
+            groupBy: actualGroupBy,
+            resultCol: PUBLIC_RESULT_COL_NAMES[actualGroupBy],
+            filters: { orgId, brandId, campaignId, campaignIds, featureSlugs: effectiveFeatureSlugs, workflowSlugs },
             costSource,
           })
         : hasCostName
@@ -1174,6 +1223,8 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         orgId,
         brandId,
         campaignId,
+        campaignIds: campaignIdsParam,
+        groupBy,
         featureSlug,
         featureSlugs: featureSlugsParam,
         workflowDynastySlug,
@@ -1199,6 +1250,19 @@ function handlePublicCostsTimeseries(req: any, res: any) {
       const costSourceJoin = costSourceJoinSql(costSource);
       const timezone = tzParam ?? "UTC";
 
+      if (groupBy !== undefined && groupBy !== "campaignId") {
+        res.status(400).json({ error: "Invalid groupBy value. Allowed: campaignId" });
+        return;
+      }
+      const groupByCampaign = groupBy === "campaignId";
+
+      const parsedCampaignIds = parseCampaignIds(campaignIdsParam);
+      if (parsedCampaignIds.error) {
+        res.status(400).json({ error: parsedCampaignIds.error });
+        return;
+      }
+      const campaignIds = parsedCampaignIds.ids;
+
       const identity: IdentityHeaders = {
         orgId: req.orgId ?? (req.headers["x-org-id"] as string),
         userId: req.userId ?? (req.headers["x-user-id"] as string),
@@ -1219,6 +1283,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         orgId,
         brandId,
         campaignId,
+        campaignIds,
         featureSlug,
         featureSlugs,
         workflowSlugs,
@@ -1231,22 +1296,50 @@ function handlePublicCostsTimeseries(req: any, res: any) {
       // interval is whitelisted above; tz + interval are bound parameters (not raw).
       const bucketExpr = sql`DATE_TRUNC(${interval}, r.started_at AT TIME ZONE ${timezone})`;
 
-      const result = await db.execute(sql`
+      const groupCols = groupByCampaign ? sql`1, 2` : sql`1`;
+
+      // Campaign rollup path (migration 0037): a campaign-scoped read (one row or
+      // a whole family) whose buckets are unions of UTC days and whose other
+      // filters are all carried by the (campaign, day) rollup. A non-UTC tz, a
+      // started_at bound or a task filter needs finer data than a UTC day per
+      // campaign, so it keeps the live query.
+      const campaignRollupServes =
+        (!!campaignId || !!campaignIds) &&
+        timezone === "UTC" && !taskName && !startedAfter && !startedBefore &&
+        (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
+
+      const result = campaignRollupServes
+        ? await readCampaignTimeseriesFromRollup({
+            interval,
+            groupByCampaign,
+            filters: {
+              orgId,
+              brandId,
+              campaignId,
+              campaignIds,
+              featureSlugs: featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined,
+              workflowSlugs,
+            },
+            costSource,
+          })
+        : await db.execute(sql`
         SELECT
           to_char(${bucketExpr}, 'YYYY-MM-DD') AS period,
+          ${groupByCampaign ? sql`r.campaign_id,` : sql``}
           ${costAggregateSelectSql("rc")},
           ${costAggregateNetSelectSql("rc")},
           COUNT(DISTINCT r.id) as run_count
         FROM runs r
         LEFT JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoin}
         ${whereSql}
-        GROUP BY 1
-        ORDER BY 1 ASC
+        GROUP BY ${groupCols}
+        ORDER BY ${groupCols}
       `);
 
       const rows = result as any[];
       const buckets = rows.map((row) => ({
         period: row.period as string,
+        ...(groupByCampaign ? { campaignId: (row.campaign_id as string | null) ?? null } : {}),
         totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
         actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
         provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
