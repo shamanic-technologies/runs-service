@@ -455,6 +455,10 @@ registry.registerPath({
       userId: z.string().uuid().optional(),
       brandId: z.string().optional(),
       campaignId: z.string().optional(),
+      campaignIds: z.string().optional().openapi({
+        description:
+          "Comma-separated campaign ids (at most 500): the runs of ANY of them, in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id. With `limit`, the page is the newest `limit` runs across the whole set, the same rows you get by asking each id for `limit` runs and keeping the newest `limit` of the union. Combines with every other filter (AND), including `campaignId`. An empty list or more than 500 ids is a 400.",
+      }),
       workflowSlug: z.string().optional(),
       featureSlug: z.string().optional(),
       goal: GoalEnum.optional(),

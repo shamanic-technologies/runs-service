@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
@@ -975,15 +975,37 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /v1/runs — unchanged from prior PR; read path that already uses SUM/GROUP BY.
+// GET /v1/runs — list runs newest first, each with its own-cost totals.
+//
+// `campaignIds` (comma-separated) answers for a whole campaign FAMILY in one
+// request: campaign-service keeps every superseded row, so one logical campaign
+// can be dozens of stored ids, and asking once per id cost a consumer one round
+// trip each.
+//
+// With a `limit`, the page is chosen FIRST and costs are summed only for the
+// runs on it. Summing before the LIMIT made a 50-row read of a busy campaign
+// aggregate every one of its runs (27k for one member of the 47-row family).
 // ---------------------------------------------------------------------------
+const MAX_CAMPAIGN_IDS = 500;
+
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
     const {
-      userId, brandId, campaignId, workflowSlug, featureSlug, goal, brandProfileId,
+      userId, brandId, campaignId, campaignIds: campaignIdsStr, workflowSlug, featureSlug, goal, brandProfileId,
       audienceId, workflowContext, serviceName, taskName,
       status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
     } = req.query;
+
+    let campaignIds: string[] | undefined;
+    if (campaignIdsStr !== undefined) {
+      campaignIds = [...new Set(String(campaignIdsStr).split(",").map((id) => id.trim()).filter(Boolean))];
+      if (campaignIds.length === 0) {
+        return res.status(400).json({ error: "campaignIds must list at least one campaign id" });
+      }
+      if (campaignIds.length > MAX_CAMPAIGN_IDS) {
+        return res.status(400).json({ error: `campaignIds accepts at most ${MAX_CAMPAIGN_IDS} ids` });
+      }
+    }
 
     const conditions = [eq(runs.organizationId, req.orgId)];
     if (userId) conditions.push(eq(runs.userId, userId as string));
@@ -1002,50 +1024,53 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     if (startedAfter) conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
     if (startedBefore) conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
 
-    const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
     const limit = limitStr ? Number(limitStr) : undefined;
     const offset = offsetStr ? Number(offsetStr) : 0;
 
-    const query = db
-      .select({
-        id: runs.id,
-        parentRunId: runs.parentRunId,
-        organizationId: runs.organizationId,
-        userId: runs.userId,
-        brandIds: runs.brandIds,
-        campaignId: runs.campaignId,
-        workflowSlug: runs.workflowSlug,
-        featureSlug: runs.featureSlug,
-        goal: runs.goal,
-        brandProfileId: runs.brandProfileId,
-        audienceId: runs.audienceId,
-        workflowContext: runs.workflowContext,
-        serviceName: runs.serviceName,
-        taskName: runs.taskName,
-        status: runs.status,
-        startedAt: runs.startedAt,
-        completedAt: runs.completedAt,
-        createdAt: runs.createdAt,
-        updatedAt: runs.updatedAt,
-        ownCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} IN ('actual','provisioned') THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_cost_in_usd_cents"),
-        ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'actual' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
-        ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'provisioned' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
-      })
-      .from(runs)
-      .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
-      .where(whereClause)
-      .groupBy(
-        runs.id, runs.parentRunId, runs.organizationId, runs.userId, runs.brandIds,
-        runs.campaignId, runs.workflowSlug, runs.featureSlug, runs.serviceName, runs.taskName,
-        runs.goal, runs.brandProfileId, runs.audienceId, runs.workflowContext,
-        runs.status, runs.startedAt, runs.completedAt, runs.createdAt, runs.updatedAt,
-      )
-      .orderBy(desc(runs.startedAt));
+    // Which runs are on the page. Undefined = every run the filters match.
+    let pageIds: string[] | undefined;
+    if (limit !== undefined && campaignIds) {
+      // Each member's newest (limit + offset) runs off idx_runs_campaign_started,
+      // then the newest of those overall: exactly the global page, since a run
+      // carries one campaign and a run outside its member's top (limit + offset)
+      // cannot be in the global top (limit + offset) either.
+      const perMember = limit + offset;
+      const rows = await db.execute(sql`
+        SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
+        CROSS JOIN LATERAL (
+          SELECT ${runs.id} AS id, ${runs.startedAt} AS started_at FROM ${runs}
+          WHERE ${runs.campaignId} = m.cid AND ${and(...conditions)}
+          ORDER BY ${runs.startedAt} DESC, ${runs.id} DESC
+          LIMIT ${perMember}
+        ) p
+        ORDER BY p.started_at DESC, p.id DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `);
+      pageIds = (rows as unknown as Array<{ id: string }>).map((r) => r.id);
+    } else {
+      if (campaignIds) conditions.push(inArray(runs.campaignId, campaignIds));
+      if (limit !== undefined) {
+        const page = db
+          .select({ id: runs.id })
+          .from(runs)
+          .where(and(...conditions))
+          .orderBy(desc(runs.startedAt), desc(runs.id))
+          .$dynamic();
+        page.limit(limit);
+        if (offset) page.offset(offset);
+        pageIds = (await page).map((r) => r.id);
+      }
+    }
 
-    if (limit !== undefined) query.limit(limit);
-    if (offset) query.offset(offset);
+    let result: Awaited<ReturnType<typeof selectRunsWithOwnCost>> = [];
+    if (pageIds === undefined) {
+      const query = selectRunsWithOwnCost(and(...conditions)!);
+      if (offset) query.offset(offset);
+      result = await query;
+    } else if (pageIds.length > 0) {
+      result = await selectRunsWithOwnCost(inArray(runs.id, pageIds));
+    }
 
-    const result = await query;
     const formattedRuns = result.map((r) => ({
       ...r,
       ownCostInUsdCents: new Decimal(r.ownCostInUsdCents).toFixed(10),
@@ -1059,5 +1084,45 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+/** Runs matching `where`, newest first, each with the sum of its own cost rows. */
+function selectRunsWithOwnCost(where: SQL) {
+  return db
+    .select({
+      id: runs.id,
+      parentRunId: runs.parentRunId,
+      organizationId: runs.organizationId,
+      userId: runs.userId,
+      brandIds: runs.brandIds,
+      campaignId: runs.campaignId,
+      workflowSlug: runs.workflowSlug,
+      featureSlug: runs.featureSlug,
+      goal: runs.goal,
+      brandProfileId: runs.brandProfileId,
+      audienceId: runs.audienceId,
+      workflowContext: runs.workflowContext,
+      serviceName: runs.serviceName,
+      taskName: runs.taskName,
+      status: runs.status,
+      startedAt: runs.startedAt,
+      completedAt: runs.completedAt,
+      createdAt: runs.createdAt,
+      updatedAt: runs.updatedAt,
+      ownCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} IN ('actual','provisioned') THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_cost_in_usd_cents"),
+      ownActualCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'actual' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_actual_cost_in_usd_cents"),
+      ownProvisionedCostInUsdCents: sql<string>`COALESCE(SUM(CASE WHEN ${runsCosts.status} = 'provisioned' THEN ${runsCosts.totalCostInUsdCents} ELSE 0 END), 0)`.as("own_provisioned_cost_in_usd_cents"),
+    })
+    .from(runs)
+    .leftJoin(runsCosts, eq(runsCosts.runId, runs.id))
+    .where(where)
+    .groupBy(
+      runs.id, runs.parentRunId, runs.organizationId, runs.userId, runs.brandIds,
+      runs.campaignId, runs.workflowSlug, runs.featureSlug, runs.serviceName, runs.taskName,
+      runs.goal, runs.brandProfileId, runs.audienceId, runs.workflowContext,
+      runs.status, runs.startedAt, runs.completedAt, runs.createdAt, runs.updatedAt,
+    )
+    .orderBy(desc(runs.startedAt), desc(runs.id))
+    .$dynamic();
+}
 
 export default router;

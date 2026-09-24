@@ -37,6 +37,9 @@ export const runs = pgTable(
     index("idx_runs_parent").on(table.parentRunId),
     index("idx_runs_brand_ids").using("gin", table.brandIds),
     index("idx_runs_campaign").on(table.campaignId),
+    // Newest-first runs of ONE campaign (migration 0036). Serves GET /v1/runs?campaignIds=
+    // as a per-member top-N walk, so a campaign family of any age answers in O(members x limit).
+    index("idx_runs_campaign_started").on(table.campaignId, sql`${table.startedAt} DESC`),
     index("idx_runs_feature_slug").on(table.featureSlug),
     index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
     index("idx_runs_goal_org").on(table.goal, table.organizationId),
