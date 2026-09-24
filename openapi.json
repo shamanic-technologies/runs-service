@@ -994,6 +994,33 @@
           "expected_cents"
         ]
       },
+      "OrgActualTotalResponse": {
+        "type": "object",
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "total_expected_cents": {
+            "type": "string",
+            "description": "GROSS actualized platform total. Byte-identical to total_expected_cents on GET /internal/runs-expected-totals for the same org at the same moment."
+          },
+          "net_total_expected_cents": {
+            "type": "string",
+            "description": "Frozen NET (post-usage-discount) actualized platform total. Byte-identical to net_total_expected_cents on GET /internal/runs-expected-totals for the same org at the same moment: SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) over committed platform cost rows (status='actual', cost_source='platform') of the org's completed/failed runs. Provisioned holds, cancelled, refunded and BYOK rows are excluded. Decimal string, '0' when nothing is charged."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "org_id",
+          "total_expected_cents",
+          "net_total_expected_cents",
+          "as_of"
+        ]
+      },
       "OrgUsageTotalResponse": {
         "type": "object",
         "properties": {
@@ -3011,6 +3038,53 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunsExpectedTotalsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/org-actual-total": {
+      "get": {
+        "summary": "Org-level ACTUALIZED platform total (O(1))",
+        "description": "The org's actualized platform charges, gross and net of the usage discount: the same two totals as GET /internal/runs-expected-totals (committed platform cost rows of completed/failed runs; provisioned holds excluded), without the per-run list. Served from org_actual_totals, a per-org total maintained by database triggers in the same transaction as every cost / run write, so it is never stale and reads in O(1) regardless of ledger size. Decimal strings with numeric(16,10) precision.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "org_id",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Org-level actualized platform totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgActualTotalResponse"
                 }
               }
             }

@@ -21,6 +21,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
+- `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -103,6 +104,97 @@ Verified against production (org `b645207b…`, 2026-07-20 → 2026-08-02, daily
 unfiltered and platform-only agree on every day with no BYOK, and differ by
 exactly the BYOK spend on the two days that have some (18.00 on 07-23, 2.00 on
 07-31); `run_count` is identical in both readings.
+
+## Write-maintained rollup for the cross-org per-workflow read (migration 0034)
+
+`GET /v1/stats/public/costs?featureSlugs=X&groupBy=workflowSlug` is the fleet
+benchmark features-service builds its workflow ranking from, once per viewed
+brand / campaign / leg cell. Live, it re-scanned the feature's whole history on
+every call — 1.16M runs for `sales-cold-email-outreach`, a 60 MB spilling
+distinct-hash, 1.4 s of JIT, 5-9 s per call with 3-8 in flight (2026-09-24,
+shared Postgres at ~400% CPU) — to return ~160 groups that only change when a
+row lands. So it is maintained at WRITE time.
+
+- **Tables**: `stats_rollup_runs (feature_slug, workflow_slug, run_count)` and
+  `stats_rollup_costs (feature_slug, workflow_slug, cost_source, n_/gross_/net_
+  per status)`, `UNIQUE NULLS NOT DISTINCT` (a NULL workflow is its own group,
+  as in `GROUP BY`). Maintained by triggers on `runs` (insert, feature/workflow
+  update, BEFORE delete — which also removes the run's costs, because the
+  cascaded cost deletes can no longer see the run) and `runs_costs` (insert,
+  delete, update of run/payer/status/amounts). A write that touches neither
+  table's rows (`run.completed`) fires nothing.
+- **Served shape only**: filters ⊆ {featureSlug(s), workflowSlugs incl. a
+  resolved dynasty, costSource}, groupBy ∈ {workflowSlug, workflowDynastySlug,
+  featureSlug}. An org/brand/campaign/task filter or any other grouping keeps the
+  live query — the rollup does not carry those dimensions, and serving them from
+  it would silently answer for the whole fleet.
+- **Byte-identical, text included.** The live money columns are
+  `SUM(CASE … ELSE 0 END)::text`: scale 10 when a row of that status matched,
+  `'0'` when none did — and the response is ORDERed by that text. Hence the
+  matched-row COUNT per status beside each sum; the read renders `'0'` on a zero
+  count, `round(sum, 10)::text` otherwise. `tests/integration/stats-rollup.test.ts`
+  compares rollup vs live (JSON and raw text) through inserts, every status
+  transition, deletes, a run moved to another workflow, and a rebuild racing
+  live writes.
+- **Readiness**: the read uses the rollup only while `stats_rollups` holds the
+  `feature_workflow` stamp (checked per request, a one-row PK probe — no
+  in-process cache, because a rebuild un-stamps it). A fresh database is stamped
+  by the migration. An existing one is stamped by
+  `scripts/rebuild-stats-rollup.ts` (re-runnable any time): writers QUEUE for
+  well under a second while it clears the rollup and exports a snapshot under a
+  SHARE ROW EXCLUSIVE lock, then the ~20 s aggregate runs lock-free on that
+  snapshot and is ADDED on top of the deltas that landed meanwhile. Every row
+  counts once — in the aggregate if committed before the lock, as a delta after.
+  In prod it runs inside the container against the compiled
+  `dist/services/stats-rollup.js`.
+- **`TRUNCATE` fires no row triggers.** Anything that truncates `runs` /
+  `runs_costs` (tests/global-setup.ts) truncates the two rollup tables too.
+- **JIT is off for the whole pool** (`connection: { jit: "off" }` in
+  `src/db/index.ts`): it compiled 72 functions (1.4 s) per call on the read
+  above, and no query here runs long enough to repay it.
+- **Org-scoped sibling** (`GET /v1/stats/costs`): when every groupBy key and
+  every filter is run-side (`workflowSlug,campaignId`, `workflowSlug`,
+  `brandId`…), it now runs the same (counts | sums) split as the public read —
+  the joined `COUNT(DISTINCT r.id)` sorted 435k rows for one brand's history.
+  Measured 9.9 s → 2.5 s, identical rows in one snapshot. A cost-row dimension or
+  filter (`audienceId`, `goal`, `brandProfileId`, `workflowContext`,
+  `attributionStatus`, `costName`) can put one run in several groups, so
+  `audienceId,workflowSlug` keeps the joined query (JIT-off only). Taking the
+  brand-scoped reads to O(groups) needs a brand-grain rollup — its own PR.
+## Org actualized total — maintained on write, read in O(1) (migration 0035)
+
+billing-service reads an org's ACTUALIZED platform charges (net of the usage
+discount) on every dashboard page. `GET /internal/runs-expected-totals` computes
+it by scanning the ledger: 5.4s / 33 MB for the heaviest org, and even the totals
+alone are >=400ms on prod because ~700k rows must be summed. A scan cannot meet a
+dashboard budget, and the ledger only grows. So the total is KEPT.
+
+- **`org_actual_totals`** — one row per org: gross + net, unconstrained `numeric`
+  (a lifetime total overflows `numeric(16,10)`; every addend is scale 10, so the
+  `::text` stays byte-identical to `SUM(...)::text`). App code never writes it.
+- **Maintained by triggers, in the same transaction as the write** — so it is
+  never stale, which is what separates it from a cache:
+  `trg_org_actual_totals_cost` (runs_costs INSERT/UPDATE/DELETE),
+  `trg_org_actual_totals_run_update` (runs status/org change),
+  `trg_org_actual_totals_run_delete` (BEFORE DELETE, while the FK-cascaded costs
+  still exist). Included row = `is_platform_committed` AND run status IN
+  ('completed','failed') AND run org NOT NULL, keyed on the RUN's org — exactly
+  runs-expected-totals' definition.
+- **Concurrency: every trigger locks the org's row FIRST, then reads run status /
+  sums costs.** Each plpgsql statement takes a fresh snapshot, so whichever
+  transaction takes the lock second sees the other's committed write. A trigger
+  that reads before locking loses money under concurrency: the first version
+  skipped the lock on a running→completed transition with an unchanged org, and
+  a 20-run concurrent test lost ~5% of the total. The concurrent test in
+  `tests/integration/org-actual-total.test.ts` is what catches it — keep it.
+- **Read:** `GET /internal/org-actual-total?org_id=` → `{org_id,
+  total_expected_cents, net_total_expected_cents, as_of}`, one PK lookup. '0'
+  when no row or gross is 0 (exactly when runs-expected-totals' per-run set is
+  empty, since costs are never negative).
+- **TRUNCATE fires no row triggers** — anything that truncates runs/runs_costs
+  (tests/global-setup.ts) must truncate `org_actual_totals` too.
+- `POST /internal/transfer-brand` now also moves `runs_costs.organization_id`
+  with the run, so `org-usage-total` (0029's denormalized org) follows the move.
 
 ## Cost predicate doctrine
 

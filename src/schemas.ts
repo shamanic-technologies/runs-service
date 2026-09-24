@@ -776,6 +776,21 @@ export const RunsExpectedTotalsResponseSchema = z
   })
   .openapi("RunsExpectedTotalsResponse");
 
+export const OrgActualTotalQuerySchema = z
+  .object({
+    org_id: z.string().uuid(),
+  })
+  .openapi("OrgActualTotalQuery");
+
+export const OrgActualTotalResponseSchema = z
+  .object({
+    org_id: z.string().uuid(),
+    total_expected_cents: z.string().openapi({ description: "GROSS actualized platform total. Byte-identical to total_expected_cents on GET /internal/runs-expected-totals for the same org at the same moment." }),
+    net_total_expected_cents: z.string().openapi({ description: "Frozen NET (post-usage-discount) actualized platform total. Byte-identical to net_total_expected_cents on GET /internal/runs-expected-totals for the same org at the same moment: SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) over committed platform cost rows (status='actual', cost_source='platform') of the org's completed/failed runs. Provisioned holds, cancelled, refunded and BYOK rows are excluded. Decimal string, '0' when nothing is charged." }),
+    as_of: z.string().datetime(),
+  })
+  .openapi("OrgActualTotalResponse");
+
 export const OrgUsageTotalQuerySchema = z
   .object({
     org_id: z.string().uuid(),
@@ -805,6 +820,29 @@ registry.registerPath({
     200: {
       description: "Per-run expected totals + org-level aggregate",
       content: { "application/json": { schema: RunsExpectedTotalsResponseSchema } },
+    },
+    400: {
+      description: "Invalid query parameters",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/org-actual-total",
+  summary: "Org-level ACTUALIZED platform total (O(1))",
+  description:
+    "The org's actualized platform charges, gross and net of the usage discount: the same two totals as GET /internal/runs-expected-totals (committed platform cost rows of completed/failed runs; provisioned holds excluded), without the per-run list. Served from org_actual_totals, a per-org total maintained by database triggers in the same transaction as every cost / run write, so it is never stale and reads in O(1) regardless of ledger size. Decimal strings with numeric(16,10) precision.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: OrgActualTotalQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Org-level actualized platform totals",
+      content: { "application/json": { schema: OrgActualTotalResponseSchema } },
     },
     400: {
       description: "Invalid query parameters",
