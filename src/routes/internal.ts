@@ -210,7 +210,7 @@ router.get("/internal/runs-expected-totals", requireInternalAuth, async (req, re
 });
 
 // GET /internal/org-actual-total — the org's actualized platform total, gross and
-// net, read from org_actual_totals (migration 0034): one primary-key lookup.
+// net, read from org_actual_totals (migration 0035): one primary-key lookup.
 // The row is maintained by triggers inside every cost / run write transaction,
 // so this is the same figure runs-expected-totals computes, never a stale copy.
 // '0' when the org has no row or its gross total is 0 — exactly when

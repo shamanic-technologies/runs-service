@@ -75,7 +75,7 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
 
-## Org actualized total — maintained on write, read in O(1) (migration 0034)
+## Org actualized total — maintained on write, read in O(1) (migration 0035)
 
 billing-service reads an org's ACTUALIZED platform charges (net of the usage
 discount) on every dashboard page. `GET /internal/runs-expected-totals` computes

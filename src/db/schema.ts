@@ -116,7 +116,7 @@ export const runsCosts = pgTable(
 export type RunCost = typeof runsCosts.$inferSelect;
 export type NewRunCost = typeof runsCosts.$inferInsert;
 
-// Per-org ACTUALIZED platform total (migration 0034). Maintained ONLY by
+// Per-org ACTUALIZED platform total (migration 0035). Maintained ONLY by
 // triggers on runs / runs_costs, in the same transaction as each write, so it is
 // never stale. App code must never write it. Read by GET /internal/org-actual-total.
 // Unconstrained numeric: an org's lifetime total overflows numeric(16,10).
