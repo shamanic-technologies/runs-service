@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import healthRoutes from "../../src/routes/health.js";
 import runsRoutes from "../../src/routes/runs.js";
 import statsRoutes from "../../src/routes/stats.js";
+import runOutcomesRoutes from "../../src/routes/run-outcomes.js";
 import platformRunsRoutes from "../../src/routes/platform-runs.js";
 import internalRoutes from "../../src/routes/internal.js";
 import refundRoutes from "../../src/routes/refunds.js";
@@ -35,6 +36,7 @@ export function createTestApp() {
   app.use(healthRoutes);
   app.use(runsRoutes);
   app.use(statsRoutes);
+  app.use(runOutcomesRoutes);
   app.use(platformRunsRoutes);
   app.use(internalRoutes);
   app.use(refundRoutes);
