@@ -1294,6 +1294,84 @@
           "refundedBy"
         ]
       },
+      "StatsRunOutcomesResponse": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "all"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimensions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "runCount": {
+                  "type": "integer",
+                  "description": "Runs in the group, every status."
+                },
+                "completedCount": {
+                  "type": "integer",
+                  "description": "Runs with status completed."
+                },
+                "failedCount": {
+                  "type": "integer",
+                  "description": "Runs with status failed."
+                },
+                "runningCount": {
+                  "type": "integer",
+                  "description": "Runs still running."
+                },
+                "successRate": {
+                  "type": "number",
+                  "nullable": true,
+                  "description": "completedCount / (completedCount + failedCount), a fraction in [0,1]. Running runs are excluded (not decided yet). null when no run has ended."
+                },
+                "medianDurationMs": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "Median of (completedAt - startedAt) over the COMPLETED runs, in milliseconds. Failed and running runs are excluded. null when the group has no completed run (never 0)."
+                },
+                "minStartedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "date-time"
+                },
+                "maxStartedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "dimensions",
+                "runCount",
+                "completedCount",
+                "failedCount",
+                "runningCount",
+                "successRate",
+                "medianDurationMs",
+                "minStartedAt",
+                "maxStartedAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "scope",
+          "groups"
+        ]
+      },
       "StatsCostsResponse": {
         "type": "object",
         "properties": {
@@ -3263,6 +3341,150 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/stats/run-outcomes": {
+      "get": {
+        "summary": "How runs ended and how long they took, per group",
+        "description": "Per group (default one per campaignId): completed / failed / running counts, success rate and median duration of the completed runs, over the filtered runs of the calling org (x-org-id). By default counts ENTRY runs only (scope=entry): a run whose parent is not a run of the same campaign, i.e. one row per run the agent started, not one per service call. scope=all counts every matching run and reconciles status-for-status with GET /v1/runs under the same filters. Groups are ordered by runCount desc.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated run-side dimensions: campaignId, workflowSlug, featureSlug, serviceName, taskName. Default campaignId."
+            },
+            "required": false,
+            "description": "Comma-separated run-side dimensions: campaignId, workflowSlug, featureSlug, serviceName, taskName. Default campaignId.",
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "entry",
+                "all"
+              ],
+              "description": "entry (default): count a run only when its parent is not a run of the same campaign (or it has no parent), i.e. the run the agent started (in practice workflow / execute-workflow), not the service calls it fans out into. all: every run the filters match, i.e. what GET /v1/runs lists for the same filters."
+            },
+            "required": false,
+            "description": "entry (default): count a run only when its parent is not a run of the same campaign (or it has no parent), i.e. the run the agent started (in practice workflow / execute-workflow), not the service calls it fans out into. all: every run the filters match, i.e. what GET /v1/runs lists for the same filters.",
+            "name": "scope",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Runs where this brand is in brandIds."
+            },
+            "required": false,
+            "description": "Runs where this brand is in brandIds.",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Inclusive lower bound on the run's started_at."
+            },
+            "required": false,
+            "description": "Inclusive lower bound on the run's started_at.",
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Inclusive upper bound on the run's started_at."
+            },
+            "required": false,
+            "description": "Inclusive upper bound on the run's started_at.",
+            "name": "startedBefore",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run outcome groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsRunOutcomesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid groupBy, scope, campaignIds or date",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

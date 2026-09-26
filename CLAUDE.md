@@ -23,6 +23,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
+- `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -263,6 +264,30 @@ time, same pattern and same byte-identity rules as 0034.
   rollups.
 - **TRUNCATE fires no row triggers** — `tests/global-setup.ts` truncates these two
   tables with the ledger.
+
+## Run outcomes — how runs ended and how long they took (`GET /v1/stats/run-outcomes`)
+
+The dashboard's per-crew cards ("97% success, 38 failed", "median run 1m 52s")
+read this per campaign. Org-scoped, filters brandId / campaignId / campaignIds
+(a FAMILY, shared parser) / workflowSlug / featureSlug / serviceName / taskName /
+startedAfter / startedBefore; groupBy is run-side only (default `campaignId`), so a
+run lands in exactly one group and the median is exact (no dynasty regroup:
+medians do not merge).
+
+- **Default `scope=entry` counts ENTRY runs only**: a run whose parent is not a
+  run of the SAME campaign (or no parent). In prod a campaign's tree is
+  `campaign-service/campaign-trigger` or `api-service` (no campaign) →
+  `workflow/execute-workflow` (carries the campaign) → ~15 child service calls
+  (same campaign). No root run carries a campaign, so "root only" would count
+  nothing; counting every node would weigh one agent run as ~15 and report a
+  service call's 2 s as its duration. `scope=all` counts every matching run and
+  reconciles status-for-status with `GET /v1/runs` under the same filters.
+- `medianDurationMs` = median of `completed_at − started_at` over COMPLETED runs;
+  **null (never 0) when the group has no completed run**. `successRate` =
+  completed / (completed + failed), null when none ended; running runs are not
+  decided yet. Statuses are enumerated, never negated.
+- Cost: the entry test is one PK lookup per candidate run. Busiest brand, 30 days:
+  ~0.95 s warm (229k candidate runs); one day: ~0.23 s.
 
 ## Cost predicate doctrine
 
