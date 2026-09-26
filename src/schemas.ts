@@ -1321,7 +1321,64 @@ export const PublicCostsTimeseriesResponseSchema = z
   })
   .openapi("PublicCostsTimeseriesResponse");
 
+export const StatsRunOutcomesQuerySchema = z
+  .object({
+    groupBy: z.string().optional().openapi({ description: "Comma-separated run-side dimensions: campaignId, workflowSlug, featureSlug, serviceName, taskName. Default campaignId." }),
+    scope: z.enum(["entry", "all"]).optional().openapi({ description: "entry (default): count a run only when its parent is not a run of the same campaign (or it has no parent), i.e. the run the agent started (in practice workflow / execute-workflow), not the service calls it fans out into. all: every run the filters match, i.e. what GET /v1/runs lists for the same filters." }),
+    brandId: z.string().optional().openapi({ description: "Runs where this brand is in brandIds." }),
+    campaignId: z.string().optional(),
+    campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400." }),
+    workflowSlug: z.string().optional(),
+    featureSlug: z.string().optional(),
+    serviceName: z.string().optional(),
+    taskName: z.string().optional(),
+    startedAfter: z.string().datetime().optional().openapi({ description: "Inclusive lower bound on the run's started_at." }),
+    startedBefore: z.string().datetime().optional().openapi({ description: "Inclusive upper bound on the run's started_at." }),
+  })
+  .openapi("StatsRunOutcomesQuery");
+
+export const StatsRunOutcomesResponseSchema = z
+  .object({
+    scope: z.enum(["entry", "all"]),
+    groups: z.array(
+      z.object({
+        dimensions: z.record(z.string(), z.string().nullable()),
+        runCount: z.number().int().openapi({ description: "Runs in the group, every status." }),
+        completedCount: z.number().int().openapi({ description: "Runs with status completed." }),
+        failedCount: z.number().int().openapi({ description: "Runs with status failed." }),
+        runningCount: z.number().int().openapi({ description: "Runs still running." }),
+        successRate: z.number().nullable().openapi({ description: "completedCount / (completedCount + failedCount), a fraction in [0,1]. Running runs are excluded (not decided yet). null when no run has ended." }),
+        medianDurationMs: z.number().int().nullable().openapi({ description: "Median of (completedAt - startedAt) over the COMPLETED runs, in milliseconds. Failed and running runs are excluded. null when the group has no completed run (never 0)." }),
+        minStartedAt: z.string().datetime().nullable(),
+        maxStartedAt: z.string().datetime().nullable(),
+      })
+    ),
+  })
+  .openapi("StatsRunOutcomesResponse");
+
 // --- Stats path registrations ---
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/run-outcomes",
+  summary: "How runs ended and how long they took, per group",
+  description:
+    "Per group (default one per campaignId): completed / failed / running counts, success rate and median duration of the completed runs, over the filtered runs of the calling org (x-org-id). By default counts ENTRY runs only (scope=entry): a run whose parent is not a run of the same campaign, i.e. one row per run the agent started, not one per service call. scope=all counts every matching run and reconciles status-for-status with GET /v1/runs under the same filters. Groups are ordered by runCount desc.",
+  security: [{ apiKey: [] }],
+  request: { query: StatsRunOutcomesQuerySchema },
+  responses: {
+    200: {
+      description: "Run outcome groups",
+      content: { "application/json": { schema: StatsRunOutcomesResponseSchema } },
+    },
+    400: {
+      description: "Invalid groupBy, scope, campaignIds or date",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 
 registry.registerPath({
   method: "get",
