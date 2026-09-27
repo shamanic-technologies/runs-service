@@ -696,9 +696,9 @@ export const TransferBrandResponseSchema = z
 registry.registerPath({
   method: "post",
   path: "/internal/transfer-brand",
-  summary: "Transfer solo-brand runs to a different org",
+  summary: "Move a brand's runs, costs and events to a different org",
   description:
-    "Re-assigns all runs where brand_ids contains exactly one element matching sourceBrandId from sourceOrgId to targetOrgId. When targetBrandId is provided, also rewrites the brand reference. Skips co-branding rows (multiple brand IDs). Idempotent.",
+    "Moves every run of sourceOrgId that belongs to sourceBrandId to targetOrgId: runs whose brand_ids contains the brand (solo AND co-branded: a co-branded run follows the first of its brands to leave the org), plus untagged runs (no brand_ids) of the brand's campaigns (a campaign carried by a run tagged with the brand). Each moved run's cost rows (runs_costs.organization_id) and telemetry events (run_events.org_id) move with it; org_actual_totals and the campaign rollup follow by trigger. When targetBrandId is provided, the brand id is rewritten inside brand_ids everywhere (and inside the moved runs' events). Processed in chunks, each its own transaction; the platform usage each chunk moved is frozen in the same transaction and served by GET /internal/brand-transfers/moved-usage. Idempotent and safe under concurrent calls: a re-run moves nothing and records nothing.",
   security: [{ apiKey: [] }],
   request: {
     body: {
@@ -712,6 +712,51 @@ registry.registerPath({
     },
     400: {
       description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const BrandTransferMovedUsageQuerySchema = z
+  .object({
+    sourceOrgId: z.string().uuid(),
+    sourceBrandId: z.string().uuid(),
+    targetOrgId: z.string().uuid(),
+  })
+  .openapi("BrandTransferMovedUsageQuery");
+
+export const BrandTransferMovedUsageResponseSchema = z
+  .object({
+    sourceOrgId: z.string().uuid(),
+    sourceBrandId: z.string().uuid(),
+    targetOrgId: z.string().uuid(),
+    runsMoved: z.number().int(),
+    costsMoved: z.number().int(),
+    projectedGrossCents: z.string(),
+    projectedNetCents: z.string(),
+    actualGrossCents: z.string(),
+    actualNetCents: z.string(),
+    firstMovedAt: z.string().nullable(),
+    lastMovedAt: z.string().nullable(),
+  })
+  .openapi("BrandTransferMovedUsageResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brand-transfers/moved-usage",
+  summary: "Platform usage moved by brand transfers (for balance-neutral billing)",
+  description:
+    "Sum, over every POST /internal/transfer-brand call for (sourceOrgId, sourceBrandId) -> targetOrgId, of the platform usage those calls moved from the source org to the target org. Frozen at each move, so later spend in either org never changes it; a re-run that moved nothing adds nothing. projected* = platform actual + provisioned cost rows whose org moved (the figures GET /internal/org-usage-total counts: spent_cents / net_spent_cents). actual* = platform committed cost rows of runs completed/failed at the move (the figures GET /internal/org-actual-total counts). Net = COALESCE(frozen net, gross) per row. Decimal strings; '0' when nothing moved. Answers only for moves already made: call POST /internal/transfer-brand first (idempotent).",
+  security: [{ apiKey: [] }],
+  request: { query: BrandTransferMovedUsageQuerySchema },
+  responses: {
+    200: {
+      description: "Moved usage",
+      content: { "application/json": { schema: BrandTransferMovedUsageResponseSchema } },
+    },
+    400: {
+      description: "Invalid query",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
     401: { description: "Unauthorized" },

@@ -23,6 +23,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
+- `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` (service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
@@ -282,6 +283,35 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
   row written before 2026-05-03 (prices costs-service no longer holds).
+
+## Brand transfer — history moves, money does not (migration 0038)
+
+`POST /internal/transfer-brand` (fleet contract, called by brand-service in
+parallel with every other service) moves a brand's history to another org.
+
+- **Which runs**: every source-org run whose `brand_ids` CONTAINS the brand (solo
+  AND co-branded — a run carries one org, so a co-branded run follows the first of
+  its brands to leave), plus untagged runs (`brand_ids` NULL/empty) whose
+  `campaign_id` is one of the brand's campaigns (carried by a run tagged with the
+  brand, in source or target org). Untagged runs with no campaign stay.
+- **What moves with a run**: `runs.organization_id`, `runs_costs.organization_id`
+  (0029 denorm) and `run_events.org_id`, each only where still on the source org.
+  `org_actual_totals` and the campaign-day rollup follow by trigger. With
+  `targetBrandId` the id is `array_replace`d in `brand_ids` everywhere and in the
+  moved runs' `run_events.brand_ids`.
+- **Chunked (500 runs/tx — 2000 was 3.7x slower: in-tx row versions of the shared total/rollup rows cannot be pruned), idempotent, concurrency-safe**: the UPDATE re-checks
+  `organization_id = source` under the row lock; all figures come from the rows
+  THAT chunk's UPDATE returned. A re-run moves and records nothing. Chunking keeps
+  the source org's `org_actual_totals` row lock short (it is the agency's org).
+- **Money**: each chunk freezes what it moved into `brand_transfer_moves` in the
+  same transaction — projected (what `org-usage-total` counts) and actual (what
+  `org-actual-total` counts), gross + net. `GET /internal/brand-transfers/moved-usage`
+  sums it per (source org, source brand, target org); billing-service offsets it so
+  both balances stay unchanged. Never recompute these figures from live rows.
+- **Known edges**: silver is mutated without a per-run bronze event (the ledger is
+  the audit record); an event written later for a moved run with the source org in
+  `x-org-id` stays on the source org.
+- `TRUNCATE` fires no triggers: `tests/global-setup.ts` truncates the ledger too.
 
 ## Cost predicate doctrine
 

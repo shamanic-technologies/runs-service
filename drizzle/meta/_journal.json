@@ -267,6 +267,13 @@
       "when": 1781395200000,
       "tag": "0037_stats_rollup_campaign_day",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1781481600000,
+      "tag": "0038_brand_transfer_moves",
+      "breakpoints": true
     }
   ]
 }
