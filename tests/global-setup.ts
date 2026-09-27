@@ -17,7 +17,7 @@ export async function setup() {
     // TRUNCATE fires no row triggers, so the write-maintained rollups (stats
     // rollups, migrations 0034 + 0037; org_actual_totals, migration 0035) are emptied
     // alongside the ledger they summarise.
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs, stats_rollup_campaign_runs, stats_rollup_campaign_costs, org_actual_totals CASCADE`;
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs, stats_rollup_campaign_runs, stats_rollup_campaign_costs, org_actual_totals, brand_transfer_moves CASCADE`;
   } finally {
     await sql.end();
   }

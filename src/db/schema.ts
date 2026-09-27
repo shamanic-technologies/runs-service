@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, numeric, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, numeric, integer, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const runs = pgTable(
@@ -129,6 +129,29 @@ export const orgActualTotals = pgTable("org_actual_totals", {
   netCostInUsdCents: numeric("net_cost_in_usd_cents").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// What POST /internal/transfer-brand moved, one row per committed chunk
+// (migration 0038). Written in the same transaction as the move; frozen, summed
+// by GET /internal/brand-transfers/moved-usage for billing's balance offset.
+export const brandTransferMoves = pgTable(
+  "brand_transfer_moves",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceOrgId: uuid("source_org_id").notNull(),
+    sourceBrandId: text("source_brand_id").notNull(),
+    targetOrgId: uuid("target_org_id").notNull(),
+    targetBrandId: text("target_brand_id"),
+    runsMoved: integer("runs_moved").notNull(),
+    costsMoved: integer("costs_moved").notNull(),
+    eventsMoved: integer("events_moved").notNull(),
+    projectedGrossCents: numeric("projected_gross_cents").notNull(),
+    projectedNetCents: numeric("projected_net_cents").notNull(),
+    actualGrossCents: numeric("actual_gross_cents").notNull(),
+    actualNetCents: numeric("actual_net_cents").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_brand_transfer_moves_key").on(table.sourceOrgId, table.sourceBrandId, table.targetOrgId)]
+);
 
 export const runEvents = pgTable(
   "run_events",

@@ -5,8 +5,10 @@ import { db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import { logRunLifecycle } from "../services/bronze.js";
+import { transferBrand, movedUsage } from "../services/brand-transfer.js";
 import {
   TransferBrandRequestSchema,
+  BrandTransferMovedUsageQuerySchema,
   RunsExpectedTotalsQuerySchema,
   OrgUsageTotalQuerySchema,
   OrgActualTotalQuerySchema,
@@ -26,64 +28,50 @@ type OrgRunTeardownRow = {
   task_name: string;
 };
 
-// POST /internal/transfer-brand — re-assign solo-brand runs to a different org.
-// Unchanged from prior PR — silver-table direct mutation is the audit gap that
-// Phase 5 doctrine WOULD ideally close (transfer-brand should also emit a
-// `run.org_transferred` domain event), tracked as a follow-up.
+// POST /internal/transfer-brand — move a brand's runs (+ their costs and events)
+// from one org to another. Rule, chunking, idempotency and the money ledger are
+// documented in src/services/brand-transfer.ts. Silver is mutated directly (no
+// per-run bronze event); brand_transfer_moves is the audit record of the move.
 router.post("/internal/transfer-brand", requireInternalAuth, async (req, res) => {
+  const parsed = TransferBrandRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
   try {
-    const parsed = TransferBrandRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-      return;
-    }
-
+    const r = await transferBrand(parsed.data);
     const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
-
-    const step1 = await db
-      .update(runs)
-      .set({ organizationId: targetOrgId, updatedAt: new Date() })
-      .where(
-        and(
-          eq(runs.organizationId, sourceOrgId),
-          sql`array_length(${runs.brandIds}, 1) = 1`,
-          sql`${runs.brandIds}[1] = ${sourceBrandId}`
-        )
-      )
-      .returning({ id: runs.id });
-
-    // Keep the cost rows' denormalized org (migration 0029) on the run's org, or
-    // GET /internal/org-usage-total keeps counting moved spend under the source org.
-    if (step1.length > 0) {
-      await db
-        .update(runsCosts)
-        .set({ organizationId: targetOrgId })
-        .where(inArray(runsCosts.runId, step1.map((r) => r.id)));
-    }
-
-    let rewriteCount = 0;
-    if (targetBrandId) {
-      const step2 = await db
-        .update(runs)
-        .set({ brandIds: sql`ARRAY[${targetBrandId}]::text[]`, updatedAt: new Date() })
-        .where(
-          and(
-            sql`array_length(${runs.brandIds}, 1) = 1`,
-            sql`${runs.brandIds}[1] = ${sourceBrandId}`
-          )
-        )
-        .returning({ id: runs.id });
-      rewriteCount = step2.length;
-    }
-
-    const totalUpdated = Math.max(step1.length, rewriteCount);
-    console.log(`[runs-service] transfer-brand: moved ${step1.length} runs from org ${sourceOrgId} to ${targetOrgId} for brand ${sourceBrandId}${targetBrandId ? `, rewrote ${rewriteCount} brand refs → ${targetBrandId}` : ""}`);
-
-    res.json({ updatedTables: [{ tableName: "runs", count: totalUpdated }] });
+    console.log(
+      `[runs-service] transfer-brand: brand ${sourceBrandId} org ${sourceOrgId} -> ${targetOrgId}: ` +
+        `${r.runsMoved} runs, ${r.costsMoved} costs, ${r.eventsMoved} events moved` +
+        (targetBrandId ? `; brand id -> ${targetBrandId}, ${r.runsBrandRewrittenElsewhere} other runs rewritten` : "")
+    );
+    res.json({
+      updatedTables: [
+        { tableName: "runs", count: r.runsMoved + r.runsBrandRewrittenElsewhere },
+        { tableName: "runs_costs", count: r.costsMoved },
+        { tableName: "run_events", count: r.eventsMoved },
+      ],
+    });
   } catch (err) {
     console.error("[runs-service] Error in POST /internal/transfer-brand:", err);
     res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// GET /internal/brand-transfers/moved-usage — how much platform usage transfers of
+// (sourceOrgId, sourceBrandId) -> targetOrgId moved, summed over every call. Frozen
+// at each move (brand_transfer_moves), so later spend in either org never changes
+// it. billing-service offsets it to keep both balances unchanged.
+router.get("/internal/brand-transfers/moved-usage", requireInternalAuth, async (req, res) => {
+  const parsed = BrandTransferMovedUsageQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+  const { sourceOrgId, sourceBrandId, targetOrgId } = parsed.data;
+  res.json(await movedUsage(sourceOrgId, sourceBrandId, targetOrgId));
 });
 
 // DELETE /internal/runs/by-org/:orgId — org cascade teardown.
