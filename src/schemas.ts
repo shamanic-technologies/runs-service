@@ -1520,6 +1520,49 @@ registry.registerPath({
   },
 });
 
+export const VendorCostsTimeseriesResponseSchema = z
+  .object({
+    interval: z.enum(["day", "week", "month"]),
+    timezone: z.string(),
+    buckets: z.array(
+      z.object({
+        period: z.string().openapi({ description: "Bucket start date in YYYY-MM-DD, exactly as on GET /v1/stats/public/costs/timeseries.", example: "2026-09-21" }),
+        campaignId: z.string().nullable().optional().openapi({ description: "Present only with groupBy=campaignId." }),
+        totalCostInUsdCents: z.string().openapi({ description: "BILLED gross, status IN ('actual','provisioned') — byte-equal to the public twin's field for the same query." }),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        refundedCostInUsdCents: z.string(),
+        vendorTotalCostInUsdCents: z.string().openapi({ description: "VENDOR cost (before our markup, per costs-service's statement for the price version in force) of the status IN ('actual','provisioned') rows whose vendor cost is known: SUM(quantity x vendor unit cost). Excludes unpriced rows — never approximated at the billed price." }),
+        vendorActualCostInUsdCents: z.string(),
+        vendorProvisionedCostInUsdCents: z.string(),
+        vendorRefundedCostInUsdCents: z.string().openapi({ description: "Vendor cost of refunded rows — spend that happened and was not charged. Add to vendorActualCostInUsdCents for the real vendor spend." }),
+        unpricedTotalCostInUsdCents: z.string().openapi({ description: "BILLED gross of the status IN ('actual','provisioned') rows with NO known vendor cost (costs-service states null, or no price version matches the row's billed unit price at its write time). totalCostInUsdCents - unpricedTotalCostInUsdCents is the billed amount of the priced rows." }),
+        unpricedActualCostInUsdCents: z.string(),
+        unpricedProvisionedCostInUsdCents: z.string(),
+        unpricedRefundedCostInUsdCents: z.string(),
+        unpricedCostNames: z.array(z.string()).openapi({ description: "Distinct cost names of the unpriced actual/provisioned rows in this bucket, sorted." }),
+        runCount: z.number(),
+      })
+    ),
+  })
+  .openapi("VendorCostsTimeseriesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/timeseries/vendor",
+  summary: "Dated spend on the VENDOR-COST basis (service-auth only)",
+  description:
+    "The dated spend of GET /v1/stats/public/costs/timeseries — same query parameters, same row set, same buckets — on the vendor-cost basis: what the same cost rows cost us from the vendor before our markup. Each row is priced by the costs-service price version of its cost name whose billed unit price equals the one the row froze and which was in force when the row was written; that version's vendor unit cost x quantity. Rows whose vendor cost is unknown are reported as unpriced billed spend, never folded in. Service-auth only: the vendor cost reveals the margin and is never served on a public route. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: { query: PublicCostsTimeseriesQuerySchema },
+  responses: {
+    200: { description: "Dated vendor-basis cost buckets", content: { "application/json": { schema: VendorCostsTimeseriesResponseSchema } } },
+    400: { description: "Invalid query parameters", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/public/stats/runs",

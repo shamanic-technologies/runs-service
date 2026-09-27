@@ -11,6 +11,7 @@ import runOutcomesRoutes from "./routes/run-outcomes.js";
 import platformRunsRoutes from "./routes/platform-runs.js";
 import internalRoutes from "./routes/internal.js";
 import refundRoutes from "./routes/refunds.js";
+import vendorCostRoutes from "./routes/vendor-costs.js";
 import eventsRoutes from "./routes/events.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
@@ -44,6 +45,7 @@ app.use(runOutcomesRoutes);
 app.use(platformRunsRoutes);
 app.use(internalRoutes);
 app.use(refundRoutes);
+app.use(vendorCostRoutes);
 app.use(eventsRoutes);
 
 app.use((_req, res) => {

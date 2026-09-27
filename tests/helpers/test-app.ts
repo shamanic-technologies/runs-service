@@ -11,6 +11,7 @@ import platformRunsRoutes from "../../src/routes/platform-runs.js";
 import internalRoutes from "../../src/routes/internal.js";
 import refundRoutes from "../../src/routes/refunds.js";
 import eventsRoutes from "../../src/routes/events.js";
+import vendorCostRoutes from "../../src/routes/vendor-costs.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,6 +41,7 @@ export function createTestApp() {
   app.use(platformRunsRoutes);
   app.use(internalRoutes);
   app.use(refundRoutes);
+  app.use(vendorCostRoutes);
   app.use(eventsRoutes);
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
