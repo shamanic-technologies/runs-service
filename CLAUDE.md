@@ -24,6 +24,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` (service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -258,6 +259,29 @@ medians do not merge).
   decided yet. Statuses are enumerated, never negated.
 - Cost: the entry test is one PK lookup per candidate run. Busiest brand, 30 days:
   ~0.95 s warm (229k candidate runs); one day: ~0.23 s.
+
+## Vendor-cost basis — dated spend priced at what the vendor charged us (`GET /internal/stats/costs/timeseries/vendor`)
+
+The staff "Actual cost" view needs the dated spend of `GET /v1/stats/public/costs/timeseries`
+on the VENDOR basis (before our markup). A cost row stores only the BILLED unit price, and
+the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may divide by a constant.
+
+- **costs-service states the vendor cost per price version** (`GET /internal/vendor-costs`,
+  service-auth). runs fetches the whole catalogue in one call (5-min in-process cache) and
+  prices at READ: no column, no backfill — a correction in costs-service reprices history.
+- **Match** = same `cost_name` + same billed unit price as the row froze + the latest such
+  version whose served-from (`max(effectiveFrom, createdAt)`, costs-service's "would have
+  served" rule) is `<=` the row's `created_at`. Windows are per (name, billed price), so each
+  row matches at most one version. Vendor total = `quantity × vendor unit`, in `numeric`.
+- **Unknown is stated, never folded in**: vendor `null`, or no version matching at write time
+  → the row's BILLED amount goes to `unpriced*`, its name to `unpricedCostNames`. Catalogue
+  unreadable → 502, never an all-unpriced 200.
+- **Never on a public route** — the vendor cost reveals the margin. The public timeseries is
+  untouched; the route is `/internal/*` behind `requireInternalAuth`.
+- Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
+  09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
+  cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
+  row written before 2026-05-03 (prices costs-service no longer holds).
 
 ## Cost predicate doctrine
 
