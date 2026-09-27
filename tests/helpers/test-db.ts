@@ -81,6 +81,7 @@ export async function insertTestRunCost(data: {
   // null → force NULL (simulate a pre-backfill row); Date → use as-is.
   runStartedAt?: Date | null;
   idempotencyKey?: string;
+  createdAt?: Date;
 }) {
   // Mirror the production freezes: the cost row carries its run's organization_id
   // (migration 0029) and its run's started_at (migration 0030). This helper inserts

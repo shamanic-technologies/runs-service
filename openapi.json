@@ -1921,6 +1921,112 @@
           "buckets"
         ]
       },
+      "VendorCostsTimeseriesResponse": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "Bucket start date in YYYY-MM-DD, exactly as on GET /v1/stats/public/costs/timeseries.",
+                  "example": "2026-09-21"
+                },
+                "campaignId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy=campaignId."
+                },
+                "totalCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross, status IN ('actual','provisioned') — byte-equal to the public twin's field for the same query."
+                },
+                "actualCostInUsdCents": {
+                  "type": "string"
+                },
+                "provisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorTotalCostInUsdCents": {
+                  "type": "string",
+                  "description": "VENDOR cost (before our markup, per costs-service's statement for the price version in force) of the status IN ('actual','provisioned') rows whose vendor cost is known: SUM(quantity x vendor unit cost). Excludes unpriced rows — never approximated at the billed price."
+                },
+                "vendorActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorProvisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Vendor cost of refunded rows — spend that happened and was not charged. Add to vendorActualCostInUsdCents for the real vendor spend."
+                },
+                "unpricedTotalCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross of the status IN ('actual','provisioned') rows with NO known vendor cost (costs-service states null, or no price version matches the row's billed unit price at its write time). totalCostInUsdCents - unpricedTotalCostInUsdCents is the billed amount of the priced rows."
+                },
+                "unpricedActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedProvisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedRefundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedCostNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Distinct cost names of the unpriced actual/provisioned rows in this bucket, sorted."
+                },
+                "runCount": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "period",
+                "totalCostInUsdCents",
+                "actualCostInUsdCents",
+                "provisionedCostInUsdCents",
+                "refundedCostInUsdCents",
+                "vendorTotalCostInUsdCents",
+                "vendorActualCostInUsdCents",
+                "vendorProvisionedCostInUsdCents",
+                "vendorRefundedCostInUsdCents",
+                "unpricedTotalCostInUsdCents",
+                "unpricedActualCostInUsdCents",
+                "unpricedProvisionedCostInUsdCents",
+                "unpricedRefundedCostInUsdCents",
+                "unpricedCostNames",
+                "runCount"
+              ]
+            }
+          }
+        },
+        "required": [
+          "interval",
+          "timezone",
+          "buckets"
+        ]
+      },
       "PublicRunsStatsResponse": {
         "type": "object",
         "properties": {
@@ -4142,6 +4248,199 @@
           },
           "400": {
             "description": "Invalid interval value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/costs/timeseries/vendor": {
+      "get": {
+        "summary": "Dated spend on the VENDOR-COST basis (service-auth only)",
+        "description": "The dated spend of GET /v1/stats/public/costs/timeseries — same query parameters, same row set, same buckets — on the vendor-cost basis: what the same cost rows cost us from the vendor before our markup. Each row is priced by the costs-service price version of its cost name whose billed unit price equals the one the row froze and which was in force when the row was written; that version's vendor unit cost x quantity. Rows whose vendor cost is unknown are reported as unpriced billed spend, never folded in. Service-auth only: the vendor cost reveals the margin and is never served on a public route. 502 when the costs-service vendor catalogue cannot be read.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "description": "Bucket granularity. UTC-day aligned via DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day."
+            },
+            "required": false,
+            "description": "Bucket granularity. UTC-day aligned via DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day.",
+            "name": "interval",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "IANA timezone name used for bucket-boundary alignment (e.g. America/New_York). Default UTC. Invalid names fail the request."
+            },
+            "required": false,
+            "description": "IANA timezone name used for bucket-boundary alignment (e.g. America/New_York). Default UTC. Invalid names fail the request.",
+            "name": "tz",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): answer for ANY of them in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id; the numbers equal the sum of the per-id answers. Combines with every other filter (AND), including `campaignId`. Blank and duplicate ids are dropped; an empty list or more than 500 ids is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "campaignId"
+              ],
+              "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged)."
+            },
+            "required": false,
+            "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged).",
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug."
+            },
+            "required": false,
+            "description": "Filter by multiple feature slugs (comma-separated). Takes precedence over featureSlug.",
+            "name": "featureSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service."
+            },
+            "required": false,
+            "description": "Filter by workflow dynasty slug. Resolved to all versioned slugs via workflow-service.",
+            "name": "workflowDynastySlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only include runs with started_at >= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only include runs with started_at >= this ISO-8601 timestamp.",
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only include runs with started_at <= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only include runs with started_at <= this ISO-8601 timestamp.",
+            "name": "startedBefore",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "platform",
+                "org"
+              ],
+              "description": "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for — this is the figure to divide by the window length for a per-day burn rate. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). run_count and the bucket set are unaffected by the filter: it narrows only the summed cost rows. An unrecognised value is a 400 — never a silently unfiltered answer."
+            },
+            "required": false,
+            "description": "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for — this is the figure to divide by the window length for a per-day burn rate. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). run_count and the bucket set are unaffected by the filter: it narrows only the summed cost rows. An unrecognised value is a 400 — never a silently unfiltered answer.",
+            "name": "costSource",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dated vendor-basis cost buckets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VendorCostsTimeseriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "costs-service vendor catalogue unavailable or malformed",
             "content": {
               "application/json": {
                 "schema": {

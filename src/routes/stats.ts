@@ -155,7 +155,7 @@ function campaignIdsSql(ids: string[]) {
   return sql`r.campaign_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`;
 }
 
-function parseCsv(value: string | undefined): string[] | undefined {
+export function parseCsv(value: string | undefined): string[] | undefined {
   if (!value) return undefined;
   const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
   return parts.length > 0 ? parts : undefined;
@@ -933,7 +933,7 @@ const ALL_PUBLIC_GROUP_BY: Record<string, string> = {
 // an unfiltered request stays byte-identical to today. There is no default and
 // no fallback: an unrecognised value is a 400, never a silently unfiltered
 // answer to a question the caller did not ask.
-const PUBLIC_COST_SOURCES = ["platform", "org"] as const;
+export const PUBLIC_COST_SOURCES = ["platform", "org"] as const;
 
 /**
  * Build the payer predicate as a JOIN-ON fragment.
@@ -945,12 +945,12 @@ const PUBLIC_COST_SOURCES = ["platform", "org"] as const;
  * On the ON clause it narrows only the rows that get summed; every run-side
  * number (run_count, bucket set) is untouched.
  */
-function costSourceJoinSql(costSource: string | undefined, rcAlias = "rc") {
+export function costSourceJoinSql(costSource: string | undefined, rcAlias = "rc") {
   if (!costSource) return sql``;
   return sql`AND ${sql.raw(rcAlias)}.cost_source = ${costSource}`;
 }
 
-function buildPublicFilterSql(filters: {
+export function buildPublicFilterSql(filters: {
   orgId?: string;
   brandId?: string;
   campaignId?: string;
