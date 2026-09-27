@@ -142,25 +142,43 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
     const versions = await fetchVendorCostCatalog();
 
     const rows = (await db.execute(sql`
-      WITH v AS (${versionWindowsSql(versions)}),
-      costed AS (
+      -- Both CTEs are MATERIALIZED on purpose. Inlined, the planner walks runs in a
+      -- nested loop and rebuilds the version windows (sort + LEAD over the whole
+      -- catalogue) or a hash of them once PER RUN: 19s on a brand's cold-email
+      -- dynasty in prod (2026-09-27) against 0.8s for the public twin. Materialized,
+      -- the runs x costs scan happens once and the catalogue joins by one hash.
+      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      base AS MATERIALIZED (
         SELECT
           to_char(${bucketExpr}, 'YYYY-MM-DD') AS period,
           ${groupByCampaign ? sql`r.campaign_id,` : sql``}
           r.id AS run_id,
           rc.status,
           rc.cost_name,
-          rc.total_cost_in_usd_cents AS billed_total,
-          rc.quantity * v.vendor AS vendor_total,
-          (v.vendor IS NOT NULL) AS priced
+          rc.unit_cost_in_usd_cents,
+          rc.created_at,
+          rc.quantity,
+          rc.total_cost_in_usd_cents
         FROM runs r
         LEFT JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(costSource)}
-        LEFT JOIN v
-          ON v.cost_name = rc.cost_name
-         AND v.billed = rc.unit_cost_in_usd_cents
-         AND rc.created_at >= v.valid_from
-         AND (v.valid_to IS NULL OR rc.created_at < v.valid_to)
         ${whereSql}
+      ),
+      costed AS (
+        SELECT
+          b.period,
+          ${groupByCampaign ? sql`b.campaign_id,` : sql``}
+          b.run_id,
+          b.status,
+          b.cost_name,
+          b.total_cost_in_usd_cents AS billed_total,
+          b.quantity * v.vendor AS vendor_total,
+          (v.vendor IS NOT NULL) AS priced
+        FROM base b
+        LEFT JOIN v
+          ON v.cost_name = b.cost_name
+         AND v.billed = b.unit_cost_in_usd_cents
+         AND b.created_at >= v.valid_from
+         AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
       )
       SELECT
         period,
