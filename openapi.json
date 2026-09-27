@@ -934,6 +934,62 @@
           "targetOrgId"
         ]
       },
+      "BrandTransferMovedUsageResponse": {
+        "type": "object",
+        "properties": {
+          "sourceOrgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceBrandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetOrgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runsMoved": {
+            "type": "integer"
+          },
+          "costsMoved": {
+            "type": "integer"
+          },
+          "projectedGrossCents": {
+            "type": "string"
+          },
+          "projectedNetCents": {
+            "type": "string"
+          },
+          "actualGrossCents": {
+            "type": "string"
+          },
+          "actualNetCents": {
+            "type": "string"
+          },
+          "firstMovedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastMovedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "sourceOrgId",
+          "sourceBrandId",
+          "targetOrgId",
+          "runsMoved",
+          "costsMoved",
+          "projectedGrossCents",
+          "projectedNetCents",
+          "actualGrossCents",
+          "actualNetCents",
+          "firstMovedAt",
+          "lastMovedAt"
+        ]
+      },
       "DeleteRunsByOrgResponse": {
         "type": "object",
         "properties": {
@@ -3110,8 +3166,8 @@
     },
     "/internal/transfer-brand": {
       "post": {
-        "summary": "Transfer solo-brand runs to a different org",
-        "description": "Re-assigns all runs where brand_ids contains exactly one element matching sourceBrandId from sourceOrgId to targetOrgId. When targetBrandId is provided, also rewrites the brand reference. Skips co-branding rows (multiple brand IDs). Idempotent.",
+        "summary": "Move a brand's runs, costs and events to a different org",
+        "description": "Moves every run of sourceOrgId that belongs to sourceBrandId to targetOrgId: runs whose brand_ids contains the brand (solo AND co-branded: a co-branded run follows the first of its brands to leave the org), plus untagged runs (no brand_ids) of the brand's campaigns (a campaign carried by a run tagged with the brand). Each moved run's cost rows (runs_costs.organization_id) and telemetry events (run_events.org_id) move with it; org_actual_totals and the campaign rollup follow by trigger. When targetBrandId is provided, the brand id is rewritten inside brand_ids everywhere (and inside the moved runs' events). Processed in chunks, each its own transaction; the platform usage each chunk moved is frozen in the same transaction and served by GET /internal/brand-transfers/moved-usage. Idempotent and safe under concurrent calls: a re-run moves nothing and records nothing.",
         "security": [
           {
             "apiKey": []
@@ -3139,6 +3195,71 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brand-transfers/moved-usage": {
+      "get": {
+        "summary": "Platform usage moved by brand transfers (for balance-neutral billing)",
+        "description": "Sum, over every POST /internal/transfer-brand call for (sourceOrgId, sourceBrandId) -> targetOrgId, of the platform usage those calls moved from the source org to the target org. Frozen at each move, so later spend in either org never changes it; a re-run that moved nothing adds nothing. projected* = platform actual + provisioned cost rows whose org moved (the figures GET /internal/org-usage-total counts: spent_cents / net_spent_cents). actual* = platform committed cost rows of runs completed/failed at the move (the figures GET /internal/org-actual-total counts). Net = COALESCE(frozen net, gross) per row. Decimal strings; '0' when nothing moved. Answers only for moves already made: call POST /internal/transfer-brand first (idempotent).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "sourceOrgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "sourceBrandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "targetOrgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Moved usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandTransferMovedUsageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
             "content": {
               "application/json": {
                 "schema": {
