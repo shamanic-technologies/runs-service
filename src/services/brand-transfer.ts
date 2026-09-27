@@ -38,7 +38,13 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 
-export const TRANSFER_CHUNK_SIZE = 2000;
+// Measured on 40k runs + 40k costs + 120k events: 2000/tx 55s, 500/tx 15s, 200/tx
+// 19s. Each moved run upserts the SAME org_actual_totals and campaign-rollup rows,
+// and row versions made inside one transaction cannot be pruned until it commits,
+// so a big chunk walks an ever-longer version chain. ~0.37ms/run: Doc Dinners
+// (460k runs) is ~3 minutes, which can outlast a caller's HTTP timeout — the
+// server keeps going, and a re-call is safe and converges.
+export const TRANSFER_CHUNK_SIZE = 500;
 
 export type BrandTransferInput = {
   sourceBrandId: string;

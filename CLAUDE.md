@@ -299,7 +299,7 @@ parallel with every other service) moves a brand's history to another org.
   `org_actual_totals` and the campaign-day rollup follow by trigger. With
   `targetBrandId` the id is `array_replace`d in `brand_ids` everywhere and in the
   moved runs' `run_events.brand_ids`.
-- **Chunked (2000 runs/tx), idempotent, concurrency-safe**: the UPDATE re-checks
+- **Chunked (500 runs/tx — 2000 was 3.7x slower: in-tx row versions of the shared total/rollup rows cannot be pruned), idempotent, concurrency-safe**: the UPDATE re-checks
   `organization_id = source` under the row lock; all figures come from the rows
   THAT chunk's UPDATE returned. A re-run moves and records nothing. Chunking keeps
   the source org's `org_actual_totals` row lock short (it is the agency's org).
