@@ -2083,6 +2083,93 @@
           "buckets"
         ]
       },
+      "VendorCostsGroupedResponse": {
+        "type": "object",
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimensions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "description": "One key per groupBy key (workflowDynastySlug replaces workflowSlug)."
+                },
+                "totalCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross, status IN ('actual','provisioned') — equal to totalCostInUsdCents of GET /v1/stats/costs / GET /v1/stats/public/costs for the same filters and group."
+                },
+                "actualCostInUsdCents": {
+                  "type": "string"
+                },
+                "provisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorTotalCostInUsdCents": {
+                  "type": "string",
+                  "description": "VENDOR cost (before our markup) of the actual+provisioned rows whose vendor cost is known. Unpriced rows excluded, never approximated."
+                },
+                "vendorActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorProvisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Vendor cost of refunded rows (happened, not charged). Not in vendorTotal."
+                },
+                "unpricedTotalCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross of the actual+provisioned rows with NO known vendor cost. Never folded into vendorTotal, never zeroed."
+                },
+                "unpricedActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedProvisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedRefundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedCostNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Distinct cost names of the unpriced actual/provisioned rows in this group, sorted."
+                }
+              },
+              "required": [
+                "dimensions",
+                "totalCostInUsdCents",
+                "actualCostInUsdCents",
+                "provisionedCostInUsdCents",
+                "refundedCostInUsdCents",
+                "vendorTotalCostInUsdCents",
+                "vendorActualCostInUsdCents",
+                "vendorProvisionedCostInUsdCents",
+                "vendorRefundedCostInUsdCents",
+                "unpricedTotalCostInUsdCents",
+                "unpricedActualCostInUsdCents",
+                "unpricedProvisionedCostInUsdCents",
+                "unpricedRefundedCostInUsdCents",
+                "unpricedCostNames"
+              ]
+            }
+          }
+        },
+        "required": [
+          "groups"
+        ]
+      },
       "VendorRunsResponse": {
         "type": "object",
         "properties": {
@@ -4609,6 +4696,203 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VendorCostsTimeseriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "costs-service vendor catalogue unavailable or malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/costs/vendor": {
+      "get": {
+        "summary": "Undated grouped spend on the VENDOR-COST basis (service-auth only)",
+        "description": "The undated grouped cost aggregation (GET /v1/stats/costs org-scoped, GET /v1/stats/public/costs fleet) on the vendor-cost basis, priced exactly as GET /internal/stats/costs/timeseries/vendor prices a row. Groups carry only runs with at least one actual/provisioned/refunded cost row (a group whose rows are all cancelled or absent is omitted — its figures would all be 0). No runCount. Service-auth only: the vendor cost reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated, required. Any of: brandId, workflowSlug, workflowDynastySlug, campaignId, featureSlug, audienceId, serviceName, taskName, costName. Same SQL expression per key as GET /v1/stats/costs (audienceId = COALESCE(cost row, run)). workflowSlug and workflowDynastySlug are exclusive.",
+              "example": "audienceId,workflowSlug"
+            },
+            "required": true,
+            "description": "Comma-separated, required. Any of: brandId, workflowSlug, workflowDynastySlug, campaignId, featureSlug, audienceId, serviceName, taskName, costName. Same SQL expression per key as GET /v1/stats/costs (audienceId = COALESCE(cost row, run)). workflowSlug and workflowDynastySlug are exclusive.",
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Absent = the whole fleet (every org)."
+            },
+            "required": false,
+            "description": "Absent = the whole fleet (every org).",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign FAMILY, at most 500."
+            },
+            "required": false,
+            "description": "Comma-separated campaign FAMILY, at most 500.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated; wins over featureSlug."
+            },
+            "required": false,
+            "description": "Comma-separated; wins over featureSlug.",
+            "name": "featureSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated; wins over workflowSlug."
+            },
+            "required": false,
+            "description": "Comma-separated; wins over workflowSlug.",
+            "name": "workflowSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Resolved to its versioned slugs via workflow-service; wins over workflowSlugs."
+            },
+            "required": false,
+            "description": "Resolved to its versioned slugs via workflow-service; wins over workflowSlugs.",
+            "name": "workflowDynastySlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "COALESCE(cost row audience, run audience) = value."
+            },
+            "required": false,
+            "description": "COALESCE(cost row audience, run audience) = value.",
+            "name": "audienceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "startedBefore",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "platform",
+                "org"
+              ],
+              "description": "Payer filter. Absent = both."
+            },
+            "required": false,
+            "description": "Payer filter. Absent = both.",
+            "name": "costSource",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grouped vendor-basis costs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VendorCostsGroupedResponse"
                 }
               }
             }
