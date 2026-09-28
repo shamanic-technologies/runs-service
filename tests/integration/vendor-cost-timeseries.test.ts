@@ -265,6 +265,48 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
       expect(res.body.runs[0].provisionedCostInUsdCents).toBe(detail.body.provisionedCostInUsdCents);
     });
 
+    it("GET /v1/runs?include=subtreeCost states the same subtree billed cost as the detail and the vendor list, and nothing vendor", async () => {
+      const { orgId: _o, ...listQuery } = RUNS_QUERY;
+      const q = { ...listQuery, taskName: "execute-workflow", limit: "5" };
+      const [list, vendor] = await Promise.all([
+        request(app).get("/v1/runs").query({ ...q, include: "subtreeCost" }).set({ ...API_KEY, "x-org-id": ORG_ID }),
+        request(app).get("/internal/runs/vendor").query({ ...RUNS_QUERY, taskName: "execute-workflow", limit: "5" }).set(API_KEY),
+      ]);
+      expect(list.status).toBe(200);
+      expect(list.body.runs).toHaveLength(1);
+      const r = list.body.runs[0];
+      expect(r).toMatchObject({
+        ownCostInUsdCents: "0.0000000000",
+        totalCostInUsdCents: "68.0000000000",
+        actualCostInUsdCents: "68.0000000000",
+        provisionedCostInUsdCents: "0.0000000000",
+      });
+      expect(Object.keys(r).filter((k) => /vendor|unpriced/i.test(k))).toEqual([]);
+      const v = vendor.body.runs[0];
+      for (const k of ["totalCostInUsdCents", "actualCostInUsdCents", "provisionedCostInUsdCents"]) expect(r[k]).toBe(v[k]);
+      const detail = await request(app).get(`/v1/runs/${r.id}`).set({ ...API_KEY, "x-org-id": ORG_ID });
+      expect(r.totalCostInUsdCents).toBe(detail.body.totalCostInUsdCents);
+
+      // Without include, the list is unchanged: no subtree field.
+      const plain = await request(app).get("/v1/runs").query(q).set({ ...API_KEY, "x-org-id": ORG_ID });
+      expect("totalCostInUsdCents" in plain.body.runs[0]).toBe(false);
+
+      // A run with no cost rows anywhere reads 0.
+      const lone = await request(app)
+        .get("/v1/runs")
+        .query({ ...listQuery, limit: "50", include: "subtreeCost" })
+        .set({ ...API_KEY, "x-org-id": ORG_ID });
+      for (const row of lone.body.runs) expect(typeof row.totalCostInUsdCents).toBe("string");
+    });
+
+    it("include=subtreeCost needs a bounded page, and an unknown include is refused", async () => {
+      const h = { ...API_KEY, "x-org-id": ORG_ID };
+      expect((await request(app).get("/v1/runs").query({ include: "subtreeCost" }).set(h)).status).toBe(400);
+      expect((await request(app).get("/v1/runs").query({ include: "subtreeCost", limit: "501" }).set(h)).status).toBe(400);
+      expect((await request(app).get("/v1/runs").query({ include: "nope", limit: "5" }).set(h)).status).toBe(400);
+      expect((await request(app).get("/v1/runs").query({ include: "subtreeCost", limit: "500" }).set(h)).status).toBe(200);
+    });
+
     it("requires orgId and the service api key", async () => {
       const noOrg = await request(app).get("/internal/runs/vendor").query({ brandId: BRAND_ID }).set(API_KEY);
       expect(noOrg.status).toBe(400);
