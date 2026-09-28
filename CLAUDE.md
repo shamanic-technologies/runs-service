@@ -292,7 +292,7 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   never a vendor figure. OPT-IN and requires `limit` 1..500: hot callers (campaign-service
   gate-check lists completed campaign-trigger ROOTS with `limit: maxLeads`, whose subtrees are whole
   campaign trees) never read it and must not pay the walk. Prod: 50 execute-workflow runs, 455
-  descendants, ~36 ms warm. An unknown `include` value is a 400.
+  descendants: the walk is a per-run LATERAL on idx_runs_costs_run_agg (~15 ms join; a plain JOIN hash-joined a seq scan of the ledger, 1.2 s). An unknown `include` value is a 400.
 - Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
