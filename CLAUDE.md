@@ -25,7 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
-- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/runs/vendor` (service-auth). See "Vendor-cost basis".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -317,6 +317,17 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
   row written before 2026-05-03 (prices costs-service no longer holds).
+- **Grouped twin `GET /internal/stats/costs/vendor`** — the UNDATED grouped aggregation
+  (`/v1/stats/costs` org-scoped, `/v1/stats/public/costs` fleet) on the same basis, same
+  pricing, same field vocabulary (`totalCostInUsdCents` billed gross, `vendor*`, `unpriced*`,
+  `unpricedCostNames`) under `groups[].dimensions`. `groupBy` (required, comma list): brandId,
+  workflowSlug | workflowDynastySlug, campaignId, featureSlug, audienceId (COALESCE cost row, run),
+  serviceName, taskName, costName. Filters: `orgId` (absent = fleet), brandId, campaignId(s),
+  featureSlug(s), workflowSlug(s), workflowDynastySlug, audienceId, serviceName, taskName,
+  startedAfter/Before, costSource. INNER join on actual/provisioned/refunded rows: a group with
+  none is ABSENT (all its figures would be 0) and there is no runCount. Billed totals equal the
+  billed reads' per group (guarded in `vendor-cost-grouped.test.ts`). Prod: fleet
+  `sales-cold-email-outreach` by workflow ~2-4 s, one brand's audience x workflow ~1.2 s.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 

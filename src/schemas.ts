@@ -1628,6 +1628,64 @@ registry.registerPath({
   },
 });
 
+export const VendorCostsGroupedQuerySchema = z.object({
+  groupBy: z.string().openapi({ description: "Comma-separated, required. Any of: brandId, workflowSlug, workflowDynastySlug, campaignId, featureSlug, audienceId, serviceName, taskName, costName. Same SQL expression per key as GET /v1/stats/costs (audienceId = COALESCE(cost row, run)). workflowSlug and workflowDynastySlug are exclusive.", example: "audienceId,workflowSlug" }),
+  orgId: z.string().optional().openapi({ description: "Absent = the whole fleet (every org)." }),
+  brandId: z.string().optional(),
+  campaignId: z.string().optional(),
+  campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign FAMILY, at most 500." }),
+  featureSlug: z.string().optional(),
+  featureSlugs: z.string().optional().openapi({ description: "Comma-separated; wins over featureSlug." }),
+  workflowSlug: z.string().optional(),
+  workflowSlugs: z.string().optional().openapi({ description: "Comma-separated; wins over workflowSlug." }),
+  workflowDynastySlug: z.string().optional().openapi({ description: "Resolved to its versioned slugs via workflow-service; wins over workflowSlugs." }),
+  audienceId: z.string().optional().openapi({ description: "COALESCE(cost row audience, run audience) = value." }),
+  serviceName: z.string().optional(),
+  taskName: z.string().optional(),
+  startedAfter: z.string().optional(),
+  startedBefore: z.string().optional(),
+  costSource: z.enum(["platform", "org"]).optional().openapi({ description: "Payer filter. Absent = both." }),
+});
+
+export const VendorCostsGroupedResponseSchema = z
+  .object({
+    groups: z.array(
+      z.object({
+        dimensions: z.record(z.string(), z.string().nullable()).openapi({ description: "One key per groupBy key (workflowDynastySlug replaces workflowSlug)." }),
+        totalCostInUsdCents: z.string().openapi({ description: "BILLED gross, status IN ('actual','provisioned') — equal to totalCostInUsdCents of GET /v1/stats/costs / GET /v1/stats/public/costs for the same filters and group." }),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        refundedCostInUsdCents: z.string(),
+        vendorTotalCostInUsdCents: z.string().openapi({ description: "VENDOR cost (before our markup) of the actual+provisioned rows whose vendor cost is known. Unpriced rows excluded, never approximated." }),
+        vendorActualCostInUsdCents: z.string(),
+        vendorProvisionedCostInUsdCents: z.string(),
+        vendorRefundedCostInUsdCents: z.string().openapi({ description: "Vendor cost of refunded rows (happened, not charged). Not in vendorTotal." }),
+        unpricedTotalCostInUsdCents: z.string().openapi({ description: "BILLED gross of the actual+provisioned rows with NO known vendor cost. Never folded into vendorTotal, never zeroed." }),
+        unpricedActualCostInUsdCents: z.string(),
+        unpricedProvisionedCostInUsdCents: z.string(),
+        unpricedRefundedCostInUsdCents: z.string(),
+        unpricedCostNames: z.array(z.string()).openapi({ description: "Distinct cost names of the unpriced actual/provisioned rows in this group, sorted." }),
+      })
+    ),
+  })
+  .openapi("VendorCostsGroupedResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/vendor",
+  summary: "Undated grouped spend on the VENDOR-COST basis (service-auth only)",
+  description:
+    "The undated grouped cost aggregation (GET /v1/stats/costs org-scoped, GET /v1/stats/public/costs fleet) on the vendor-cost basis, priced exactly as GET /internal/stats/costs/timeseries/vendor prices a row. Groups carry only runs with at least one actual/provisioned/refunded cost row (a group whose rows are all cancelled or absent is omitted — its figures would all be 0). No runCount. Service-auth only: the vendor cost reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: { query: VendorCostsGroupedQuerySchema },
+  responses: {
+    200: { description: "Grouped vendor-basis costs", content: { "application/json": { schema: VendorCostsGroupedResponseSchema } } },
+    400: { description: "Invalid query parameters", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/runs/vendor",
