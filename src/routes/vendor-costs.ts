@@ -7,6 +7,7 @@ import { resolveWorkflowDynastySlugs, type IdentityHeaders } from "../services/d
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { VendorCostCatalogError, fetchVendorCostCatalog, type VendorCostVersion } from "../services/vendor-costs.js";
 import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv } from "./stats.js";
+import { listRunsPage } from "./runs.js";
 
 const router = Router();
 
@@ -217,6 +218,100 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
     res.json({ interval, timezone, buckets });
   } catch (err) {
     console.error("[Runs Service] Error in GET /internal/stats/costs/timeseries/vendor:", err);
+    if (err instanceof VendorCostCatalogError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * GET /internal/runs/vendor — the run list of GET /v1/runs (same query
+ * parameters, same runs, same order, same page) with each run's OWN cost also
+ * stated on the VENDOR-COST basis: what that run's own cost rows cost us from
+ * the vendor, before our markup, priced exactly as the vendor timeseries above.
+ *
+ * The org is the `orgId` query parameter, not `x-org-id`: a staff caller reads
+ * any org. The billed `own*` fields are GET /v1/runs' own, byte-for-byte.
+ *
+ * Service-auth only — the vendor cost reveals the margin.
+ */
+router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
+  try {
+    const orgId = req.query.orgId;
+    if (typeof orgId !== "string" || !UUID_RE.test(orgId)) {
+      res.status(400).json({ error: "orgId query parameter is required and must be a valid UUID" });
+      return;
+    }
+
+    const page = await listRunsPage(req.query as Record<string, unknown>, orgId);
+    if ("error" in page) {
+      res.status(400).json({ error: page.error });
+      return;
+    }
+    const { rows: result, limit, offset } = page;
+
+    const versions = await fetchVendorCostCatalog();
+    const vendorByRun = new Map<string, any>();
+    if (result.length > 0) {
+      const ids = result.map((r) => r.id);
+      const rows = (await db.execute(sql`
+        WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+        costed AS (
+          SELECT
+            rc.run_id,
+            rc.status,
+            rc.cost_name,
+            rc.total_cost_in_usd_cents AS billed_total,
+            rc.quantity * v.vendor AS vendor_total,
+            (v.vendor IS NOT NULL) AS priced
+          FROM runs_costs rc
+          LEFT JOIN v
+            ON v.cost_name = rc.cost_name
+           AND v.billed = rc.unit_cost_in_usd_cents
+           AND rc.created_at >= v.valid_from
+           AND (v.valid_to IS NULL OR rc.created_at < v.valid_to)
+          WHERE rc.run_id = ANY(string_to_array(${ids.join(",")}, ',')::uuid[])
+        )
+        SELECT
+          run_id,
+          ${sumsSql()},
+          COALESCE(
+            array_agg(DISTINCT cost_name ORDER BY cost_name)
+              FILTER (WHERE status IN ('actual','provisioned') AND NOT priced),
+            '{}'
+          ) AS unpriced_cost_names
+        FROM costed
+        GROUP BY run_id
+      `)) as any[];
+      for (const row of rows) vendorByRun.set(row.run_id as string, row);
+    }
+
+    // A run with no own cost rows has no row here; its billed own cost is 0 too.
+    const zero = "0";
+    const formattedRuns = result.map((r) => {
+      const v = vendorByRun.get(r.id);
+      return {
+        ...r,
+        ownCostInUsdCents: fixed(r.ownCostInUsdCents),
+        ownActualCostInUsdCents: fixed(r.ownActualCostInUsdCents),
+        ownProvisionedCostInUsdCents: fixed(r.ownProvisionedCostInUsdCents),
+        vendorOwnCostInUsdCents: fixed(v?.vendor_total ?? zero),
+        vendorOwnActualCostInUsdCents: fixed(v?.vendor_actual ?? zero),
+        vendorOwnProvisionedCostInUsdCents: fixed(v?.vendor_provisioned ?? zero),
+        unpricedOwnCostInUsdCents: fixed(v?.unpriced_total ?? zero),
+        unpricedOwnActualCostInUsdCents: fixed(v?.unpriced_actual ?? zero),
+        unpricedOwnProvisionedCostInUsdCents: fixed(v?.unpriced_provisioned ?? zero),
+        unpricedCostNames: (v?.unpriced_cost_names as string[] | undefined) ?? [],
+      };
+    });
+
+    res.json({ runs: formattedRuns, ...(limit !== undefined && { limit }), offset });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/runs/vendor:", err);
     if (err instanceof VendorCostCatalogError) {
       res.status(502).json({ error: err.message });
       return;
