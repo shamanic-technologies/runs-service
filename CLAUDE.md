@@ -286,6 +286,13 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   same matching as the timeseries. Org from the `orgId` query (staff read any org), not `x-org-id`.
   ⚠️ An `execute-workflow` run has NO own cost rows (0 of 2,368 in prod, 2026-09-28): its cost is
   its subtree, so a Workflow page must read `total*` / `vendorTotal*`, never `own*`.
+- **Customer twin of `total*`: `GET /v1/runs?include=subtreeCost`** adds each run's SUBTREE billed
+  cost (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, same names and
+  values as `/internal/runs/vendor` and `GET /v1/runs/:id`; `src/services/run-subtree-cost.ts`),
+  never a vendor figure. OPT-IN and requires `limit` 1..500: hot callers (campaign-service
+  gate-check lists completed campaign-trigger ROOTS with `limit: maxLeads`, whose subtrees are whole
+  campaign trees) never read it and must not pay the walk. Prod: 50 execute-workflow runs, 455
+  descendants, ~36 ms warm. An unknown `include` value is a 400.
 - Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every

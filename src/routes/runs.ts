@@ -12,6 +12,11 @@ import {
 import { notifyUsage } from "../services/billing.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import {
+  parseRunListInclude,
+  subtreeBilledCostByRoot,
+  SUBTREE_COST_MAX_LIMIT,
+} from "../services/run-subtree-cost.js";
+import {
   resolveUsageDiscount,
   netFromGross,
   UsageDiscountError,
@@ -989,18 +994,47 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
+    const include = parseRunListInclude(req.query.include);
+    if ("error" in include) {
+      return res.status(400).json({ error: include.error });
+    }
+    const withSubtree = include.includes.has("subtreeCost");
+    if (withSubtree) {
+      const limitNum = req.query.limit === undefined ? NaN : Number(req.query.limit);
+      if (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > SUBTREE_COST_MAX_LIMIT) {
+        return res.status(400).json({
+          error: `include=subtreeCost requires a limit between 1 and ${SUBTREE_COST_MAX_LIMIT}`,
+        });
+      }
+    }
+
     const page = await listRunsPage(req.query as Record<string, unknown>, req.orgId);
     if ("error" in page) {
       return res.status(400).json({ error: page.error });
     }
     const { rows: result, limit, offset } = page;
 
-    const formattedRuns = result.map((r) => ({
-      ...r,
-      ownCostInUsdCents: new Decimal(r.ownCostInUsdCents).toFixed(10),
-      ownActualCostInUsdCents: new Decimal(r.ownActualCostInUsdCents).toFixed(10),
-      ownProvisionedCostInUsdCents: new Decimal(r.ownProvisionedCostInUsdCents).toFixed(10),
-    }));
+    // Opt-in: an execute-workflow run has no own cost rows, its cost is its subtree.
+    // Walked for the page only, and only when asked (hot callers list campaign-trigger
+    // roots whose subtrees are whole campaign trees and never read this).
+    const subtree = withSubtree ? await subtreeBilledCostByRoot(result.map((r) => r.id)) : undefined;
+
+    const formattedRuns = result.map((r) => {
+      const base = {
+        ...r,
+        ownCostInUsdCents: new Decimal(r.ownCostInUsdCents).toFixed(10),
+        ownActualCostInUsdCents: new Decimal(r.ownActualCostInUsdCents).toFixed(10),
+        ownProvisionedCostInUsdCents: new Decimal(r.ownProvisionedCostInUsdCents).toFixed(10),
+      };
+      if (!subtree) return base;
+      const t = subtree.get(r.id);
+      return {
+        ...base,
+        totalCostInUsdCents: new Decimal(t?.total_cost ?? "0").toFixed(10),
+        actualCostInUsdCents: new Decimal(t?.actual_cost ?? "0").toFixed(10),
+        provisionedCostInUsdCents: new Decimal(t?.provisioned_cost ?? "0").toFixed(10),
+      };
+    });
 
     res.json({ runs: formattedRuns, ...(limit !== undefined && { limit }), offset });
   } catch (err) {
