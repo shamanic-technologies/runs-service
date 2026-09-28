@@ -287,7 +287,17 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
             rc.quantity * v.vendor AS vendor_total,
             (v.vendor IS NOT NULL) AS priced
           FROM descendants d
-          INNER JOIN runs_costs rc ON rc.run_id = d.id
+          -- Per-run LATERAL, as GET /v1/runs?include=subtreeCost: a plain JOIN
+          -- makes the planner trust the recursive CTE's estimate and hash-join a
+          -- seq scan of the whole ledger (~1.3 s a 20-run page). OFFSET 0 keeps
+          -- Postgres from flattening the subquery back into that join, so each
+          -- run is looked up on its run_id index.
+          CROSS JOIN LATERAL (
+            SELECT rc.run_id, rc.status, rc.cost_name, rc.total_cost_in_usd_cents,
+                   rc.quantity, rc.unit_cost_in_usd_cents, rc.created_at
+            FROM runs_costs rc WHERE rc.run_id = d.id
+            OFFSET 0
+          ) rc
           LEFT JOIN v
             ON v.cost_name = rc.cost_name
            AND v.billed = rc.unit_cost_in_usd_cents
