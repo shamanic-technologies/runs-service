@@ -52,9 +52,21 @@ export async function subtreeBilledCostByRoot(runIds: string[]): Promise<Map<str
       UNION ALL
       SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
     )
-    SELECT d.root_run_id, ${costAggregateSelectSql("rc")}
+    -- Per-run LATERAL aggregate, then summed per root. A plain JOIN to runs_costs
+    -- makes the planner trust the recursive CTE's estimate (~270k rows for 50
+    -- roots in prod) and hash-join a seq scan of the whole ledger: 1.2 s for a
+    -- 50-run page. The LATERAL walks idx_runs_costs_run_agg per run: ~15 ms.
+    SELECT
+      d.root_run_id,
+      SUM(c.total_cost::numeric)::text AS total_cost,
+      SUM(c.actual_cost::numeric)::text AS actual_cost,
+      SUM(c.provisioned_cost::numeric)::text AS provisioned_cost
     FROM descendants d
-    INNER JOIN runs_costs rc ON rc.run_id = d.id
+    CROSS JOIN LATERAL (
+      SELECT ${costAggregateSelectSql("rc")}, count(*) AS n
+      FROM runs_costs rc WHERE rc.run_id = d.id
+    ) c
+    WHERE c.n > 0
     GROUP BY d.root_run_id
   `)) as any[];
   for (const row of rows) out.set(row.root_run_id as string, row as SubtreeBilledCost);
