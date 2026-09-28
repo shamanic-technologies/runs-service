@@ -306,6 +306,48 @@ export const RunWithCostsSchema = z
   })
   .openapi("RunWithCosts");
 
+export const ListRunsQuerySchema = z.object({
+  userId: z.string().uuid().optional(),
+  brandId: z.string().optional(),
+  campaignId: z.string().optional(),
+  campaignIds: z.string().optional().openapi({
+    description:
+      "Comma-separated campaign ids (at most 500): the runs of ANY of them, in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id. With `limit`, the page is the newest `limit` runs across the whole set, the same rows you get by asking each id for `limit` runs and keeping the newest `limit` of the union. Combines with every other filter (AND), including `campaignId`. An empty list or more than 500 ids is a 400.",
+  }),
+  workflowSlug: z.string().optional(),
+  featureSlug: z.string().optional(),
+  goal: GoalEnum.optional(),
+  brandProfileId: z.string().uuid().optional(),
+  audienceId: z.string().uuid().optional(),
+  workflowContext: z.string().optional(),
+  serviceName: z.string().optional(),
+  taskName: z.string().optional(),
+  status: z.string().optional(),
+  parentRunId: z.string().uuid().optional(),
+  startedAfter: z.string().datetime().optional(),
+  startedBefore: z.string().datetime().optional(),
+  limit: z.string().optional(),
+  offset: z.string().optional(),
+});
+
+export const VendorRunsResponseSchema = z
+  .object({
+    runs: z.array(
+      RunWithOwnCostSchema.extend({
+        vendorOwnCostInUsdCents: z.string().openapi({ description: "VENDOR cost (before our markup, per costs-service's statement for the price version in force when each row was written) of the run's own status IN ('actual','provisioned') cost rows whose vendor cost is known: SUM(quantity x vendor unit cost). Excludes unpriced rows, never approximated at the billed price." }),
+        vendorOwnActualCostInUsdCents: z.string(),
+        vendorOwnProvisionedCostInUsdCents: z.string(),
+        unpricedOwnCostInUsdCents: z.string().openapi({ description: "BILLED amount of the run's own actual/provisioned rows with NO known vendor cost. ownCostInUsdCents - unpricedOwnCostInUsdCents is the billed amount of the priced rows. Non-zero means vendorOwnCostInUsdCents does not cover the whole run." }),
+        unpricedOwnActualCostInUsdCents: z.string(),
+        unpricedOwnProvisionedCostInUsdCents: z.string(),
+        unpricedCostNames: z.array(z.string()).openapi({ description: "Distinct cost names of the run's unpriced actual/provisioned rows, sorted. Empty = the vendor figure covers the whole run." }),
+      }),
+    ),
+    limit: z.number().optional(),
+    offset: z.number(),
+  })
+  .openapi("VendorRunsResponse");
+
 export const ListRunsResponseSchema = z
   .object({
     runs: z.array(RunWithOwnCostSchema),
@@ -451,29 +493,7 @@ registry.registerPath({
     "Lists runs for the organization identified by x-org-id header. Returns one item per run, ordered by startedAt DESC (most recent first). Each item is a `RunWithOwnCost` — the full `Run` (via allOf, so the stable `id` UUID is on the embedded base schema) plus own-cost totals (`ownCostInUsdCents`, `ownActualCostInUsdCents`, `ownProvisionedCostInUsdCents`) summed across the run's own `runs_costs` rows. There is no per-cost-name breakdown at this level; for that call `GET /v1/runs/{id}` and read `RunWithCosts.costs[]`. Suitable for an org-wide ledger UI: use `id` as the row key and `taskName` (or `serviceName.taskName`) as the row label.",
   security: [{ apiKey: [] }],
   request: {
-    query: z.object({
-      userId: z.string().uuid().optional(),
-      brandId: z.string().optional(),
-      campaignId: z.string().optional(),
-      campaignIds: z.string().optional().openapi({
-        description:
-          "Comma-separated campaign ids (at most 500): the runs of ANY of them, in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id. With `limit`, the page is the newest `limit` runs across the whole set, the same rows you get by asking each id for `limit` runs and keeping the newest `limit` of the union. Combines with every other filter (AND), including `campaignId`. An empty list or more than 500 ids is a 400.",
-      }),
-      workflowSlug: z.string().optional(),
-      featureSlug: z.string().optional(),
-      goal: GoalEnum.optional(),
-      brandProfileId: z.string().uuid().optional(),
-      audienceId: z.string().uuid().optional(),
-      workflowContext: z.string().optional(),
-      serviceName: z.string().optional(),
-      taskName: z.string().optional(),
-      status: z.string().optional(),
-      parentRunId: z.string().uuid().optional(),
-      startedAfter: z.string().datetime().optional(),
-      startedBefore: z.string().datetime().optional(),
-      limit: z.string().optional(),
-      offset: z.string().optional(),
-    }),
+    query: ListRunsQuerySchema,
   },
   responses: {
     200: {
@@ -1603,6 +1623,22 @@ registry.registerPath({
   responses: {
     200: { description: "Dated vendor-basis cost buckets", content: { "application/json": { schema: VendorCostsTimeseriesResponseSchema } } },
     400: { description: "Invalid query parameters", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/runs/vendor",
+  summary: "Run list with each run's own cost on the VENDOR-COST basis (service-auth only)",
+  description:
+    "The run list of GET /v1/runs — same query parameters, same runs, same order, same page — for the org given by the REQUIRED `orgId` query parameter (not x-org-id: a staff caller reads any org). Each run carries GET /v1/runs' billed own-cost fields byte-for-byte, plus its own cost on the vendor-cost basis: each own cost row priced by the costs-service price version of its cost name whose billed unit price equals the one the row froze and which was in force when the row was written (the same pricing as GET /internal/stats/costs/timeseries/vendor). Rows with no known vendor cost are reported as unpriced billed spend with their cost names, never folded in or zeroed. Service-auth only: the vendor cost reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: { query: ListRunsQuerySchema.extend({ orgId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Runs with billed and vendor-basis own cost", content: { "application/json": { schema: VendorRunsResponseSchema } } },
+    400: { description: "Missing/invalid orgId or invalid query parameters", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
   },

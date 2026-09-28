@@ -989,91 +989,11 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get("/v1/runs", requireApiKey, async (req, res) => {
   try {
-    const {
-      userId, brandId, campaignId, campaignIds: campaignIdsStr, workflowSlug, featureSlug, goal, brandProfileId,
-      audienceId, workflowContext, serviceName, taskName,
-      status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
-    } = req.query;
-
-    const parsedCampaignIds = parseCampaignIds(campaignIdsStr);
-    if (parsedCampaignIds.error) {
-      return res.status(400).json({ error: parsedCampaignIds.error });
+    const page = await listRunsPage(req.query as Record<string, unknown>, req.orgId);
+    if ("error" in page) {
+      return res.status(400).json({ error: page.error });
     }
-    const campaignIds = parsedCampaignIds.ids;
-
-    const conditions = [eq(runs.organizationId, req.orgId)];
-    if (userId) conditions.push(eq(runs.userId, userId as string));
-    if (brandId) conditions.push(sql`${brandId} = ANY(${runs.brandIds})`);
-    if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
-    if (workflowSlug) conditions.push(eq(runs.workflowSlug, workflowSlug as string));
-    if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
-    if (goal) conditions.push(eq(runs.goal, goal as string));
-    if (brandProfileId) conditions.push(eq(runs.brandProfileId, brandProfileId as string));
-    if (audienceId) conditions.push(eq(runs.audienceId, audienceId as string));
-    if (workflowContext) conditions.push(eq(runs.workflowContext, workflowContext as string));
-    if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
-    if (taskName) conditions.push(eq(runs.taskName, taskName as string));
-    if (status) conditions.push(eq(runs.status, status as string));
-    if (parentRunId) conditions.push(eq(runs.parentRunId, parentRunId as string));
-    if (startedAfter) conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
-    if (startedBefore) conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
-
-    const limit = limitStr ? Number(limitStr) : undefined;
-    const offset = offsetStr ? Number(offsetStr) : 0;
-
-    // Which runs are on the page. Undefined = every run the filters match.
-    let pageIds: string[] | undefined;
-    if (limit !== undefined && campaignIds) {
-      // Each member's newest (limit + offset) runs off idx_runs_campaign_started,
-      // then the newest of those overall: exactly the global page, since a run
-      // carries one campaign and a run outside its member's top (limit + offset)
-      // cannot be in the global top (limit + offset) either.
-      //
-      // Bitmap scans are off for this one statement. The planner estimates a few
-      // hundred matches per member, so once `limit` nears that estimate it swaps the
-      // ordered index walk for a BitmapAnd with idx_runs_org_service (220k rows for
-      // a large org) plus a sort, per member: 2s instead of 0.3s at limit=201 on
-      // the 47-row family in prod. With bitmaps off it walks the index in order
-      // and stops at the limit, or uses a selective btree when a filter has one.
-      const perMember = limit + offset;
-      const rows = await db.transaction(async (tx) => {
-        await tx.execute(sql`SET LOCAL enable_bitmapscan = off`);
-        return tx.execute(sql`
-          SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
-          CROSS JOIN LATERAL (
-            SELECT ${runs.id} AS id, ${runs.startedAt} AS started_at FROM ${runs}
-            WHERE ${runs.campaignId} = m.cid AND ${and(...conditions)}
-            ORDER BY ${runs.startedAt} DESC, ${runs.id} DESC
-            LIMIT ${perMember}
-          ) p
-          ORDER BY p.started_at DESC, p.id DESC
-          LIMIT ${limit} OFFSET ${offset}
-        `);
-      });
-      pageIds = (rows as unknown as Array<{ id: string }>).map((r) => r.id);
-    } else {
-      if (campaignIds) conditions.push(inArray(runs.campaignId, campaignIds));
-      if (limit !== undefined) {
-        const page = db
-          .select({ id: runs.id })
-          .from(runs)
-          .where(and(...conditions))
-          .orderBy(desc(runs.startedAt), desc(runs.id))
-          .$dynamic();
-        page.limit(limit);
-        if (offset) page.offset(offset);
-        pageIds = (await page).map((r) => r.id);
-      }
-    }
-
-    let result: Awaited<ReturnType<typeof selectRunsWithOwnCost>> = [];
-    if (pageIds === undefined) {
-      const query = selectRunsWithOwnCost(and(...conditions)!);
-      if (offset) query.offset(offset);
-      result = await query;
-    } else if (pageIds.length > 0) {
-      result = await selectRunsWithOwnCost(inArray(runs.id, pageIds));
-    }
+    const { rows: result, limit, offset } = page;
 
     const formattedRuns = result.map((r) => ({
       ...r,
@@ -1088,6 +1008,106 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+export type RunWithOwnCost = Awaited<ReturnType<typeof selectRunsWithOwnCost>>[number];
+
+/**
+ * The page of runs GET /v1/runs serves for `query` in `orgId`, each with the sum
+ * of its own cost rows (raw numeric text). Shared with the staff vendor-basis twin
+ * (GET /internal/runs/vendor) so both select exactly the same runs in the same order.
+ */
+export async function listRunsPage(
+  query: Record<string, unknown>,
+  orgId: string,
+): Promise<{ error: string } | { rows: RunWithOwnCost[]; limit: number | undefined; offset: number }> {
+  const {
+    userId, brandId, campaignId, campaignIds: campaignIdsStr, workflowSlug, featureSlug, goal, brandProfileId,
+    audienceId, workflowContext, serviceName, taskName,
+    status, parentRunId, startedAfter, startedBefore, limit: limitStr, offset: offsetStr,
+  } = query;
+
+  const parsedCampaignIds = parseCampaignIds(campaignIdsStr);
+  if (parsedCampaignIds.error) {
+    return { error: parsedCampaignIds.error };
+  }
+  const campaignIds = parsedCampaignIds.ids;
+
+  const conditions = [eq(runs.organizationId, orgId)];
+  if (userId) conditions.push(eq(runs.userId, userId as string));
+  if (brandId) conditions.push(sql`${brandId} = ANY(${runs.brandIds})`);
+  if (campaignId) conditions.push(eq(runs.campaignId, campaignId as string));
+  if (workflowSlug) conditions.push(eq(runs.workflowSlug, workflowSlug as string));
+  if (featureSlug) conditions.push(eq(runs.featureSlug, featureSlug as string));
+  if (goal) conditions.push(eq(runs.goal, goal as string));
+  if (brandProfileId) conditions.push(eq(runs.brandProfileId, brandProfileId as string));
+  if (audienceId) conditions.push(eq(runs.audienceId, audienceId as string));
+  if (workflowContext) conditions.push(eq(runs.workflowContext, workflowContext as string));
+  if (serviceName) conditions.push(eq(runs.serviceName, serviceName as string));
+  if (taskName) conditions.push(eq(runs.taskName, taskName as string));
+  if (status) conditions.push(eq(runs.status, status as string));
+  if (parentRunId) conditions.push(eq(runs.parentRunId, parentRunId as string));
+  if (startedAfter) conditions.push(gte(runs.startedAt, new Date(startedAfter as string)));
+  if (startedBefore) conditions.push(lte(runs.startedAt, new Date(startedBefore as string)));
+
+  const limit = limitStr ? Number(limitStr) : undefined;
+  const offset = offsetStr ? Number(offsetStr) : 0;
+
+  // Which runs are on the page. Undefined = every run the filters match.
+  let pageIds: string[] | undefined;
+  if (limit !== undefined && campaignIds) {
+    // Each member's newest (limit + offset) runs off idx_runs_campaign_started,
+    // then the newest of those overall: exactly the global page, since a run
+    // carries one campaign and a run outside its member's top (limit + offset)
+    // cannot be in the global top (limit + offset) either.
+    //
+    // Bitmap scans are off for this one statement. The planner estimates a few
+    // hundred matches per member, so once `limit` nears that estimate it swaps the
+    // ordered index walk for a BitmapAnd with idx_runs_org_service (220k rows for
+    // a large org) plus a sort, per member: 2s instead of 0.3s at limit=201 on
+    // the 47-row family in prod. With bitmaps off it walks the index in order
+    // and stops at the limit, or uses a selective btree when a filter has one.
+    const perMember = limit + offset;
+    const rows = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_bitmapscan = off`);
+      return tx.execute(sql`
+        SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
+        CROSS JOIN LATERAL (
+          SELECT ${runs.id} AS id, ${runs.startedAt} AS started_at FROM ${runs}
+          WHERE ${runs.campaignId} = m.cid AND ${and(...conditions)}
+          ORDER BY ${runs.startedAt} DESC, ${runs.id} DESC
+          LIMIT ${perMember}
+        ) p
+        ORDER BY p.started_at DESC, p.id DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `);
+    });
+    pageIds = (rows as unknown as Array<{ id: string }>).map((r) => r.id);
+  } else {
+    if (campaignIds) conditions.push(inArray(runs.campaignId, campaignIds));
+    if (limit !== undefined) {
+      const page = db
+        .select({ id: runs.id })
+        .from(runs)
+        .where(and(...conditions))
+        .orderBy(desc(runs.startedAt), desc(runs.id))
+        .$dynamic();
+      page.limit(limit);
+      if (offset) page.offset(offset);
+      pageIds = (await page).map((r) => r.id);
+    }
+  }
+
+  let result: Awaited<ReturnType<typeof selectRunsWithOwnCost>> = [];
+  if (pageIds === undefined) {
+    const query = selectRunsWithOwnCost(and(...conditions)!);
+    if (offset) query.offset(offset);
+    result = await query;
+  } else if (pageIds.length > 0) {
+    result = await selectRunsWithOwnCost(inArray(runs.id, pageIds));
+  }
+
+  return { rows: result, limit, offset };
+}
 
 /** Runs matching `where`, newest first, each with the sum of its own cost rows. */
 function selectRunsWithOwnCost(where: SQL) {
