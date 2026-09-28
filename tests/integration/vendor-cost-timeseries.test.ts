@@ -187,12 +187,9 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
         expect(billed.status).toBe(200);
         expect(vendor.status).toBe(200);
         for (const r of billed.body.runs) expect(Object.keys(r).filter((k) => /vendor|unpriced/i.test(k))).toEqual([]);
-        const strip = (r: any) => {
-          const { vendorOwnCostInUsdCents, vendorOwnActualCostInUsdCents, vendorOwnProvisionedCostInUsdCents,
-            unpricedOwnCostInUsdCents, unpricedOwnActualCostInUsdCents, unpricedOwnProvisionedCostInUsdCents,
-            unpricedCostNames, ...rest } = r;
-          return rest;
-        };
+        const SUBTREE = ["totalCostInUsdCents", "actualCostInUsdCents", "provisionedCostInUsdCents"];
+        const strip = (r: any) =>
+          Object.fromEntries(Object.entries(r).filter(([k]) => !/vendor|unpriced/i.test(k) && !SUBTREE.includes(k)));
         expect({ ...vendor.body, runs: vendor.body.runs.map(strip) }).toEqual(billed.body);
       }
     });
@@ -207,6 +204,65 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
         unpricedOwnCostInUsdCents: "0.0000000000",
         unpricedCostNames: [],
       });
+    });
+
+    it("states an execute-workflow run's cost as its SUBTREE — it has no own rows — equal to GET /v1/runs/:id", async () => {
+      const root = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "workflow",
+        taskName: "execute-workflow",
+        brandIds: [BRAND_ID],
+        featureSlug: FEATURE,
+        status: "completed",
+        startedAt: new Date("2026-09-23T10:00:00Z"),
+      });
+      const child = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "child",
+        parentRunId: root.id,
+        brandIds: [BRAND_ID],
+        featureSlug: FEATURE,
+        status: "completed",
+        startedAt: new Date("2026-09-23T10:00:01Z"),
+      });
+      const grandchild = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "svc",
+        taskName: "grandchild",
+        parentRunId: child.id,
+        brandIds: [BRAND_ID],
+        featureSlug: FEATURE,
+        status: "completed",
+        startedAt: new Date("2026-09-23T10:00:02Z"),
+      });
+      await cost(child.id, "tok", "10", "6", "2026-09-23T10:00:03Z"); // vendor 12 (v3)
+      await cost(grandchild.id, "passthru", "2", "3", "2026-09-23T10:00:03Z"); // vendor 6
+      await cost(grandchild.id, "unknown", "1", "2", "2026-09-23T10:00:03Z"); // unpriced 2
+
+      const res = await request(app)
+        .get("/internal/runs/vendor")
+        .query({ ...RUNS_QUERY, taskName: "execute-workflow" })
+        .set(API_KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.runs).toHaveLength(1);
+      expect(res.body.runs[0]).toMatchObject({
+        id: root.id,
+        ownCostInUsdCents: "0.0000000000",
+        vendorOwnCostInUsdCents: "0.0000000000",
+        unpricedOwnCostNames: [],
+        totalCostInUsdCents: "68.0000000000",
+        actualCostInUsdCents: "68.0000000000",
+        vendorTotalCostInUsdCents: "18.0000000000",
+        vendorActualCostInUsdCents: "18.0000000000",
+        unpricedTotalCostInUsdCents: "2.0000000000",
+        unpricedCostNames: ["unknown"],
+      });
+      const detail = await request(app).get(`/v1/runs/${root.id}`).set({ ...API_KEY, "x-org-id": ORG_ID });
+      expect(detail.status).toBe(200);
+      expect(res.body.runs[0].totalCostInUsdCents).toBe(detail.body.totalCostInUsdCents);
+      expect(res.body.runs[0].actualCostInUsdCents).toBe(detail.body.actualCostInUsdCents);
+      expect(res.body.runs[0].provisionedCostInUsdCents).toBe(detail.body.provisionedCostInUsdCents);
     });
 
     it("requires orgId and the service api key", async () => {

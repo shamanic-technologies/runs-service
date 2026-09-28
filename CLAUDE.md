@@ -311,8 +311,11 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   untouched; the route is `/internal/*` behind `requireInternalAuth`.
 - **Per run: `GET /internal/runs/vendor?orgId=…`** — `GET /v1/runs`' exact list (shared
   `listRunsPage` in `routes/runs.ts`: same filters, order, page, billed `own*` fields byte-for-byte)
-  plus each run's OWN cost on the vendor basis (`vendorOwn*`, `unpricedOwn*`, `unpricedCostNames`),
+  plus each run's cost on the vendor basis, own (`vendorOwn*`, `unpricedOwn*`) AND subtree
+  (`total*` billed == `GET /v1/runs/:id`'s total, `vendorTotal*`, `unpricedTotal*`, `unpricedCostNames`),
   same matching as the timeseries. Org from the `orgId` query (staff read any org), not `x-org-id`.
+  ⚠️ An `execute-workflow` run has NO own cost rows (0 of 2,368 in prod, 2026-09-28): its cost is
+  its subtree, so a Workflow page must read `total*` / `vendorTotal*`, never `own*`.
 - Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
