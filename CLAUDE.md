@@ -316,6 +316,9 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   same matching as the timeseries. Org from the `orgId` query (staff read any org), not `x-org-id`.
   ⚠️ An `execute-workflow` run has NO own cost rows (0 of 2,368 in prod, 2026-09-28): its cost is
   its subtree, so a Workflow page must read `total*` / `vendorTotal*`, never `own*`.
+  Its subtree walk fetches each run's cost rows through a per-run LATERAL with `OFFSET 0` (the
+  fence stops Postgres flattening it back into the plain JOIN that hash-joined a seq scan of the
+  whole ledger, 1.2-2.1 s a 20-run page in prod before, 2026-09-28). Same rule as the customer twin below.
 - **Customer twin of `total*`: `GET /v1/runs?include=subtreeCost`** adds each run's SUBTREE billed
   cost (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, same names and
   values as `/internal/runs/vendor` and `GET /v1/runs/:id`; `src/services/run-subtree-cost.ts`),
