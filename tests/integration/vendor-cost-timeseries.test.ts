@@ -155,6 +155,76 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
     expect(res.body.buckets.every((b: any) => "campaignId" in b)).toBe(true);
   });
 
+  describe("GET /internal/runs/vendor", () => {
+    const RUNS_QUERY = { orgId: ORG_ID, brandId: BRAND_ID, featureSlug: FEATURE, taskName: "task" };
+
+    it("states each run's own cost on the vendor basis, with unpriced spend named", async () => {
+      const res = await request(app).get("/internal/runs/vendor").query(RUNS_QUERY).set(API_KEY);
+      expect(res.status).toBe(200);
+      const rows = res.body.runs.map((r: any) => [
+        r.startedAt.slice(0, 10),
+        r.ownCostInUsdCents,
+        r.vendorOwnCostInUsdCents,
+        r.vendorOwnActualCostInUsdCents,
+        r.vendorOwnProvisionedCostInUsdCents,
+        r.unpricedOwnCostInUsdCents,
+        r.unpricedCostNames,
+      ]);
+      expect(rows).toEqual([
+        ["2026-09-21", "67.0000000000", "12.0000000000", "12.0000000000", "0.0000000000", "7.0000000000", ["tok"]],
+        ["2026-09-16", "50.0000000000", "10.0000000000", "10.0000000000", "0.0000000000", "0.0000000000", []],
+        ["2026-09-10", "68.0000000000", "16.0000000000", "16.0000000000", "0.0000000000", "2.0000000000", ["unknown"]],
+      ]);
+    });
+
+    it("serves GET /v1/runs' runs, order, page and billed fields byte-for-byte; the billed list carries no vendor figure", async () => {
+      const { orgId: _o, ...listQuery } = RUNS_QUERY;
+      for (const extra of [{}, { limit: "2" }, { limit: "1", offset: "1" }]) {
+        const [vendor, billed] = await Promise.all([
+          request(app).get("/internal/runs/vendor").query({ ...RUNS_QUERY, ...extra }).set(API_KEY),
+          request(app).get("/v1/runs").query({ ...listQuery, ...extra }).set({ ...API_KEY, "x-org-id": ORG_ID }),
+        ]);
+        expect(billed.status).toBe(200);
+        expect(vendor.status).toBe(200);
+        for (const r of billed.body.runs) expect(Object.keys(r).filter((k) => /vendor|unpriced/i.test(k))).toEqual([]);
+        const strip = (r: any) => {
+          const { vendorOwnCostInUsdCents, vendorOwnActualCostInUsdCents, vendorOwnProvisionedCostInUsdCents,
+            unpricedOwnCostInUsdCents, unpricedOwnActualCostInUsdCents, unpricedOwnProvisionedCostInUsdCents,
+            unpricedCostNames, ...rest } = r;
+          return rest;
+        };
+        expect({ ...vendor.body, runs: vendor.body.runs.map(strip) }).toEqual(billed.body);
+      }
+    });
+
+    it("a run with no cost rows reads 0 on both bases", async () => {
+      const empty = await run("2026-09-22T10:00:00Z");
+      const res = await request(app).get("/internal/runs/vendor").query({ ...RUNS_QUERY, limit: "1" }).set(API_KEY);
+      expect(res.body.runs[0]).toMatchObject({
+        id: empty,
+        ownCostInUsdCents: "0.0000000000",
+        vendorOwnCostInUsdCents: "0.0000000000",
+        unpricedOwnCostInUsdCents: "0.0000000000",
+        unpricedCostNames: [],
+      });
+    });
+
+    it("requires orgId and the service api key", async () => {
+      const noOrg = await request(app).get("/internal/runs/vendor").query({ brandId: BRAND_ID }).set(API_KEY);
+      expect(noOrg.status).toBe(400);
+      const noKey = await request(app).get("/internal/runs/vendor").query(RUNS_QUERY);
+      expect(noKey.status).toBe(401);
+      expect(JSON.stringify(noKey.body)).not.toMatch(/vendor/i);
+    });
+
+    it("fails loud (502) when the vendor catalogue cannot be read", async () => {
+      const { VendorCostCatalogError } = await import("../../src/services/vendor-costs.js");
+      catalog.fn.mockRejectedValueOnce(new VendorCostCatalogError("costs-service vendor catalogue returned 503: down"));
+      const res = await request(app).get("/internal/runs/vendor").query(RUNS_QUERY).set(API_KEY);
+      expect(res.status).toBe(502);
+    });
+  });
+
   it("fails loud (502) when the vendor catalogue cannot be read — never serves it all as unpriced", async () => {
     const { VendorCostCatalogError } = await import("../../src/services/vendor-costs.js");
     catalog.fn.mockRejectedValueOnce(new VendorCostCatalogError("costs-service vendor catalogue returned 503: down"));

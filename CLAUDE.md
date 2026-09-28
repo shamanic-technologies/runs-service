@@ -25,7 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
-- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` (service-auth). See "Vendor-cost basis".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/runs/vendor` (service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -309,6 +309,10 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   unreadable → 502, never an all-unpriced 200.
 - **Never on a public route** — the vendor cost reveals the margin. The public timeseries is
   untouched; the route is `/internal/*` behind `requireInternalAuth`.
+- **Per run: `GET /internal/runs/vendor?orgId=…`** — `GET /v1/runs`' exact list (shared
+  `listRunsPage` in `routes/runs.ts`: same filters, order, page, billed `own*` fields byte-for-byte)
+  plus each run's OWN cost on the vendor basis (`vendorOwn*`, `unpricedOwn*`, `unpricedCostNames`),
+  same matching as the timeseries. Org from the `orgId` query (staff read any org), not `x-org-id`.
 - Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every

@@ -2083,6 +2083,72 @@
           "buckets"
         ]
       },
+      "VendorRunsResponse": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/RunWithOwnCost"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "vendorOwnCostInUsdCents": {
+                      "type": "string",
+                      "description": "VENDOR cost (before our markup, per costs-service's statement for the price version in force when each row was written) of the run's own status IN ('actual','provisioned') cost rows whose vendor cost is known: SUM(quantity x vendor unit cost). Excludes unpriced rows, never approximated at the billed price."
+                    },
+                    "vendorOwnActualCostInUsdCents": {
+                      "type": "string"
+                    },
+                    "vendorOwnProvisionedCostInUsdCents": {
+                      "type": "string"
+                    },
+                    "unpricedOwnCostInUsdCents": {
+                      "type": "string",
+                      "description": "BILLED amount of the run's own actual/provisioned rows with NO known vendor cost. ownCostInUsdCents - unpricedOwnCostInUsdCents is the billed amount of the priced rows. Non-zero means vendorOwnCostInUsdCents does not cover the whole run."
+                    },
+                    "unpricedOwnActualCostInUsdCents": {
+                      "type": "string"
+                    },
+                    "unpricedOwnProvisionedCostInUsdCents": {
+                      "type": "string"
+                    },
+                    "unpricedCostNames": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Distinct cost names of the run's unpriced actual/provisioned rows, sorted. Empty = the vendor figure covers the whole run."
+                    }
+                  },
+                  "required": [
+                    "vendorOwnCostInUsdCents",
+                    "vendorOwnActualCostInUsdCents",
+                    "vendorOwnProvisionedCostInUsdCents",
+                    "unpricedOwnCostInUsdCents",
+                    "unpricedOwnActualCostInUsdCents",
+                    "unpricedOwnProvisionedCostInUsdCents",
+                    "unpricedCostNames"
+                  ]
+                }
+              ]
+            }
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "runs",
+          "offset"
+        ]
+      },
       "PublicRunsStatsResponse": {
         "type": "object",
         "properties": {
@@ -4549,6 +4615,215 @@
           },
           "400": {
             "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "costs-service vendor catalogue unavailable or malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/runs/vendor": {
+      "get": {
+        "summary": "Run list with each run's own cost on the VENDOR-COST basis (service-auth only)",
+        "description": "The run list of GET /v1/runs — same query parameters, same runs, same order, same page — for the org given by the REQUIRED `orgId` query parameter (not x-org-id: a staff caller reads any org). Each run carries GET /v1/runs' billed own-cost fields byte-for-byte, plus its own cost on the vendor-cost basis: each own cost row priced by the costs-service price version of its cost name whose billed unit price equals the one the row froze and which was in force when the row was written (the same pricing as GET /internal/stats/costs/timeseries/vendor). Rows with no known vendor cost are reported as unpriced billed spend with their cost names, never folded in or zeroed. Service-auth only: the vendor cost reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "userId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): the runs of ANY of them, in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id. With `limit`, the page is the newest `limit` runs across the whole set, the same rows you get by asking each id for `limit` runs and keeping the newest `limit` of the union. Combines with every other filter (AND), including `campaignId`. An empty list or more than 500 ids is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): the runs of ANY of them, in one request. Use it for a campaign FAMILY (every stored row of one logical campaign) instead of one call per id. With `limit`, the page is the newest `limit` runs across the whole set, the same rows you get by asking each id for `limit` runs and keeping the newest `limit` of the union. Combines with every other filter (AND), including `campaignId`. An empty list or more than 500 ids is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "$ref": "#/components/schemas/Goal"
+            },
+            "required": false,
+            "name": "goal",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "brandProfileId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "audienceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowContext",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "parentRunId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "required": false,
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "required": false,
+            "name": "startedBefore",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Runs with billed and vendor-basis own cost",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VendorRunsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid orgId or invalid query parameters",
             "content": {
               "application/json": {
                 "schema": {
