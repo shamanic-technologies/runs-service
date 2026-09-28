@@ -267,7 +267,28 @@
           "runs": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RunWithOwnCost"
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/RunWithOwnCost"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "totalCostInUsdCents": {
+                      "type": "string",
+                      "description": "Present only with `include=subtreeCost`. BILLED cost of the run's whole SUBTREE (its own rows + every descendant run's), status IN ('actual','provisioned') — equal to GET /v1/runs/{id}'s totalCostInUsdCents."
+                    },
+                    "actualCostInUsdCents": {
+                      "type": "string",
+                      "description": "Present only with `include=subtreeCost`. Subtree billed cost, status = 'actual'."
+                    },
+                    "provisionedCostInUsdCents": {
+                      "type": "string",
+                      "description": "Present only with `include=subtreeCost`. Subtree billed cost, status = 'provisioned'."
+                    }
+                  }
+                }
+              ]
             }
           },
           "limit": {
@@ -2883,6 +2904,16 @@
             "required": false,
             "name": "offset",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400.",
+            "name": "include",
+            "in": "query"
           }
         ],
         "responses": {
@@ -5130,6 +5161,16 @@
             },
             "required": false,
             "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400.",
+            "name": "include",
             "in": "query"
           },
           {

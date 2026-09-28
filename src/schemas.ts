@@ -328,6 +328,10 @@ export const ListRunsQuerySchema = z.object({
   startedBefore: z.string().datetime().optional(),
   limit: z.string().optional(),
   offset: z.string().optional(),
+  include: z.string().optional().openapi({
+    description:
+      "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400.",
+  }),
 });
 
 export const VendorRunsResponseSchema = z
@@ -360,7 +364,13 @@ export const VendorRunsResponseSchema = z
 
 export const ListRunsResponseSchema = z
   .object({
-    runs: z.array(RunWithOwnCostSchema),
+    runs: z.array(
+      RunWithOwnCostSchema.extend({
+        totalCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. BILLED cost of the run's whole SUBTREE (its own rows + every descendant run's), status IN ('actual','provisioned') — equal to GET /v1/runs/{id}'s totalCostInUsdCents." }),
+        actualCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree billed cost, status = 'actual'." }),
+        provisionedCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree billed cost, status = 'provisioned'." }),
+      }),
+    ),
     limit: z.number().optional(),
     offset: z.number(),
   })
