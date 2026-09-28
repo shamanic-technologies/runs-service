@@ -45,14 +45,15 @@ const STATUSES = {
   refunded: sql`status = 'refunded'`,
 } as const;
 
-function sumsSql() {
+/** Billed / vendor / unpriced sums per status. `scope` narrows the rows summed; `prefix` names the columns. */
+function sumsSql(scope = sql`TRUE`, prefix = "") {
   return sql.join(
     (Object.keys(STATUSES) as Array<keyof typeof STATUSES>).map((k) => {
-      const pred = STATUSES[k];
+      const pred = sql`(${STATUSES[k]}) AND (${scope})`;
       return sql`
-        COALESCE(SUM(CASE WHEN ${pred} THEN billed_total ELSE 0 END), 0)::text AS ${sql.raw(`billed_${k}`)},
-        COALESCE(SUM(CASE WHEN ${pred} AND priced THEN vendor_total ELSE 0 END), 0)::text AS ${sql.raw(`vendor_${k}`)},
-        COALESCE(SUM(CASE WHEN ${pred} AND NOT priced THEN billed_total ELSE 0 END), 0)::text AS ${sql.raw(`unpriced_${k}`)}`;
+        COALESCE(SUM(CASE WHEN ${pred} THEN billed_total ELSE 0 END), 0)::text AS ${sql.raw(`${prefix}billed_${k}`)},
+        COALESCE(SUM(CASE WHEN ${pred} AND priced THEN vendor_total ELSE 0 END), 0)::text AS ${sql.raw(`${prefix}vendor_${k}`)},
+        COALESCE(SUM(CASE WHEN ${pred} AND NOT priced THEN billed_total ELSE 0 END), 0)::text AS ${sql.raw(`${prefix}unpriced_${k}`)}`;
     }),
     sql`,`,
   );
@@ -230,9 +231,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * GET /internal/runs/vendor — the run list of GET /v1/runs (same query
- * parameters, same runs, same order, same page) with each run's OWN cost also
- * stated on the VENDOR-COST basis: what that run's own cost rows cost us from
- * the vendor, before our markup, priced exactly as the vendor timeseries above.
+ * parameters, same runs, same order, same page) with each run's cost also
+ * stated on the VENDOR-COST basis — its own rows (`vendorOwn*`) and its whole
+ * subtree (`total*` billed, `vendorTotal*`, as GET /v1/runs/:id's total): what
+ * they cost us from the vendor, before our markup, priced as the timeseries above.
  *
  * The org is the `orgId` query parameter, not `x-org-id`: a staff caller reads
  * any org. The billed `own*` fields are GET /v1/runs' own, byte-for-byte.
@@ -259,38 +261,55 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
     if (result.length > 0) {
       const ids = result.map((r) => r.id);
       const rows = (await db.execute(sql`
-        WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+        -- Bounded to the page's runs and their descendants (idx_runs_parent), as
+        -- GET /v1/runs/:id. An execute-workflow run has no cost rows of its own:
+        -- what it cost is its subtree, so both the own and the subtree figures
+        -- are served.
+        WITH RECURSIVE descendants AS (
+          SELECT id, id AS root_run_id FROM runs
+          WHERE id = ANY(string_to_array(${ids.join(",")}, ',')::uuid[])
+          UNION ALL
+          SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        ),
+        v AS MATERIALIZED (${versionWindowsSql(versions)}),
         costed AS (
           SELECT
-            rc.run_id,
+            d.root_run_id,
+            (rc.run_id = d.root_run_id) AS own,
             rc.status,
             rc.cost_name,
             rc.total_cost_in_usd_cents AS billed_total,
             rc.quantity * v.vendor AS vendor_total,
             (v.vendor IS NOT NULL) AS priced
-          FROM runs_costs rc
+          FROM descendants d
+          INNER JOIN runs_costs rc ON rc.run_id = d.id
           LEFT JOIN v
             ON v.cost_name = rc.cost_name
            AND v.billed = rc.unit_cost_in_usd_cents
            AND rc.created_at >= v.valid_from
            AND (v.valid_to IS NULL OR rc.created_at < v.valid_to)
-          WHERE rc.run_id = ANY(string_to_array(${ids.join(",")}, ',')::uuid[])
         )
         SELECT
-          run_id,
+          root_run_id,
           ${sumsSql()},
+          ${sumsSql(sql`own`, "own_")},
           COALESCE(
             array_agg(DISTINCT cost_name ORDER BY cost_name)
               FILTER (WHERE status IN ('actual','provisioned') AND NOT priced),
             '{}'
-          ) AS unpriced_cost_names
+          ) AS unpriced_cost_names,
+          COALESCE(
+            array_agg(DISTINCT cost_name ORDER BY cost_name)
+              FILTER (WHERE own AND status IN ('actual','provisioned') AND NOT priced),
+            '{}'
+          ) AS own_unpriced_cost_names
         FROM costed
-        GROUP BY run_id
+        GROUP BY root_run_id
       `)) as any[];
-      for (const row of rows) vendorByRun.set(row.run_id as string, row);
+      for (const row of rows) vendorByRun.set(row.root_run_id as string, row);
     }
 
-    // A run with no own cost rows has no row here; its billed own cost is 0 too.
+    // A run whose subtree has no cost rows has no row here; its billed cost is 0 too.
     const zero = "0";
     const formattedRuns = result.map((r) => {
       const v = vendorByRun.get(r.id);
@@ -299,12 +318,22 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
         ownCostInUsdCents: fixed(r.ownCostInUsdCents),
         ownActualCostInUsdCents: fixed(r.ownActualCostInUsdCents),
         ownProvisionedCostInUsdCents: fixed(r.ownProvisionedCostInUsdCents),
-        vendorOwnCostInUsdCents: fixed(v?.vendor_total ?? zero),
-        vendorOwnActualCostInUsdCents: fixed(v?.vendor_actual ?? zero),
-        vendorOwnProvisionedCostInUsdCents: fixed(v?.vendor_provisioned ?? zero),
-        unpricedOwnCostInUsdCents: fixed(v?.unpriced_total ?? zero),
-        unpricedOwnActualCostInUsdCents: fixed(v?.unpriced_actual ?? zero),
-        unpricedOwnProvisionedCostInUsdCents: fixed(v?.unpriced_provisioned ?? zero),
+        vendorOwnCostInUsdCents: fixed(v?.own_vendor_total ?? zero),
+        vendorOwnActualCostInUsdCents: fixed(v?.own_vendor_actual ?? zero),
+        vendorOwnProvisionedCostInUsdCents: fixed(v?.own_vendor_provisioned ?? zero),
+        unpricedOwnCostInUsdCents: fixed(v?.own_unpriced_total ?? zero),
+        unpricedOwnActualCostInUsdCents: fixed(v?.own_unpriced_actual ?? zero),
+        unpricedOwnProvisionedCostInUsdCents: fixed(v?.own_unpriced_provisioned ?? zero),
+        unpricedOwnCostNames: (v?.own_unpriced_cost_names as string[] | undefined) ?? [],
+        totalCostInUsdCents: fixed(v?.billed_total ?? zero),
+        actualCostInUsdCents: fixed(v?.billed_actual ?? zero),
+        provisionedCostInUsdCents: fixed(v?.billed_provisioned ?? zero),
+        vendorTotalCostInUsdCents: fixed(v?.vendor_total ?? zero),
+        vendorActualCostInUsdCents: fixed(v?.vendor_actual ?? zero),
+        vendorProvisionedCostInUsdCents: fixed(v?.vendor_provisioned ?? zero),
+        unpricedTotalCostInUsdCents: fixed(v?.unpriced_total ?? zero),
+        unpricedActualCostInUsdCents: fixed(v?.unpriced_actual ?? zero),
+        unpricedProvisionedCostInUsdCents: fixed(v?.unpriced_provisioned ?? zero),
         unpricedCostNames: (v?.unpriced_cost_names as string[] | undefined) ?? [],
       };
     });
