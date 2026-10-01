@@ -57,9 +57,9 @@ describe("fetchVendorCostCatalog", () => {
       headers: { "x-api-key": "test-costs-key" },
     }));
     expect(versions).toEqual([
-      { costName: VERSION.name, servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: "0.0001000000" },
-      { costName: "x", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: null },
-      { costName: "delisted", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: null, vendorUnitCostInUsdCents: null },
+      { costName: VERSION.name, provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: "0.0001000000" },
+      { costName: "x", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: null },
+      { costName: "delisted", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: null, vendorUnitCostInUsdCents: null },
     ]);
 
     // cached: a second read does not refetch

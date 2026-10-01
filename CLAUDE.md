@@ -25,7 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
-- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -341,6 +341,13 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   none is ABSENT (all its figures would be 0) and there is no runCount. Billed totals equal the
   billed reads' per group (guarded in `vendor-cost-grouped.test.ts`). Prod: fleet
   `sales-cold-email-outreach` by workflow ~2-4 s, one brand's audience x workflow ~1.2 s.
+- **Margin `GET /internal/stats/costs/margin[?orgId=]`** (staff Monitoring page): platform rows only,
+  one pass over `runs_costs` (no runs join; `orgId` reads the frozen 0029 org), `GROUPING SETS` →
+  `{ total, providers[], costItems[] }`. Billed = CHARGED (`actual`); refunded stated apart; holds,
+  cancels, BYOK in no figure. All math in Postgres: vendor rounded to scale 10 FIRST, so
+  `margin + vendor == pricedBilled` exactly; unpriced never enters margin. Provider is per VERSION
+  (deepseek-tokens moved vercel → deepseek): matched version's, else the name's version served at
+  `created_at`, else null.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 
