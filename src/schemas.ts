@@ -1786,6 +1786,49 @@ registry.registerPath({
   },
 });
 
+export const CostConsumptionQuerySchema = z
+  .object({
+    costNames: z.string().optional().openapi({ description: "Comma-separated cost names (blanks/duplicates dropped, max 500). Absent = every cost name." }),
+    since: z.string().optional().openapi({ description: "YYYY-MM-DD: only rows created on or after this UTC day. Absent = since inception." }),
+  })
+  .openapi("CostConsumptionQuery");
+
+const CostConsumptionFiguresSchema = {
+  costName: z.string(),
+  costSource: z.enum(["platform", "org"]).openapi({ description: "Whose key the unit went through: 'platform' = our vendor account, 'org' = the customer's own key (BYOK). Never merged." }),
+  quantity: z.string().openapi({ description: "Units consumed at the vendor: SUM(quantity) of rows with status 'actual' or 'refunded' (a refund is spend that happened and that we did not charge, so the unit was still consumed). Provisioned holds and cancelled rows are excluded. Decimal string, scale 6." }),
+  refundedQuantity: z.string().openapi({ description: "The part of quantity carried by refunded rows (already inside quantity). Decimal string, scale 6." }),
+};
+
+export const CostConsumptionResponseSchema = z
+  .object({
+    timezone: z.literal("UTC"),
+    since: z.string().nullable(),
+    statuses: z.array(z.string()).openapi({ description: "Row statuses counted as consumption: ['actual','refunded']." }),
+    days: z
+      .array(z.object({ day: z.string().openapi({ description: "UTC day of the cost row's created_at, YYYY-MM-DD." }), ...CostConsumptionFiguresSchema }))
+      .openapi({ description: "SPARSE: one entry per (day, costName, costSource) with at least one counted row. Ordered by day, costName, costSource." }),
+    totals: z
+      .array(z.object(CostConsumptionFiguresSchema))
+      .openapi({ description: "Per (costName, costSource), the sum of its days exactly. Ordered by costName, costSource." }),
+  })
+  .openapi("CostConsumptionResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/consumption",
+  summary: "Units consumed per UTC day per cost name, fleet-wide, platform vs org key apart (service-auth only)",
+  description:
+    "Fleet-wide (every org, and org-less platform runs) quantity consumed per UTC day of each cost row's created_at, per cost name and per cost source (platform key vs the org's own key, never merged). Counts rows with status 'actual' or 'refunded' — the same rows the margin read counts as spend that really happened; provisioned holds and cancelled rows are excluded. Filter by costNames and a since day. Sparse days. Quantities only, no money. Service-auth only.",
+  security: [{ apiKey: [] }],
+  request: { query: CostConsumptionQuerySchema },
+  responses: {
+    200: { description: "Daily consumption per cost name and source", content: { "application/json": { schema: CostConsumptionResponseSchema } } },
+    400: { description: "Invalid costNames or since", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/runs/vendor",

@@ -906,4 +906,92 @@ router.get("/internal/stats/costs/margin/timeseries", requireInternalAuth, async
   }
 });
 
+// --- Units consumed per day, fleet-wide ---
+
+const MAX_COST_NAMES = 500;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * GET /internal/stats/costs/consumption — QUANTITY consumed per UTC day of the
+ * cost row's created_at, per cost name and per cost source, across every org
+ * (org-less platform runs included). costs-service divides what a vendor
+ * subscription cost us by the units consumed through it, so the platform key
+ * ('platform') and a customer's own key ('org') are kept apart, never merged.
+ *
+ * Counted rows = status 'actual' or 'refunded', the margin read's row set: a
+ * refund is spend that happened at the vendor and that we did not charge, so the
+ * unit was still consumed (refundedQuantity states that part, already inside
+ * quantity). Holds (provisioned) and cancels are not consumption.
+ *
+ * Days are SPARSE. totals[] = per (name, source) sum of its days, exactly.
+ */
+router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req, res) => {
+  try {
+    let names: string[] | undefined;
+    if (req.query.costNames !== undefined) {
+      if (typeof req.query.costNames !== "string") {
+        res.status(400).json({ error: "costNames must be a comma-separated string" });
+        return;
+      }
+      names = [...new Set(req.query.costNames.split(",").map((n) => n.trim()).filter(Boolean))];
+      if (names.length === 0 || names.length > MAX_COST_NAMES) {
+        res.status(400).json({ error: `costNames must list between 1 and ${MAX_COST_NAMES} cost names` });
+        return;
+      }
+    }
+    const since = req.query.since;
+    if (since !== undefined && (typeof since !== "string" || !DAY_RE.test(since) || Number.isNaN(Date.parse(`${since}T00:00:00Z`)))) {
+      res.status(400).json({ error: "since must be a YYYY-MM-DD day" });
+      return;
+    }
+
+    const filters: SQL[] = [sql`rc.status IN ('actual','refunded')`];
+    if (names) filters.push(sql`rc.cost_name IN (SELECT jsonb_array_elements_text(${JSON.stringify(names)}::jsonb))`);
+    if (since) filters.push(sql`rc.created_at >= ${`${since}T00:00:00Z`}::timestamptz`);
+
+    const rows = (await db.execute(sql`
+      SELECT
+        to_char((rc.created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day,
+        rc.cost_name,
+        rc.cost_source,
+        SUM(rc.quantity) AS quantity,
+        COALESCE(SUM(rc.quantity) FILTER (WHERE rc.status = 'refunded'), 0) AS refunded_quantity
+      FROM runs_costs rc
+      WHERE ${sql.join(filters, sql` AND `)}
+      GROUP BY 1, 2, 3
+      ORDER BY 1, 2, 3
+    `)) as any[];
+
+    // Totals summed in decimal.js from the same day rows (never Number on a quantity).
+    const totals = new Map<string, { costName: string; costSource: string; quantity: Decimal; refundedQuantity: Decimal }>();
+    const days = rows.map((r) => {
+      const key = `${r.cost_name}\u0000${r.cost_source}`;
+      const t = totals.get(key) ?? { costName: r.cost_name, costSource: r.cost_source, quantity: new Decimal(0), refundedQuantity: new Decimal(0) };
+      t.quantity = t.quantity.plus(r.quantity as string);
+      t.refundedQuantity = t.refundedQuantity.plus(r.refunded_quantity as string);
+      totals.set(key, t);
+      return {
+        day: r.day as string,
+        costName: r.cost_name as string,
+        costSource: r.cost_source as string,
+        quantity: new Decimal(r.quantity as string).toFixed(6),
+        refundedQuantity: new Decimal(r.refunded_quantity as string).toFixed(6),
+      };
+    });
+
+    res.json({
+      timezone: "UTC",
+      since: since ?? null,
+      statuses: ["actual", "refunded"],
+      days,
+      totals: [...totals.values()]
+        .sort((a, b) => (a.costName === b.costName ? a.costSource.localeCompare(b.costSource) : a.costName < b.costName ? -1 : 1))
+        .map((t) => ({ costName: t.costName, costSource: t.costSource, quantity: t.quantity.toFixed(6), refundedQuantity: t.refundedQuantity.toFixed(6) })),
+    });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/stats/costs/consumption:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 export default router;
