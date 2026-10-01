@@ -323,6 +323,11 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   current month (`complete: false`). Each provider's months sum to its margin row FIELD BY FIELD: vendor
   is unrounded per row, so a month's vendor = round(running sum) − round(previous running sum) (telescopes
   to the margin read's rounded total; per-month rounding would drift). Pinned in `cost-margin-timeseries.test.ts`.
+- **Units `GET /internal/stats/costs/consumption[?costNames=a,b&since=YYYY-MM-DD]`** (costs-service's real cost
+  per credit of each vendor subscription = bank spend / these units): fleet-wide SUM(quantity) per UTC day of
+  `created_at` × cost name × `cost_source` (platform key vs org key, never merged), SPARSE days + `totals[]`.
+  Statuses = the margin read's: `actual` + `refunded` (refunded = consumed, not charged; `refundedQuantity` is
+  that part). No money, no catalogue call.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 
