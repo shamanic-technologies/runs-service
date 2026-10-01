@@ -1790,6 +1790,9 @@ export const CostConsumptionQuerySchema = z
   .object({
     costNames: z.string().optional().openapi({ description: "Comma-separated cost names (blanks/duplicates dropped, max 500). Absent = every cost name." }),
     since: z.string().optional().openapi({ description: "YYYY-MM-DD: only rows created on or after this UTC day. Absent = since inception." }),
+    orgId: z.string().uuid().optional().openapi({ description: "Only cost rows of this org (the RUN's org, frozen on the cost row). Absent = fleet-wide." }),
+    brandId: z.string().optional().openapi({ description: "Only cost rows whose run carries this brand in brand_ids (solo or co-branded)." }),
+    groupBy: z.string().optional().openapi({ description: "Comma-separated subset of orgId, brandId: adds that key to every day/total row. Grouped by brandId, a co-branded run's row counts under EACH of its brands (sums across brands then exceed the ungrouped figure); a run with no brand lands under brandId null. With a brandId filter, the only brand group is that brand. Absent = no grouping beyond day x costName x costSource." }),
   })
   .openapi("CostConsumptionQuery");
 
@@ -1798,6 +1801,14 @@ const CostConsumptionFiguresSchema = {
   costSource: z.enum(["platform", "org"]).openapi({ description: "Whose key the unit went through: 'platform' = our vendor account, 'org' = the customer's own key (BYOK). Never merged." }),
   quantity: z.string().openapi({ description: "Units consumed at the vendor: SUM(quantity) of rows with status 'actual' or 'refunded' (a refund is spend that happened and that we did not charge, so the unit was still consumed). Provisioned holds and cancelled rows are excluded. Decimal string, scale 6." }),
   refundedQuantity: z.string().openapi({ description: "The part of quantity carried by refunded rows (already inside quantity). Decimal string, scale 6." }),
+  billedCostInUsdCents: z.string().openapi({ description: "Gross billed: SUM(total_cost_in_usd_cents) of 'actual' rows (the margin read's billed). Scale 10." }),
+  netBilledCostInUsdCents: z.string().openapi({ description: "Billed net of the per-org usage discount frozen on each row (gross when the row predates the freeze). Scale 10." }),
+  refundedCostInUsdCents: z.string().openapi({ description: "Gross of refunded rows: spend that happened and that we did not charge. Not inside billed. Scale 10." }),
+  netRefundedCostInUsdCents: z.string().openapi({ description: "Net of refunded rows. Scale 10." }),
+};
+const CostConsumptionGroupKeysSchema = {
+  orgId: z.string().nullable().optional().openapi({ description: "Present only with groupBy containing orgId; null for org-less platform runs." }),
+  brandId: z.string().nullable().optional().openapi({ description: "Present only with groupBy containing brandId; null for runs with no brand." }),
 };
 
 export const CostConsumptionResponseSchema = z
@@ -1805,26 +1816,27 @@ export const CostConsumptionResponseSchema = z
     timezone: z.literal("UTC"),
     since: z.string().nullable(),
     statuses: z.array(z.string()).openapi({ description: "Row statuses counted as consumption: ['actual','refunded']." }),
+    groupBy: z.array(z.enum(["orgId", "brandId"])).openapi({ description: "Grouping keys applied, in canonical order (orgId, brandId); [] when none." }),
     days: z
-      .array(z.object({ day: z.string().openapi({ description: "UTC day of the cost row's created_at, YYYY-MM-DD." }), ...CostConsumptionFiguresSchema }))
-      .openapi({ description: "SPARSE: one entry per (day, costName, costSource) with at least one counted row. Ordered by day, costName, costSource." }),
+      .array(z.object({ day: z.string().openapi({ description: "UTC day of the cost row's created_at, YYYY-MM-DD." }), ...CostConsumptionGroupKeysSchema, ...CostConsumptionFiguresSchema }))
+      .openapi({ description: "SPARSE: one entry per (day, group keys, costName, costSource) with at least one counted row. Ordered by day, orgId, brandId, costName, costSource." }),
     totals: z
-      .array(z.object(CostConsumptionFiguresSchema))
-      .openapi({ description: "Per (costName, costSource), the sum of its days exactly. Ordered by costName, costSource." }),
+      .array(z.object({ ...CostConsumptionGroupKeysSchema, ...CostConsumptionFiguresSchema }))
+      .openapi({ description: "Per (group keys, costName, costSource), the sum of its days exactly. Ordered by orgId, brandId, costName, costSource." }),
   })
   .openapi("CostConsumptionResponse");
 
 registry.registerPath({
   method: "get",
   path: "/internal/stats/costs/consumption",
-  summary: "Units consumed per UTC day per cost name, fleet-wide, platform vs org key apart (service-auth only)",
+  summary: "Units consumed and money billed per UTC day per cost name, fleet-wide or per org / brand, platform vs org key apart (service-auth only)",
   description:
-    "Fleet-wide (every org, and org-less platform runs) quantity consumed per UTC day of each cost row's created_at, per cost name and per cost source (platform key vs the org's own key, never merged). Counts rows with status 'actual' or 'refunded' — the same rows the margin read counts as spend that really happened; provisioned holds and cancelled rows are excluded. Filter by costNames and a since day. Sparse days. Quantities only, no money. Service-auth only.",
+    "Quantity consumed and money billed per UTC day of each cost row's created_at, per cost name and per cost source (platform key vs the org's own key, never merged): fleet-wide (every org, and org-less platform runs) by default, narrowed by orgId / brandId and optionally grouped by orgId and/or brandId. Counts rows with status 'actual' or 'refunded' — the same rows the margin read counts as spend that really happened; provisioned holds and cancelled rows are excluded. Billed = 'actual' rows (gross and net), refunded stated apart, as in the margin read. Filter by costNames and a since day. Sparse days. Service-auth only.",
   security: [{ apiKey: [] }],
   request: { query: CostConsumptionQuerySchema },
   responses: {
     200: { description: "Daily consumption per cost name and source", content: { "application/json": { schema: CostConsumptionResponseSchema } } },
-    400: { description: "Invalid costNames or since", content: { "application/json": { schema: ErrorSchema } } },
+    400: { description: "Invalid costNames, since, orgId, brandId or groupBy", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
   },
 });

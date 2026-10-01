@@ -906,24 +906,50 @@ router.get("/internal/stats/costs/margin/timeseries", requireInternalAuth, async
   }
 });
 
-// --- Units consumed per day, fleet-wide ---
+// --- Units consumed (and billed) per day, fleet-wide or per org / brand ---
 
 const MAX_COST_NAMES = 500;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CONSUMPTION_GROUP_BY = ["orgId", "brandId"] as const;
+type ConsumptionGroupKey = (typeof CONSUMPTION_GROUP_BY)[number];
+
+/** Figures of one consumption row: quantities scale 6, money scale 10, all decimal strings. */
+const CONSUMPTION_FIELDS = {
+  quantity: "quantity",
+  refundedQuantity: "refunded_quantity",
+  billedCostInUsdCents: "billed",
+  netBilledCostInUsdCents: "net_billed",
+  refundedCostInUsdCents: "refunded",
+  netRefundedCostInUsdCents: "net_refunded",
+} as const;
+const CONSUMPTION_SCALE: Record<keyof typeof CONSUMPTION_FIELDS, number> = {
+  quantity: 6,
+  refundedQuantity: 6,
+  billedCostInUsdCents: 10,
+  netBilledCostInUsdCents: 10,
+  refundedCostInUsdCents: 10,
+  netRefundedCostInUsdCents: 10,
+};
 
 /**
- * GET /internal/stats/costs/consumption — QUANTITY consumed per UTC day of the
- * cost row's created_at, per cost name and per cost source, across every org
- * (org-less platform runs included). costs-service divides what a vendor
- * subscription cost us by the units consumed through it, so the platform key
- * ('platform') and a customer's own key ('org') are kept apart, never merged.
+ * GET /internal/stats/costs/consumption — QUANTITY consumed (and the money
+ * billed for it) per UTC day of the cost row's created_at, per cost name and per
+ * cost source, across every org (org-less platform runs included), or narrowed /
+ * grouped by org and brand. costs-service divides what a vendor subscription cost
+ * us by the units consumed through it, so the platform key ('platform') and a
+ * customer's own key ('org') are kept apart, never merged.
  *
  * Counted rows = status 'actual' or 'refunded', the margin read's row set: a
  * refund is spend that happened at the vendor and that we did not charge, so the
  * unit was still consumed (refundedQuantity states that part, already inside
- * quantity). Holds (provisioned) and cancels are not consumption.
+ * quantity). Money follows the margin read: billed = 'actual' rows (gross and net
+ * of the usage discount frozen on the row), refunded stated apart. Holds
+ * (provisioned) and cancels are in no figure.
  *
- * Days are SPARSE. totals[] = per (name, source) sum of its days, exactly.
+ * Org = the RUN's org frozen on the cost row (0029). Brand = the run's brand_ids;
+ * grouped by brand, a co-branded run's row counts under EACH of its brands.
+ *
+ * Days are SPARSE. totals[] = per (group, name, source) sum of its days, exactly.
  */
 router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req, res) => {
   try {
@@ -944,49 +970,113 @@ router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req,
       res.status(400).json({ error: "since must be a YYYY-MM-DD day" });
       return;
     }
+    const orgId = req.query.orgId;
+    if (orgId !== undefined && (typeof orgId !== "string" || !UUID_RE.test(orgId))) {
+      res.status(400).json({ error: "orgId must be a valid UUID" });
+      return;
+    }
+    const brandId = req.query.brandId;
+    if (brandId !== undefined && (typeof brandId !== "string" || brandId.trim() === "")) {
+      res.status(400).json({ error: "brandId must be a non-empty string" });
+      return;
+    }
+    let groupBy: ConsumptionGroupKey[] = [];
+    if (req.query.groupBy !== undefined) {
+      const keys = typeof req.query.groupBy === "string" ? [...new Set(req.query.groupBy.split(",").map((k) => k.trim()).filter(Boolean))] : [];
+      if (keys.length === 0 || keys.some((k) => !(CONSUMPTION_GROUP_BY as readonly string[]).includes(k))) {
+        res.status(400).json({ error: `groupBy must be a comma-separated subset of ${CONSUMPTION_GROUP_BY.join(", ")}` });
+        return;
+      }
+      groupBy = CONSUMPTION_GROUP_BY.filter((k) => keys.includes(k));
+    }
+    const byOrg = groupBy.includes("orgId");
+    const byBrand = groupBy.includes("brandId");
 
     const filters: SQL[] = [sql`rc.status IN ('actual','refunded')`];
     if (names) filters.push(sql`rc.cost_name IN (SELECT jsonb_array_elements_text(${JSON.stringify(names)}::jsonb))`);
     if (since) filters.push(sql`rc.created_at >= ${`${since}T00:00:00Z`}::timestamptz`);
+    if (orgId) filters.push(sql`rc.organization_id = ${orgId}::uuid`);
+    // `@>` (not `= ANY`) so the GIN idx_runs_brand_ids narrows runs to the brand's:
+    // 0.65 s for the busiest org's top brand in prod instead of a seq scan of runs.
+    if (brandId) filters.push(sql`r.brand_ids @> ARRAY[${brandId}]::text[]`);
+    // A cost row's org IS its run's org (frozen at write, moved together by
+    // transfer-brand), so stating it on runs too lets the join read only the org's
+    // runs: busiest org grouped by brand, 25 s -> 4.4 s in prod.
+    if (orgId && (byBrand || brandId)) filters.push(sql`r.organization_id = ${orgId}::uuid`);
+    // The runs join is paid only when a brand is asked for. Grouped by brand, a
+    // run with no brand lands in a NULL brand group (unnest of an empty array
+    // would drop it, so it is coalesced to one NULL element).
+    // With a brandId filter the only brand group is that brand: a co-branded run's
+    // other brands were not asked for.
+    const unnestBrands = byBrand && !brandId;
+    const fromSql = unnestBrands
+      ? sql`runs_costs rc JOIN runs r ON r.id = rc.run_id CROSS JOIN LATERAL unnest(COALESCE(NULLIF(r.brand_ids, '{}'), ARRAY[NULL]::text[])) AS b(brand_id)`
+      : brandId
+        ? sql`runs_costs rc JOIN runs r ON r.id = rc.run_id`
+        : sql`runs_costs rc`;
+    const orgCol = byOrg ? sql`rc.organization_id::text` : sql`NULL::text`;
+    const brandCol = unnestBrands ? sql`b.brand_id` : byBrand ? sql`${brandId}::text` : sql`NULL::text`;
 
     const rows = (await db.execute(sql`
       SELECT
+        ${orgCol} AS org_id,
+        ${brandCol} AS brand_id,
         to_char((rc.created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day,
         rc.cost_name,
         rc.cost_source,
-        SUM(rc.quantity) AS quantity,
-        COALESCE(SUM(rc.quantity) FILTER (WHERE rc.status = 'refunded'), 0) AS refunded_quantity
-      FROM runs_costs rc
+        SUM(rc.quantity)::text AS quantity,
+        COALESCE(SUM(rc.quantity) FILTER (WHERE rc.status = 'refunded'), 0)::text AS refunded_quantity,
+        COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'actual'), 0)::text AS billed,
+        COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'actual'), 0)::text AS net_billed,
+        COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'refunded'), 0)::text AS refunded,
+        COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'refunded'), 0)::text AS net_refunded
+      FROM ${fromSql}
       WHERE ${sql.join(filters, sql` AND `)}
-      GROUP BY 1, 2, 3
-      ORDER BY 1, 2, 3
+      GROUP BY 1, 2, 3, 4, 5
+      ORDER BY 3, 1 NULLS LAST, 2 NULLS LAST, 4, 5
     `)) as any[];
 
-    // Totals summed in decimal.js from the same day rows (never Number on a quantity).
-    const totals = new Map<string, { costName: string; costSource: string; quantity: Decimal; refundedQuantity: Decimal }>();
+    const groupKeys = (r: { org_id: string | null; brand_id: string | null }) => ({
+      ...(byOrg && { orgId: r.org_id ?? null }),
+      ...(byBrand && { brandId: r.brand_id ?? null }),
+    });
+    // Totals summed in decimal.js from the same day rows (never Number on a quantity or a cost).
+    const totals = new Map<string, { head: Record<string, unknown>; sort: string[]; sums: Record<string, Decimal> }>();
     const days = rows.map((r) => {
-      const key = `${r.cost_name}\u0000${r.cost_source}`;
-      const t = totals.get(key) ?? { costName: r.cost_name, costSource: r.cost_source, quantity: new Decimal(0), refundedQuantity: new Decimal(0) };
-      t.quantity = t.quantity.plus(r.quantity as string);
-      t.refundedQuantity = t.refundedQuantity.plus(r.refunded_quantity as string);
-      totals.set(key, t);
-      return {
-        day: r.day as string,
-        costName: r.cost_name as string,
-        costSource: r.cost_source as string,
-        quantity: new Decimal(r.quantity as string).toFixed(6),
-        refundedQuantity: new Decimal(r.refunded_quantity as string).toFixed(6),
+      const head = { ...groupKeys(r), costName: r.cost_name as string, costSource: r.cost_source as string };
+      const key = JSON.stringify(head);
+      const t = totals.get(key) ?? {
+        head,
+        sort: [r.org_id ?? "\uffff", r.brand_id ?? "\uffff", r.cost_name, r.cost_source],
+        sums: Object.fromEntries(Object.keys(CONSUMPTION_FIELDS).map((f) => [f, new Decimal(0)])),
       };
+      const figures: Record<string, string> = {};
+      for (const [field, col] of Object.entries(CONSUMPTION_FIELDS) as [keyof typeof CONSUMPTION_FIELDS, string][]) {
+        t.sums[field] = t.sums[field].plus(r[col] as string);
+        figures[field] = new Decimal(r[col] as string).toFixed(CONSUMPTION_SCALE[field]);
+      }
+      totals.set(key, t);
+      return { day: r.day as string, ...head, ...figures };
     });
 
+    const cmp = (a: string[], b: string[]) => {
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+      return 0;
+    };
     res.json({
       timezone: "UTC",
       since: since ?? null,
       statuses: ["actual", "refunded"],
+      groupBy,
       days,
       totals: [...totals.values()]
-        .sort((a, b) => (a.costName === b.costName ? a.costSource.localeCompare(b.costSource) : a.costName < b.costName ? -1 : 1))
-        .map((t) => ({ costName: t.costName, costSource: t.costSource, quantity: t.quantity.toFixed(6), refundedQuantity: t.refundedQuantity.toFixed(6) })),
+        .sort((a, b) => cmp(a.sort, b.sort))
+        .map((t) => ({
+          ...t.head,
+          ...Object.fromEntries(
+            (Object.keys(CONSUMPTION_FIELDS) as (keyof typeof CONSUMPTION_FIELDS)[]).map((f) => [f, t.sums[f].toFixed(CONSUMPTION_SCALE[f])]),
+          ),
+        })),
     });
   } catch (err) {
     console.error("[Runs Service] Error in GET /internal/stats/costs/consumption:", err);
