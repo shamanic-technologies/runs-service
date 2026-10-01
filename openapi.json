@@ -2191,6 +2191,253 @@
           "groups"
         ]
       },
+      "CostMarginResponse": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "object",
+            "properties": {
+              "billedCostInUsdCents": {
+                "type": "string",
+                "description": "BILLED gross of CHARGED platform rows (status 'actual', cost_source 'platform'). = pricedBilled + unpricedBilled."
+              },
+              "netBilledCostInUsdCents": {
+                "type": "string",
+                "description": "billedCostInUsdCents net of the per-org usage discount frozen on each row."
+              },
+              "pricedBilledCostInUsdCents": {
+                "type": "string",
+                "description": "Billed gross of the charged rows whose vendor cost is known."
+              },
+              "netPricedBilledCostInUsdCents": {
+                "type": "string"
+              },
+              "vendorCostInUsdCents": {
+                "type": "string",
+                "description": "What the vendor charged us (before our markup) for the PRICED charged rows."
+              },
+              "marginCostInUsdCents": {
+                "type": "string",
+                "description": "pricedBilled - vendor, exactly. Priced rows only: unpriced spend is never counted at zero vendor cost."
+              },
+              "netMarginCostInUsdCents": {
+                "type": "string",
+                "description": "netPricedBilled - vendor, exactly."
+              },
+              "unpricedBilledCostInUsdCents": {
+                "type": "string",
+                "description": "Billed gross of charged rows with NO known vendor cost. Kept out of margin."
+              },
+              "netUnpricedBilledCostInUsdCents": {
+                "type": "string"
+              },
+              "refundedCostInUsdCents": {
+                "type": "string",
+                "description": "Billed gross of REFUNDED rows (spend that happened, not charged). In no other figure."
+              },
+              "vendorRefundedCostInUsdCents": {
+                "type": "string",
+                "description": "Vendor cost of the priced refunded rows."
+              },
+              "unpricedRefundedCostInUsdCents": {
+                "type": "string"
+              },
+              "unpricedCostNames": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Distinct cost names of this row's charged/refunded rows with no known vendor cost, sorted."
+              }
+            },
+            "required": [
+              "billedCostInUsdCents",
+              "netBilledCostInUsdCents",
+              "pricedBilledCostInUsdCents",
+              "netPricedBilledCostInUsdCents",
+              "vendorCostInUsdCents",
+              "marginCostInUsdCents",
+              "netMarginCostInUsdCents",
+              "unpricedBilledCostInUsdCents",
+              "netUnpricedBilledCostInUsdCents",
+              "refundedCostInUsdCents",
+              "vendorRefundedCostInUsdCents",
+              "unpricedRefundedCostInUsdCents",
+              "unpricedCostNames"
+            ]
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Vendor per costs-service; null when costs-service never listed the cost name."
+                },
+                "billedCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross of CHARGED platform rows (status 'actual', cost_source 'platform'). = pricedBilled + unpricedBilled."
+                },
+                "netBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "billedCostInUsdCents net of the per-org usage discount frozen on each row."
+                },
+                "pricedBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of the charged rows whose vendor cost is known."
+                },
+                "netPricedBilledCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorCostInUsdCents": {
+                  "type": "string",
+                  "description": "What the vendor charged us (before our markup) for the PRICED charged rows."
+                },
+                "marginCostInUsdCents": {
+                  "type": "string",
+                  "description": "pricedBilled - vendor, exactly. Priced rows only: unpriced spend is never counted at zero vendor cost."
+                },
+                "netMarginCostInUsdCents": {
+                  "type": "string",
+                  "description": "netPricedBilled - vendor, exactly."
+                },
+                "unpricedBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of charged rows with NO known vendor cost. Kept out of margin."
+                },
+                "netUnpricedBilledCostInUsdCents": {
+                  "type": "string"
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of REFUNDED rows (spend that happened, not charged). In no other figure."
+                },
+                "vendorRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Vendor cost of the priced refunded rows."
+                },
+                "unpricedRefundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedCostNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Distinct cost names of this row's charged/refunded rows with no known vendor cost, sorted."
+                }
+              },
+              "required": [
+                "provider",
+                "billedCostInUsdCents",
+                "netBilledCostInUsdCents",
+                "pricedBilledCostInUsdCents",
+                "netPricedBilledCostInUsdCents",
+                "vendorCostInUsdCents",
+                "marginCostInUsdCents",
+                "netMarginCostInUsdCents",
+                "unpricedBilledCostInUsdCents",
+                "netUnpricedBilledCostInUsdCents",
+                "refundedCostInUsdCents",
+                "vendorRefundedCostInUsdCents",
+                "unpricedRefundedCostInUsdCents",
+                "unpricedCostNames"
+              ]
+            }
+          },
+          "costItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "costName": {
+                  "type": "string"
+                },
+                "billedCostInUsdCents": {
+                  "type": "string",
+                  "description": "BILLED gross of CHARGED platform rows (status 'actual', cost_source 'platform'). = pricedBilled + unpricedBilled."
+                },
+                "netBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "billedCostInUsdCents net of the per-org usage discount frozen on each row."
+                },
+                "pricedBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of the charged rows whose vendor cost is known."
+                },
+                "netPricedBilledCostInUsdCents": {
+                  "type": "string"
+                },
+                "vendorCostInUsdCents": {
+                  "type": "string",
+                  "description": "What the vendor charged us (before our markup) for the PRICED charged rows."
+                },
+                "marginCostInUsdCents": {
+                  "type": "string",
+                  "description": "pricedBilled - vendor, exactly. Priced rows only: unpriced spend is never counted at zero vendor cost."
+                },
+                "netMarginCostInUsdCents": {
+                  "type": "string",
+                  "description": "netPricedBilled - vendor, exactly."
+                },
+                "unpricedBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of charged rows with NO known vendor cost. Kept out of margin."
+                },
+                "netUnpricedBilledCostInUsdCents": {
+                  "type": "string"
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed gross of REFUNDED rows (spend that happened, not charged). In no other figure."
+                },
+                "vendorRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Vendor cost of the priced refunded rows."
+                },
+                "unpricedRefundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "unpricedCostNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Distinct cost names of this row's charged/refunded rows with no known vendor cost, sorted."
+                }
+              },
+              "required": [
+                "provider",
+                "costName",
+                "billedCostInUsdCents",
+                "netBilledCostInUsdCents",
+                "pricedBilledCostInUsdCents",
+                "netPricedBilledCostInUsdCents",
+                "vendorCostInUsdCents",
+                "marginCostInUsdCents",
+                "netMarginCostInUsdCents",
+                "unpricedBilledCostInUsdCents",
+                "netUnpricedBilledCostInUsdCents",
+                "refundedCostInUsdCents",
+                "vendorRefundedCostInUsdCents",
+                "unpricedRefundedCostInUsdCents",
+                "unpricedCostNames"
+              ]
+            }
+          }
+        },
+        "required": [
+          "total",
+          "providers",
+          "costItems"
+        ]
+      },
       "VendorRunsResponse": {
         "type": "object",
         "properties": {
@@ -4977,6 +5224,65 @@
           },
           "400": {
             "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "costs-service vendor catalogue unavailable or malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/costs/margin": {
+      "get": {
+        "summary": "Platform billed vs vendor cost and margin, per provider and cost item (service-auth only)",
+        "description": "Platform-billed spend since inception, fleet-wide (or one org): a total, one row per provider and one per (provider, cost item), each with billed gross/net, vendor cost, margin and the unpriced remainder. Billed = charged rows (status 'actual'); provisioned, cancelled and BYOK rows are in no figure; refunded rows are stated apart. Vendor cost per row is priced exactly as GET /internal/stats/costs/vendor prices it. Provider = the matched price version's provider (a cost name can change vendor over time); for an unpriced row, the provider of its name's version served when it was written. Invariants per row: margin + vendor == pricedBilled; netMargin + vendor == netPricedBilled; billed == pricedBilled + unpricedBilled. Rows ordered by billed desc. Service-auth only: reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "One org (the run's org frozen on each cost row). Absent = the whole fleet."
+            },
+            "required": false,
+            "description": "One org (the run's org frozen on each cost row). Absent = the whole fleet.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Margin by provider and cost item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CostMarginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid orgId",
             "content": {
               "application/json": {
                 "schema": {
