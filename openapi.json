@@ -2591,6 +2591,17 @@
             },
             "description": "Row statuses counted as consumption: ['actual','refunded']."
           },
+          "groupBy": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "orgId",
+                "brandId"
+              ]
+            },
+            "description": "Grouping keys applied, in canonical order (orgId, brandId); [] when none."
+          },
           "days": {
             "type": "array",
             "items": {
@@ -2600,6 +2611,16 @@
                   "type": "string",
                   "description": "UTC day of the cost row's created_at, YYYY-MM-DD."
                 },
+                "orgId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy containing orgId; null for org-less platform runs."
+                },
+                "brandId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy containing brandId; null for runs with no brand."
+                },
                 "costName": {
                   "type": "string"
                 },
@@ -2618,6 +2639,22 @@
                 "refundedQuantity": {
                   "type": "string",
                   "description": "The part of quantity carried by refunded rows (already inside quantity). Decimal string, scale 6."
+                },
+                "billedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Gross billed: SUM(total_cost_in_usd_cents) of 'actual' rows (the margin read's billed). Scale 10."
+                },
+                "netBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed net of the per-org usage discount frozen on each row (gross when the row predates the freeze). Scale 10."
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Gross of refunded rows: spend that happened and that we did not charge. Not inside billed. Scale 10."
+                },
+                "netRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Net of refunded rows. Scale 10."
                 }
               },
               "required": [
@@ -2625,16 +2662,30 @@
                 "costName",
                 "costSource",
                 "quantity",
-                "refundedQuantity"
+                "refundedQuantity",
+                "billedCostInUsdCents",
+                "netBilledCostInUsdCents",
+                "refundedCostInUsdCents",
+                "netRefundedCostInUsdCents"
               ]
             },
-            "description": "SPARSE: one entry per (day, costName, costSource) with at least one counted row. Ordered by day, costName, costSource."
+            "description": "SPARSE: one entry per (day, group keys, costName, costSource) with at least one counted row. Ordered by day, orgId, brandId, costName, costSource."
           },
           "totals": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
+                "orgId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy containing orgId; null for org-less platform runs."
+                },
+                "brandId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy containing brandId; null for runs with no brand."
+                },
                 "costName": {
                   "type": "string"
                 },
@@ -2653,22 +2704,43 @@
                 "refundedQuantity": {
                   "type": "string",
                   "description": "The part of quantity carried by refunded rows (already inside quantity). Decimal string, scale 6."
+                },
+                "billedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Gross billed: SUM(total_cost_in_usd_cents) of 'actual' rows (the margin read's billed). Scale 10."
+                },
+                "netBilledCostInUsdCents": {
+                  "type": "string",
+                  "description": "Billed net of the per-org usage discount frozen on each row (gross when the row predates the freeze). Scale 10."
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Gross of refunded rows: spend that happened and that we did not charge. Not inside billed. Scale 10."
+                },
+                "netRefundedCostInUsdCents": {
+                  "type": "string",
+                  "description": "Net of refunded rows. Scale 10."
                 }
               },
               "required": [
                 "costName",
                 "costSource",
                 "quantity",
-                "refundedQuantity"
+                "refundedQuantity",
+                "billedCostInUsdCents",
+                "netBilledCostInUsdCents",
+                "refundedCostInUsdCents",
+                "netRefundedCostInUsdCents"
               ]
             },
-            "description": "Per (costName, costSource), the sum of its days exactly. Ordered by costName, costSource."
+            "description": "Per (group keys, costName, costSource), the sum of its days exactly. Ordered by orgId, brandId, costName, costSource."
           }
         },
         "required": [
           "timezone",
           "since",
           "statuses",
+          "groupBy",
           "days",
           "totals"
         ]
@@ -5603,8 +5675,8 @@
     },
     "/internal/stats/costs/consumption": {
       "get": {
-        "summary": "Units consumed per UTC day per cost name, fleet-wide, platform vs org key apart (service-auth only)",
-        "description": "Fleet-wide (every org, and org-less platform runs) quantity consumed per UTC day of each cost row's created_at, per cost name and per cost source (platform key vs the org's own key, never merged). Counts rows with status 'actual' or 'refunded' — the same rows the margin read counts as spend that really happened; provisioned holds and cancelled rows are excluded. Filter by costNames and a since day. Sparse days. Quantities only, no money. Service-auth only.",
+        "summary": "Units consumed and money billed per UTC day per cost name, fleet-wide or per org / brand, platform vs org key apart (service-auth only)",
+        "description": "Quantity consumed and money billed per UTC day of each cost row's created_at, per cost name and per cost source (platform key vs the org's own key, never merged): fleet-wide (every org, and org-less platform runs) by default, narrowed by orgId / brandId and optionally grouped by orgId and/or brandId. Counts rows with status 'actual' or 'refunded' — the same rows the margin read counts as spend that really happened; provisioned holds and cancelled rows are excluded. Billed = 'actual' rows (gross and net), refunded stated apart, as in the margin read. Filter by costNames and a since day. Sparse days. Service-auth only.",
         "security": [
           {
             "apiKey": []
@@ -5630,6 +5702,37 @@
             "description": "YYYY-MM-DD: only rows created on or after this UTC day. Absent = since inception.",
             "name": "since",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Only cost rows of this org (the RUN's org, frozen on the cost row). Absent = fleet-wide."
+            },
+            "required": false,
+            "description": "Only cost rows of this org (the RUN's org, frozen on the cost row). Absent = fleet-wide.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Only cost rows whose run carries this brand in brand_ids (solo or co-branded)."
+            },
+            "required": false,
+            "description": "Only cost rows whose run carries this brand in brand_ids (solo or co-branded).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated subset of orgId, brandId: adds that key to every day/total row. Grouped by brandId, a co-branded run's row counts under EACH of its brands (sums across brands then exceed the ungrouped figure); a run with no brand lands under brandId null. With a brandId filter, the only brand group is that brand. Absent = no grouping beyond day x costName x costSource."
+            },
+            "required": false,
+            "description": "Comma-separated subset of orgId, brandId: adds that key to every day/total row. Grouped by brandId, a co-branded run's row counts under EACH of its brands (sums across brands then exceed the ungrouped figure); a run with no brand lands under brandId null. With a brandId filter, the only brand group is that brand. Absent = no grouping beyond day x costName x costSource.",
+            "name": "groupBy",
+            "in": "query"
           }
         ],
         "responses": {
@@ -5644,7 +5747,7 @@
             }
           },
           "400": {
-            "description": "Invalid costNames or since",
+            "description": "Invalid costNames, since, orgId, brandId or groupBy",
             "content": {
               "application/json": {
                 "schema": {

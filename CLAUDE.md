@@ -357,7 +357,9 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   per credit of each vendor subscription = bank spend / these units): fleet-wide SUM(quantity) per UTC day of
   `created_at` × cost name × `cost_source` (platform key vs org key, never merged), SPARSE days + `totals[]`.
   Statuses = the margin read's: `actual` + `refunded` (refunded = consumed, not charged; `refundedQuantity` is
-  that part). No money, no catalogue call.
+  that part). Also billed money per row (`billed*`/`netBilled*` = `actual`, `refunded*` apart, as margin). `orgId` /
+  `brandId` filters + `groupBy=orgId,brandId` (org = 0029 frozen org; brand = `runs.brand_ids`, joined only when asked;
+  a co-branded run counts under EACH brand). No catalogue call.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 
