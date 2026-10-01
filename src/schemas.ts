@@ -1750,6 +1750,42 @@ registry.registerPath({
   },
 });
 
+export const CostMarginTimeseriesResponseSchema = z
+  .object({
+    interval: z.literal("month"),
+    timezone: z.literal("UTC"),
+    periods: z.array(z.string()).openapi({ description: "Every month (YYYY-MM-01, UTC) from the first cost row in scope through the current month, oldest first. Empty when no row is in scope." }),
+    providers: z.array(
+      z.object({
+        provider: z.string().nullable().openapi({ description: "Same attribution as GET /internal/stats/costs/margin; null when costs-service never listed the cost name." }),
+        buckets: z.array(
+          z.object({
+            period: z.string().openapi({ description: "Month start, YYYY-MM-01 (UTC), of the cost rows' created_at." }),
+            complete: z.boolean().openapi({ description: "false for the current month, which is not over." }),
+            ...CostMarginFigures,
+          }),
+        ).openapi({ description: "One bucket per entry of `periods`, same order; zeros where the provider had no row that month." }),
+      }),
+    ),
+  })
+  .openapi("CostMarginTimeseriesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/margin/timeseries",
+  summary: "Platform billed vs vendor cost and margin per provider, per UTC month since inception (service-auth only)",
+  description:
+    "GET /internal/stats/costs/margin split by provider and by UTC calendar month of each cost row's created_at, from the first row in scope through the current month, every provider carrying every month. Same rows, same provider attribution and same figures as the margin read: for each provider the sum of its months equals its row on the margin read, field by field (vendor months telescope from the rounded running sum so they add up to the 1e-10 cent). Providers ordered as the margin read. Service-auth only: reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: { query: CostMarginQuerySchema },
+  responses: {
+    200: { description: "Monthly margin per provider", content: { "application/json": { schema: CostMarginTimeseriesResponseSchema } } },
+    400: { description: "Invalid orgId", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/runs/vendor",
