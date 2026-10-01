@@ -2438,6 +2438,139 @@
           "costItems"
         ]
       },
+      "CostMarginTimeseriesResponse": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string",
+            "enum": [
+              "month"
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "enum": [
+              "UTC"
+            ]
+          },
+          "periods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every month (YYYY-MM-01, UTC) from the first cost row in scope through the current month, oldest first. Empty when no row is in scope."
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Same attribution as GET /internal/stats/costs/margin; null when costs-service never listed the cost name."
+                },
+                "buckets": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "period": {
+                        "type": "string",
+                        "description": "Month start, YYYY-MM-01 (UTC), of the cost rows' created_at."
+                      },
+                      "complete": {
+                        "type": "boolean",
+                        "description": "false for the current month, which is not over."
+                      },
+                      "billedCostInUsdCents": {
+                        "type": "string",
+                        "description": "BILLED gross of CHARGED platform rows (status 'actual', cost_source 'platform'). = pricedBilled + unpricedBilled."
+                      },
+                      "netBilledCostInUsdCents": {
+                        "type": "string",
+                        "description": "billedCostInUsdCents net of the per-org usage discount frozen on each row."
+                      },
+                      "pricedBilledCostInUsdCents": {
+                        "type": "string",
+                        "description": "Billed gross of the charged rows whose vendor cost is known."
+                      },
+                      "netPricedBilledCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "vendorCostInUsdCents": {
+                        "type": "string",
+                        "description": "What the vendor charged us (before our markup) for the PRICED charged rows."
+                      },
+                      "marginCostInUsdCents": {
+                        "type": "string",
+                        "description": "pricedBilled - vendor, exactly. Priced rows only: unpriced spend is never counted at zero vendor cost."
+                      },
+                      "netMarginCostInUsdCents": {
+                        "type": "string",
+                        "description": "netPricedBilled - vendor, exactly."
+                      },
+                      "unpricedBilledCostInUsdCents": {
+                        "type": "string",
+                        "description": "Billed gross of charged rows with NO known vendor cost. Kept out of margin."
+                      },
+                      "netUnpricedBilledCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "refundedCostInUsdCents": {
+                        "type": "string",
+                        "description": "Billed gross of REFUNDED rows (spend that happened, not charged). In no other figure."
+                      },
+                      "vendorRefundedCostInUsdCents": {
+                        "type": "string",
+                        "description": "Vendor cost of the priced refunded rows."
+                      },
+                      "unpricedRefundedCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "unpricedCostNames": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Distinct cost names of this row's charged/refunded rows with no known vendor cost, sorted."
+                      }
+                    },
+                    "required": [
+                      "period",
+                      "complete",
+                      "billedCostInUsdCents",
+                      "netBilledCostInUsdCents",
+                      "pricedBilledCostInUsdCents",
+                      "netPricedBilledCostInUsdCents",
+                      "vendorCostInUsdCents",
+                      "marginCostInUsdCents",
+                      "netMarginCostInUsdCents",
+                      "unpricedBilledCostInUsdCents",
+                      "netUnpricedBilledCostInUsdCents",
+                      "refundedCostInUsdCents",
+                      "vendorRefundedCostInUsdCents",
+                      "unpricedRefundedCostInUsdCents",
+                      "unpricedCostNames"
+                    ]
+                  },
+                  "description": "One bucket per entry of `periods`, same order; zeros where the provider had no row that month."
+                }
+              },
+              "required": [
+                "provider",
+                "buckets"
+              ]
+            }
+          }
+        },
+        "required": [
+          "interval",
+          "timezone",
+          "periods",
+          "providers"
+        ]
+      },
       "VendorRunsResponse": {
         "type": "object",
         "properties": {
@@ -5277,6 +5410,65 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CostMarginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid orgId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "costs-service vendor catalogue unavailable or malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/costs/margin/timeseries": {
+      "get": {
+        "summary": "Platform billed vs vendor cost and margin per provider, per UTC month since inception (service-auth only)",
+        "description": "GET /internal/stats/costs/margin split by provider and by UTC calendar month of each cost row's created_at, from the first row in scope through the current month, every provider carrying every month. Same rows, same provider attribution and same figures as the margin read: for each provider the sum of its months equals its row on the margin read, field by field (vendor months telescope from the rounded running sum so they add up to the 1e-10 cent). Providers ordered as the margin read. Service-auth only: reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "One org (the run's org frozen on each cost row). Absent = the whole fleet."
+            },
+            "required": false,
+            "description": "One org (the run's org frozen on each cost row). Absent = the whole fleet.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Monthly margin per provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CostMarginTimeseriesResponse"
                 }
               }
             }

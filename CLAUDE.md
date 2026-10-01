@@ -25,7 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
-- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -318,6 +318,11 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   `margin + vendor == pricedBilled` exactly; unpriced never enters margin. Provider is per VERSION
   (deepseek-tokens moved vercel → deepseek): matched version's, else the name's version served at
   `created_at`, else null.
+- **Monthly twin `GET /internal/stats/costs/margin/timeseries[?orgId=]`**: same CTEs (`marginCostedCtesSql`,
+  shared), per provider per UTC month of the cost row's `created_at`, dense from the first row to the
+  current month (`complete: false`). Each provider's months sum to its margin row FIELD BY FIELD: vendor
+  is unrounded per row, so a month's vendor = round(running sum) − round(previous running sum) (telescopes
+  to the margin read's rounded total; per-month rounding would drift). Pinned in `cost-margin-timeseries.test.ts`.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 

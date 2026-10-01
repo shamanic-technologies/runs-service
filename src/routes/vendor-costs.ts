@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
 import { requireInternalAuth } from "../middleware/auth.js";
@@ -626,6 +626,46 @@ function providerWindowsSql(versions: VendorCostVersion[]) {
   `;
 }
 
+/**
+ * The margin reads' row set as CTEs ending in `costed`: PLATFORM rows that were
+ * charged ('actual') or refunded, each with its provider, gross/net, vendor cost
+ * and whether it is priced. Shared by the since-inception margin and its monthly
+ * series so both attribute every row to the same provider on the same basis.
+ */
+function marginCostedCtesSql(versions: VendorCostVersion[], orgSql: SQL) {
+  return sql`
+      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      pw AS MATERIALIZED (${providerWindowsSql(versions)}),
+      base AS MATERIALIZED (
+        SELECT rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
+               rc.total_cost_in_usd_cents AS gross,
+               COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
+        FROM runs_costs rc
+        WHERE rc.cost_source = 'platform' AND rc.status IN ('actual','refunded') ${orgSql}
+      ),
+      costed AS (
+        SELECT
+          COALESCE(v.provider, pw.provider) AS provider,
+          b.cost_name,
+          b.status,
+          b.created_at,
+          b.gross,
+          b.net,
+          b.quantity * v.vendor AS vendor,
+          (v.vendor IS NOT NULL) AS priced
+        FROM base b
+        LEFT JOIN v
+          ON v.cost_name = b.cost_name
+         AND v.billed = b.unit_cost_in_usd_cents
+         AND b.created_at >= v.valid_from
+         AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
+        LEFT JOIN pw
+          ON pw.cost_name = b.cost_name
+         AND b.created_at >= pw.valid_from
+         AND (pw.valid_to IS NULL OR b.created_at < pw.valid_to)
+      )`;
+}
+
 /** Money fields of one margin row, all computed in Postgres and served as 10-decimal strings. */
 const MARGIN_MONEY_FIELDS = {
   billedCostInUsdCents: "billed",
@@ -684,35 +724,7 @@ router.get("/internal/stats/costs/margin", requireInternalAuth, async (req, res)
     const versions = await fetchVendorCostCatalog();
 
     const rows = (await db.execute(sql`
-      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
-      pw AS MATERIALIZED (${providerWindowsSql(versions)}),
-      base AS MATERIALIZED (
-        SELECT rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
-               rc.total_cost_in_usd_cents AS gross,
-               COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
-        FROM runs_costs rc
-        WHERE rc.cost_source = 'platform' AND rc.status IN ('actual','refunded') ${orgSql}
-      ),
-      costed AS (
-        SELECT
-          COALESCE(v.provider, pw.provider) AS provider,
-          b.cost_name,
-          b.status,
-          b.gross,
-          b.net,
-          b.quantity * v.vendor AS vendor,
-          (v.vendor IS NOT NULL) AS priced
-        FROM base b
-        LEFT JOIN v
-          ON v.cost_name = b.cost_name
-         AND v.billed = b.unit_cost_in_usd_cents
-         AND b.created_at >= v.valid_from
-         AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
-        LEFT JOIN pw
-          ON pw.cost_name = b.cost_name
-         AND b.created_at >= pw.valid_from
-         AND (pw.valid_to IS NULL OR b.created_at < pw.valid_to)
-      ),
+      ${marginCostedCtesSql(versions, orgSql)},
       sums AS (
         SELECT
           provider,
@@ -761,6 +773,131 @@ router.get("/internal/stats/costs/margin", requireInternalAuth, async (req, res)
     res.json({ total: marginRow(totalRow), providers, costItems });
   } catch (err) {
     console.error("[Runs Service] Error in GET /internal/stats/costs/margin:", err);
+    if (err instanceof VendorCostCatalogError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * GET /internal/stats/costs/margin/timeseries — the margin read above, split by
+ * provider and by UTC calendar MONTH of the cost row's created_at (when the money
+ * was charged), since the first row in scope through the current month.
+ *
+ * Same rows, same provider attribution, same figures as the margin read, so for
+ * every provider the sum of its months equals its row there, field by field and
+ * to the 1e-10 cent. The vendor cost is unrounded per row (quantity x vendor
+ * unit) and the margin read rounds the provider's lifetime SUM to 10 decimals;
+ * rounding each month alone would drift from it. So a month's vendor figure is
+ * round(running SUM through it) - round(running SUM before it): the months
+ * telescope to the rounded total exactly, and each one is within 1e-10 of its
+ * own unrounded sum. Billed gross/net are scale 10 per row and sum exactly.
+ *
+ * Every provider carries every period (zeros where it had no row), oldest first;
+ * the current month is `complete: false`. Providers ordered as the margin read.
+ *
+ * Service-auth only — the vendor cost reveals our margin.
+ */
+router.get("/internal/stats/costs/margin/timeseries", requireInternalAuth, async (req, res) => {
+  try {
+    const orgId = req.query.orgId;
+    if (orgId !== undefined && (typeof orgId !== "string" || !UUID_RE.test(orgId))) {
+      res.status(400).json({ error: "orgId must be a valid UUID" });
+      return;
+    }
+    const orgSql = orgId ? sql`AND rc.organization_id = ${orgId}::uuid` : sql``;
+
+    const versions = await fetchVendorCostCatalog();
+
+    const rows = (await db.execute(sql`
+      ${marginCostedCtesSql(versions, orgSql)},
+      monthly AS (
+        SELECT
+          provider,
+          date_trunc('month', created_at AT TIME ZONE 'UTC')::date AS month,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual'), 0) AS billed,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual'), 0) AS net_billed,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual' AND priced), 0) AS priced,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual' AND priced), 0) AS net_priced,
+          COALESCE(SUM(vendor) FILTER (WHERE status = 'actual' AND priced), 0) AS vendor_raw,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual' AND NOT priced), 0) AS unpriced,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual' AND NOT priced), 0) AS net_unpriced,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'refunded'), 0) AS refunded,
+          COALESCE(SUM(vendor) FILTER (WHERE status = 'refunded' AND priced), 0) AS vendor_refunded_raw,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'refunded' AND NOT priced), 0) AS unpriced_refunded,
+          COALESCE(array_agg(DISTINCT cost_name ORDER BY cost_name) FILTER (WHERE NOT priced), '{}') AS unpriced_cost_names
+        FROM costed
+        GROUP BY 1, 2
+      ),
+      running AS (
+        SELECT m.*,
+               round(SUM(vendor_raw) OVER w, 10) AS vendor_cum,
+               round(SUM(vendor_refunded_raw) OVER w, 10) AS vendor_refunded_cum,
+               SUM(billed) OVER (PARTITION BY provider) AS provider_billed
+        FROM monthly m
+        WINDOW w AS (PARTITION BY provider ORDER BY month)
+      ),
+      telescoped AS (
+        SELECT r.*,
+               vendor_cum - COALESCE(LAG(vendor_cum) OVER w, 0) AS vendor,
+               vendor_refunded_cum - COALESCE(LAG(vendor_refunded_cum) OVER w, 0) AS vendor_refunded
+        FROM running r
+        WINDOW w AS (PARTITION BY provider ORDER BY month)
+      )
+      SELECT
+        provider,
+        to_char(month, 'YYYY-MM-DD') AS period,
+        round(billed, 10)::text AS billed,
+        round(net_billed, 10)::text AS net_billed,
+        round(priced, 10)::text AS priced,
+        round(net_priced, 10)::text AS net_priced,
+        vendor::text AS vendor,
+        (round(priced, 10) - vendor)::text AS margin,
+        (round(net_priced, 10) - vendor)::text AS net_margin,
+        round(unpriced, 10)::text AS unpriced,
+        round(net_unpriced, 10)::text AS net_unpriced,
+        round(refunded, 10)::text AS refunded,
+        vendor_refunded::text AS vendor_refunded,
+        round(unpriced_refunded, 10)::text AS unpriced_refunded,
+        unpriced_cost_names
+      FROM telescoped
+      ORDER BY round(provider_billed, 10) DESC, provider NULLS LAST, month
+    `)) as any[];
+
+    const nowMonth = new Date().toISOString().slice(0, 7) + "-01";
+    // Dense calendar: first month in scope through the current UTC month.
+    const periods: string[] = [];
+    if (rows.length > 0) {
+      const first = rows.reduce((min, r) => (r.period < min ? (r.period as string) : min), nowMonth);
+      for (let d = new Date(`${first}T00:00:00Z`); ; d.setUTCMonth(d.getUTCMonth() + 1)) {
+        const p = d.toISOString().slice(0, 10);
+        if (p > nowMonth) break;
+        periods.push(p);
+      }
+    }
+
+    const zeroRow = marginRow(
+      Object.fromEntries([...Object.values(MARGIN_MONEY_FIELDS).map((c) => [c, "0.0000000000"]), ["unpriced_cost_names", []]]),
+    );
+    const byProvider = new Map<string | null, Map<string, any>>();
+    for (const r of rows) {
+      const provider = (r.provider as string | null) ?? null;
+      if (!byProvider.has(provider)) byProvider.set(provider, new Map());
+      byProvider.get(provider)!.set(r.period as string, r);
+    }
+    const providers = [...byProvider].map(([provider, months]) => ({
+      provider,
+      buckets: periods.map((period) => {
+        const r = months.get(period);
+        return { period, complete: period < nowMonth, ...(r ? marginRow(r) : zeroRow) };
+      }),
+    }));
+
+    res.json({ interval: "month", timezone: "UTC", periods, providers });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/stats/costs/margin/timeseries:", err);
     if (err instanceof VendorCostCatalogError) {
       res.status(502).json({ error: err.message });
       return;
