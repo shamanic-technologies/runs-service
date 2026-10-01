@@ -16,6 +16,12 @@
 export interface VendorCostVersion {
   costName: string;
   /**
+   * The vendor that served this version (anthropic, instantly, …), as costs-service states it.
+   * Per VERSION, not per name: one cost name can move between vendors (deepseek via vercel, then
+   * deepseek direct). Null only if costs-service sends none.
+   */
+  provider: string | null;
+  /**
    * The instant this version started being served: the later of its effective_from and its
    * created_at — exactly when `/v1/platform-prices/{name}` could first have returned it, i.e.
    * the earliest a runs row could have frozen its price (costs-service's own "would have
@@ -92,8 +98,12 @@ export async function fetchVendorCostCatalog(): Promise<VendorCostVersion[]> {
     if (v.vendorCostKnown === true && v.vendorCostPerUnitInUsdCents === null) {
       throw new VendorCostCatalogError(`costs-service vendor catalogue: version ${i} is known but carries no vendor cost`);
     }
+    if (v.provider !== undefined && v.provider !== null && typeof v.provider !== "string") {
+      throw new VendorCostCatalogError(`costs-service vendor catalogue: version ${i} provider is not a string or null`);
+    }
     return {
       costName: v.name,
+      provider: (v.provider as string | null | undefined) ?? null,
       servedFrom: new Date(Math.max(effectiveFrom, createdAt)).toISOString(),
       billedUnitCostInUsdCents: decimalOrNull(v.billedPricePerUnitInUsdCents, `version ${i} billedPricePerUnitInUsdCents`),
       vendorUnitCostInUsdCents: decimalOrNull(v.vendorCostPerUnitInUsdCents, `version ${i} vendorCostPerUnitInUsdCents`),

@@ -1706,6 +1706,50 @@ registry.registerPath({
   },
 });
 
+const CostMarginFigures = {
+  billedCostInUsdCents: z.string().openapi({ description: "BILLED gross of CHARGED platform rows (status 'actual', cost_source 'platform'). = pricedBilled + unpricedBilled." }),
+  netBilledCostInUsdCents: z.string().openapi({ description: "billedCostInUsdCents net of the per-org usage discount frozen on each row." }),
+  pricedBilledCostInUsdCents: z.string().openapi({ description: "Billed gross of the charged rows whose vendor cost is known." }),
+  netPricedBilledCostInUsdCents: z.string(),
+  vendorCostInUsdCents: z.string().openapi({ description: "What the vendor charged us (before our markup) for the PRICED charged rows." }),
+  marginCostInUsdCents: z.string().openapi({ description: "pricedBilled - vendor, exactly. Priced rows only: unpriced spend is never counted at zero vendor cost." }),
+  netMarginCostInUsdCents: z.string().openapi({ description: "netPricedBilled - vendor, exactly." }),
+  unpricedBilledCostInUsdCents: z.string().openapi({ description: "Billed gross of charged rows with NO known vendor cost. Kept out of margin." }),
+  netUnpricedBilledCostInUsdCents: z.string(),
+  refundedCostInUsdCents: z.string().openapi({ description: "Billed gross of REFUNDED rows (spend that happened, not charged). In no other figure." }),
+  vendorRefundedCostInUsdCents: z.string().openapi({ description: "Vendor cost of the priced refunded rows." }),
+  unpricedRefundedCostInUsdCents: z.string(),
+  unpricedCostNames: z.array(z.string()).openapi({ description: "Distinct cost names of this row's charged/refunded rows with no known vendor cost, sorted." }),
+};
+
+export const CostMarginQuerySchema = z.object({
+  orgId: z.string().uuid().optional().openapi({ description: "One org (the run's org frozen on each cost row). Absent = the whole fleet." }),
+});
+
+export const CostMarginResponseSchema = z
+  .object({
+    total: z.object(CostMarginFigures),
+    providers: z.array(z.object({ provider: z.string().nullable().openapi({ description: "Vendor per costs-service; null when costs-service never listed the cost name." }), ...CostMarginFigures })),
+    costItems: z.array(z.object({ provider: z.string().nullable(), costName: z.string(), ...CostMarginFigures })),
+  })
+  .openapi("CostMarginResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/margin",
+  summary: "Platform billed vs vendor cost and margin, per provider and cost item (service-auth only)",
+  description:
+    "Platform-billed spend since inception, fleet-wide (or one org): a total, one row per provider and one per (provider, cost item), each with billed gross/net, vendor cost, margin and the unpriced remainder. Billed = charged rows (status 'actual'); provisioned, cancelled and BYOK rows are in no figure; refunded rows are stated apart. Vendor cost per row is priced exactly as GET /internal/stats/costs/vendor prices it. Provider = the matched price version's provider (a cost name can change vendor over time); for an unpriced row, the provider of its name's version served when it was written. Invariants per row: margin + vendor == pricedBilled; netMargin + vendor == netPricedBilled; billed == pricedBilled + unpricedBilled. Rows ordered by billed desc. Service-auth only: reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: { query: CostMarginQuerySchema },
+  responses: {
+    200: { description: "Margin by provider and cost item", content: { "application/json": { schema: CostMarginResponseSchema } } },
+    400: { description: "Invalid orgId", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/runs/vendor",

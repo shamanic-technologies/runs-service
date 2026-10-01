@@ -34,12 +34,13 @@ function versionWindowsSql(versions: VendorCostVersion[]) {
       billed: v.billedUnitCostInUsdCents,
       vendor: v.vendorUnitCostInUsdCents,
       served_from: v.servedFrom,
+      provider: v.provider,
     }));
   return sql`
-    SELECT x.cost_name, x.billed, x.vendor, x.served_from AS valid_from,
+    SELECT x.cost_name, x.billed, x.vendor, x.provider, x.served_from AS valid_from,
            LEAD(x.served_from) OVER (PARTITION BY x.cost_name, x.billed ORDER BY x.served_from) AS valid_to
     FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
-      AS x(cost_name text, billed numeric, vendor numeric, served_from timestamptz)
+      AS x(cost_name text, billed numeric, vendor numeric, served_from timestamptz, provider text)
   `;
 }
 
@@ -594,6 +595,172 @@ router.get("/internal/stats/costs/vendor", requireInternalAuth, async (req, res)
     res.json({ groups });
   } catch (err) {
     console.error("[Runs Service] Error in GET /internal/stats/costs/vendor:", err);
+    if (err instanceof VendorCostCatalogError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// --- Margin by provider and cost item ---
+
+/**
+ * Which vendor a cost row's spend went to, per cost NAME and point in time: the
+ * provider of the name's version being served when the row was written,
+ * regardless of billed price. Used for rows that match no priced version (an
+ * unknown or retired billed price) — a priced row takes its MATCHED version's
+ * provider. The name's first window is open to -infinity so a row written before
+ * the catalogue's first version of its name still lands on that name's provider.
+ * Ties on served_from collapse to empty windows, so a row matches one window.
+ */
+function providerWindowsSql(versions: VendorCostVersion[]) {
+  const rows = versions.map((v) => ({ cost_name: v.costName, provider: v.provider, served_from: v.servedFrom }));
+  return sql`
+    SELECT x.cost_name, x.provider,
+           CASE WHEN ROW_NUMBER() OVER w = 1 THEN '-infinity'::timestamptz ELSE x.served_from END AS valid_from,
+           LEAD(x.served_from) OVER w AS valid_to
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+      AS x(cost_name text, provider text, served_from timestamptz)
+    WINDOW w AS (PARTITION BY x.cost_name ORDER BY x.served_from)
+  `;
+}
+
+/** Money fields of one margin row, all computed in Postgres and served as 10-decimal strings. */
+const MARGIN_MONEY_FIELDS = {
+  billedCostInUsdCents: "billed",
+  netBilledCostInUsdCents: "net_billed",
+  pricedBilledCostInUsdCents: "priced",
+  netPricedBilledCostInUsdCents: "net_priced",
+  vendorCostInUsdCents: "vendor",
+  marginCostInUsdCents: "margin",
+  netMarginCostInUsdCents: "net_margin",
+  unpricedBilledCostInUsdCents: "unpriced",
+  netUnpricedBilledCostInUsdCents: "net_unpriced",
+  refundedCostInUsdCents: "refunded",
+  vendorRefundedCostInUsdCents: "vendor_refunded",
+  unpricedRefundedCostInUsdCents: "unpriced_refunded",
+} as const;
+
+function marginRow(row: any) {
+  const out: Record<string, string | string[]> = {};
+  for (const [field, col] of Object.entries(MARGIN_MONEY_FIELDS)) out[field] = row[col] as string;
+  out.unpricedCostNames = row.unpriced_cost_names as string[];
+  return out;
+}
+
+/**
+ * GET /internal/stats/costs/margin — PLATFORM-billed spend, fleet-wide (or one
+ * org), since inception: per provider, per (provider, cost item) and in total,
+ * what we billed (gross, and net of the per-org usage discount frozen on each
+ * row), what the vendor charged us for it, and the margin.
+ *
+ * - Billed = CHARGED rows (status 'actual', cost_source 'platform'). Holds
+ *   (provisioned), cancels and BYOK rows are in no figure. Refunded rows — spend
+ *   that happened and that we did not charge — are stated apart (refunded*),
+ *   never folded into billed or margin.
+ * - A row is PRICED when costs-service states a vendor cost for the version it
+ *   froze (same matching as the other vendor-basis reads). Margin covers priced
+ *   rows only: margin + vendor == pricedBilled, exactly (net: netMargin + vendor
+ *   == netPricedBilled). An unpriced row's billed amount goes to unpriced*, never
+ *   into margin at zero vendor cost. billed == pricedBilled + unpricedBilled.
+ * - Provider = the matched version's provider; for an unpriced row, the provider
+ *   of the name's version served when the row was written; null when costs-service
+ *   has never listed the name.
+ *
+ * Service-auth only — the vendor cost reveals our margin.
+ */
+router.get("/internal/stats/costs/margin", requireInternalAuth, async (req, res) => {
+  try {
+    const orgId = req.query.orgId;
+    if (orgId !== undefined && (typeof orgId !== "string" || !UUID_RE.test(orgId))) {
+      res.status(400).json({ error: "orgId must be a valid UUID" });
+      return;
+    }
+    // runs_costs.organization_id is the RUN's org frozen at write (migration 0029):
+    // no runs join needed, the whole read is one pass over the ledger.
+    const orgSql = orgId ? sql`AND rc.organization_id = ${orgId}::uuid` : sql``;
+
+    const versions = await fetchVendorCostCatalog();
+
+    const rows = (await db.execute(sql`
+      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      pw AS MATERIALIZED (${providerWindowsSql(versions)}),
+      base AS MATERIALIZED (
+        SELECT rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
+               rc.total_cost_in_usd_cents AS gross,
+               COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
+        FROM runs_costs rc
+        WHERE rc.cost_source = 'platform' AND rc.status IN ('actual','refunded') ${orgSql}
+      ),
+      costed AS (
+        SELECT
+          COALESCE(v.provider, pw.provider) AS provider,
+          b.cost_name,
+          b.status,
+          b.gross,
+          b.net,
+          b.quantity * v.vendor AS vendor,
+          (v.vendor IS NOT NULL) AS priced
+        FROM base b
+        LEFT JOIN v
+          ON v.cost_name = b.cost_name
+         AND v.billed = b.unit_cost_in_usd_cents
+         AND b.created_at >= v.valid_from
+         AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
+        LEFT JOIN pw
+          ON pw.cost_name = b.cost_name
+         AND b.created_at >= pw.valid_from
+         AND (pw.valid_to IS NULL OR b.created_at < pw.valid_to)
+      ),
+      sums AS (
+        SELECT
+          provider,
+          cost_name,
+          GROUPING(provider, cost_name) AS lvl,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual'), 0) AS billed,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual'), 0) AS net_billed,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual' AND priced), 0) AS priced,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual' AND priced), 0) AS net_priced,
+          round(COALESCE(SUM(vendor) FILTER (WHERE status = 'actual' AND priced), 0), 10) AS vendor,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'actual' AND NOT priced), 0) AS unpriced,
+          COALESCE(SUM(net) FILTER (WHERE status = 'actual' AND NOT priced), 0) AS net_unpriced,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'refunded'), 0) AS refunded,
+          round(COALESCE(SUM(vendor) FILTER (WHERE status = 'refunded' AND priced), 0), 10) AS vendor_refunded,
+          COALESCE(SUM(gross) FILTER (WHERE status = 'refunded' AND NOT priced), 0) AS unpriced_refunded,
+          COALESCE(array_agg(DISTINCT cost_name ORDER BY cost_name) FILTER (WHERE NOT priced), '{}') AS unpriced_cost_names
+        FROM costed
+        GROUP BY GROUPING SETS ((provider, cost_name), (provider), ())
+      )
+      SELECT
+        provider, cost_name, lvl,
+        round(billed, 10)::text AS billed,
+        round(net_billed, 10)::text AS net_billed,
+        round(priced, 10)::text AS priced,
+        round(net_priced, 10)::text AS net_priced,
+        vendor::text AS vendor,
+        (round(priced, 10) - vendor)::text AS margin,
+        (round(net_priced, 10) - vendor)::text AS net_margin,
+        round(unpriced, 10)::text AS unpriced,
+        round(net_unpriced, 10)::text AS net_unpriced,
+        round(refunded, 10)::text AS refunded,
+        vendor_refunded::text AS vendor_refunded,
+        round(unpriced_refunded, 10)::text AS unpriced_refunded,
+        unpriced_cost_names
+      FROM sums
+      -- an expression binds to the numeric input column, not the text output alias
+      ORDER BY lvl DESC, round(billed, 10) DESC, provider NULLS LAST, cost_name
+    `)) as any[];
+
+    const totalRow = rows.find((r) => Number(r.lvl) === 3);
+    const providers = rows.filter((r) => Number(r.lvl) === 1).map((r) => ({ provider: (r.provider as string | null) ?? null, ...marginRow(r) }));
+    const costItems = rows
+      .filter((r) => Number(r.lvl) === 0)
+      .map((r) => ({ provider: (r.provider as string | null) ?? null, costName: r.cost_name as string, ...marginRow(r) }));
+    // GROUPING SETS always yields the () row, even over zero input rows.
+    res.json({ total: marginRow(totalRow), providers, costItems });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/stats/costs/margin:", err);
     if (err instanceof VendorCostCatalogError) {
       res.status(502).json({ error: err.message });
       return;
