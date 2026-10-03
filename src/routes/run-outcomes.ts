@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { sql, type SQL } from "drizzle-orm";
-import { db } from "../db/index.js";
+import { statsDb as db } from "../db/index.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 

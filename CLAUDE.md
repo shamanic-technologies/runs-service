@@ -496,7 +496,7 @@ about which.
   `HealthResponseSchema`. `deploy.sh` and the watchdog both key on the STATUS
   CODE, so a `slow` still reads as unhealthy to them — the extra value is for
   whoever reads the body.
-- **Pool is `max: 20`, and `idle_timeout` is deliberately UNSET.** postgres.js
+- **Pool is `max: 20` (plus the separate 8-connection stats pool, see "Stats reads never share a pool with writes"), and `idle_timeout` is deliberately UNSET.** postgres.js
   defaults `idle_timeout` to null (idle connections are never closed); setting a
   value buys a fresh TCP+TLS handshake after every quiet stretch, which is the
   mis-transplanted node-postgres setting the global notes warn about. 10
@@ -507,6 +507,29 @@ about which.
   did not, and billing polls it hard — on the whale org it sums ~691k
   platform-projected rows per call. A de-join or a cache for it is its own
   benchmarked PR.
+
+## Stats reads never share a pool with writes (migration 0039)
+
+2026-10-03: social-service's `POST /v1/platform-runs/:id/costs` timed out (15 s)
+two days running. ~20 brand-scoped stats reads (5-9 s each, often three identical
+copies) held every connection of the one pool, and the cost write queued behind
+them. Reproduced from inside the box: 72 concurrent stats reads → a cost POST took
+20.1 s.
+
+- **Two pools** (`src/db/index.ts`): `db` (max 20) for writes, lifecycle and
+  operational reads (billing totals, `GET /v1/runs`); `statsDb` (max 8,
+  `statement_timeout` 30 s) for EVERY read in `routes/stats.ts`, `vendor-costs.ts`,
+  `run-outcomes.ts`. A new reporting route imports `statsDb`, never `db`. 8 also
+  caps the database CPU stats can take (8 vCPUs shared with the fleet).
+- **Identical reads in flight share one execution** (`src/db/coalesce.ts`, on
+  `statsDb.execute` only): same SQL + params → the joiner awaits the leader's
+  promise. No cache; rows are shared by reference, so readers never mutate them.
+- **`idx_runs_org_feature_cover`** `(organization_id, feature_slug) INCLUDE
+  (started_at, campaign_id, workflow_slug, brand_ids, audience_id, id)` makes the
+  org+brand+feature reads index-only: split read 5-9 s → 1.0 s, audience read
+  6.5 s → 2.5 s. Built CONCURRENTLY out-of-band on prod (905 MB).
+- **Autovacuum at 2 %** on `runs` / `runs_costs` (default 20 % let `runs` go six
+  days with 540k dead rows; the per-day run count fell back to a 7.4 s seq scan).
 
 ## Deploy ordering with billing-service
 

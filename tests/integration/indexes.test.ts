@@ -78,6 +78,30 @@ describe("Database indexes", () => {
     expect(result[0].indexdef).toContain("organization_id");
   });
 
+  it("has the org + feature covering index for the brand stats reads (migration 0039)", async () => {
+    const result = await sql`
+      SELECT indexdef FROM pg_indexes
+      WHERE tablename = 'runs' AND indexname = 'idx_runs_org_feature_cover'
+    `;
+    expect(result).toHaveLength(1);
+    expect(result[0].indexdef).toContain("(organization_id, feature_slug) INCLUDE (started_at, campaign_id, workflow_slug, brand_ids, audience_id, id)");
+  });
+
+  it("vacuums runs and runs_costs at a 2% scale factor (migration 0039)", async () => {
+    const result = await sql`
+      SELECT relname, reloptions FROM pg_class
+      WHERE relname IN ('runs', 'runs_costs') AND relkind = 'r' ORDER BY relname
+    `;
+    for (const row of result) {
+      expect(row.reloptions).toEqual(expect.arrayContaining([
+        "autovacuum_vacuum_scale_factor=0.02",
+        "autovacuum_vacuum_insert_scale_factor=0.02",
+        "autovacuum_analyze_scale_factor=0.02",
+      ]));
+    }
+    expect(result).toHaveLength(2);
+  });
+
   it("has the created_at index on run_events for the retention sweep (migration 0032)", async () => {
     const result = await sql`
       SELECT indexname, indexdef FROM pg_indexes
