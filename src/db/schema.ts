@@ -42,6 +42,10 @@ export const runs = pgTable(
     index("idx_runs_campaign_started").on(table.campaignId, sql`${table.startedAt} DESC`),
     index("idx_runs_feature_slug").on(table.featureSlug),
     index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
+    // Covering index for the org-scoped brand reads (GET /v1/stats/costs, migration 0039).
+    // INCLUDE (started_at, campaign_id, workflow_slug, brand_ids, audience_id, id) is in the
+    // hand-authored migration; drizzle's index builder can't express INCLUDE.
+    index("idx_runs_org_feature_cover").on(table.organizationId, table.featureSlug),
     index("idx_runs_goal_org").on(table.goal, table.organizationId),
     index("idx_runs_brand_profile").on(table.brandProfileId),
     index("idx_runs_audience").on(table.audienceId),

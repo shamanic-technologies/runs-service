@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq, sql, inArray } from "drizzle-orm";
 import { Decimal } from "decimal.js";
-import { db } from "../db/index.js";
+import { statsDb as db } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {

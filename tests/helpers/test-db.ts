@@ -1,5 +1,5 @@
 import { eq, inArray, isNull, or } from "drizzle-orm";
-import { db, sql } from "../../src/db/index.js";
+import { db, sql, statsSql } from "../../src/db/index.js";
 import { runs, runsCosts } from "../../src/db/schema.js";
 
 // Org-scoped cleanup so integration test files can run in parallel.
@@ -116,5 +116,5 @@ export async function insertTestRunCost(data: {
 }
 
 export async function closeDb() {
-  await sql.end();
+  await Promise.all([sql.end(), statsSql.end()]);
 }

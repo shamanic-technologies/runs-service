@@ -274,6 +274,13 @@
       "when": 1781481600000,
       "tag": "0038_brand_transfer_moves",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1781568000000,
+      "tag": "0039_stats_read_isolation",
+      "breakpoints": true
     }
   ]
 }
