@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
+import { coalesceExecute } from "./coalesce.js";
 
 const connectionString = process.env.RUNS_SERVICE_DATABASE_URL;
 
@@ -31,3 +32,25 @@ export const sql = postgres(connectionString, {
   connection: { jit: "off" },
 });
 export const db = drizzle(sql, { schema });
+
+// ANALYTICS pool — every stats / reporting read (src/routes/stats.ts,
+// vendor-costs.ts, run-outcomes.ts) runs here, never on the pool above.
+//
+// Why a second pool: cost writes and run lifecycle calls answer every fleet
+// service in seconds or that service loses its cost declaration. With one pool,
+// dashboards polling multi-second brand aggregations held all 20 connections and
+// a `POST /v1/platform-runs/:id/costs` queued behind them until the caller's 15 s
+// timeout fired (social-service, 2026-10-03). A dedicated pool makes that queue
+// impossible: stats reads can only wait for EACH OTHER.
+//
+// `max: 8` is also the cap on how much database CPU the reads can take at once
+// (8 vCPUs on the box, shared with every other service), so writes keep CPU too.
+// `statement_timeout` bounds any single read: past 30 s it fails loud (500) instead
+// of holding a connection and a core for a minute while its caller has long given up.
+// Identical reads in flight share one execution (see coalesce.ts).
+export const statsSql = postgres(connectionString, {
+  max: 8,
+  connect_timeout: 10,
+  connection: { jit: "off", statement_timeout: 30000 },
+});
+export const statsDb = coalesceExecute(drizzle(statsSql, { schema }));

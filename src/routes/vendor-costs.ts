@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
-import { db } from "../db/index.js";
+import { statsDb as db } from "../db/index.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import {
   buildSlugToDynastyMap,
