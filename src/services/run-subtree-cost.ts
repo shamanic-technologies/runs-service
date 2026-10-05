@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { costAggregateSelectSql } from "./cost-aggregator.js";
+import { costAggregateNetSelectSql, costAggregateSelectSql } from "./cost-aggregator.js";
 
 /** Tokens GET /v1/runs accepts in `include`. */
 export const RUN_LIST_INCLUDES = ["subtreeCost"] as const;
@@ -33,12 +33,17 @@ export interface SubtreeBilledCost {
   total_cost: string;
   actual_cost: string;
   provisioned_cost: string;
+  net_total_cost: string;
+  net_actual_cost: string;
+  net_provisioned_cost: string;
 }
 
 /**
  * BILLED cost of each run's whole subtree (its own rows + every descendant's),
  * keyed by root run id — the same aggregation as GET /v1/runs/:id's
- * totalCostInUsdCents (costAggregateSelectSql, status IN ('actual','provisioned')).
+ * totalCostInUsdCents (costAggregateSelectSql, status IN ('actual','provisioned')),
+ * plus the same split on the frozen NET basis (costAggregateNetSelectSql:
+ * COALESCE(net, gross), so a row written before the discount freeze reads net == gross).
  * Bounded recursive CTE anchored on the given ids (idx_runs_parent), never a view.
  * A root with no cost rows anywhere in its subtree is absent from the map (= 0).
  */
@@ -60,10 +65,13 @@ export async function subtreeBilledCostByRoot(runIds: string[]): Promise<Map<str
       d.root_run_id,
       SUM(c.total_cost::numeric)::text AS total_cost,
       SUM(c.actual_cost::numeric)::text AS actual_cost,
-      SUM(c.provisioned_cost::numeric)::text AS provisioned_cost
+      SUM(c.provisioned_cost::numeric)::text AS provisioned_cost,
+      SUM(c.net_total_cost::numeric)::text AS net_total_cost,
+      SUM(c.net_actual_cost::numeric)::text AS net_actual_cost,
+      SUM(c.net_provisioned_cost::numeric)::text AS net_provisioned_cost
     FROM descendants d
     CROSS JOIN LATERAL (
-      SELECT ${costAggregateSelectSql("rc")}, count(*) AS n
+      SELECT ${costAggregateSelectSql("rc")}, ${costAggregateNetSelectSql("rc")}, count(*) AS n
       FROM runs_costs rc WHERE rc.run_id = d.id
     ) c
     WHERE c.n > 0

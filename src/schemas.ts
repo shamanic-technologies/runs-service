@@ -330,7 +330,7 @@ export const ListRunsQuerySchema = z.object({
   offset: z.string().optional(),
   include: z.string().optional().openapi({
     description:
-      "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400.",
+      "Comma-separated opt-in extras. `subtreeCost`: each run also carries the BILLED cost of its whole subtree (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, equal to GET /v1/runs/{id}'s totals) and the same split on the frozen NET basis (`netTotalCostInUsdCents`, `netActualCostInUsdCents`, `netProvisionedCostInUsdCents`). An execute-workflow run has no own cost rows, so this is what it cost. Requires `limit` between 1 and 500. An unknown value is a 400.",
   }),
 });
 
@@ -369,6 +369,9 @@ export const ListRunsResponseSchema = z
         totalCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. BILLED cost of the run's whole SUBTREE (its own rows + every descendant run's), status IN ('actual','provisioned') — equal to GET /v1/runs/{id}'s totalCostInUsdCents." }),
         actualCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree billed cost, status = 'actual'." }),
         provisionedCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree billed cost, status = 'provisioned'." }),
+        netTotalCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree cost on the frozen NET basis (post per-org usage discount, what the org pays) = SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)), status IN ('actual','provisioned'). A row written before the discount freeze reads net == gross." }),
+        netActualCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree NET cost, status = 'actual'." }),
+        netProvisionedCostInUsdCents: z.string().optional().openapi({ description: "Present only with `include=subtreeCost`. Subtree NET cost, status = 'provisioned'." }),
       }),
     ),
     limit: z.number().optional(),
