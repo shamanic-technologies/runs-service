@@ -1033,6 +1033,9 @@ router.get("/v1/runs", requireApiKey, async (req, res) => {
         totalCostInUsdCents: new Decimal(t?.total_cost ?? "0").toFixed(10),
         actualCostInUsdCents: new Decimal(t?.actual_cost ?? "0").toFixed(10),
         provisionedCostInUsdCents: new Decimal(t?.provisioned_cost ?? "0").toFixed(10),
+        netTotalCostInUsdCents: new Decimal(t?.net_total_cost ?? "0").toFixed(10),
+        netActualCostInUsdCents: new Decimal(t?.net_actual_cost ?? "0").toFixed(10),
+        netProvisionedCostInUsdCents: new Decimal(t?.net_provisioned_cost ?? "0").toFixed(10),
       };
     });
 
