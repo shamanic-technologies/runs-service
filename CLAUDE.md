@@ -322,6 +322,8 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
 - **Customer twin of `total*`: `GET /v1/runs?include=subtreeCost`** adds each run's SUBTREE billed
   cost (`totalCostInUsdCents`, `actualCostInUsdCents`, `provisionedCostInUsdCents`, same names and
   values as `/internal/runs/vendor` and `GET /v1/runs/:id`; `src/services/run-subtree-cost.ts`),
+  plus the same split on the frozen NET basis (`netTotal/netActual/netProvisionedCostInUsdCents`,
+  COALESCE(net, gross) per row; features-service sums net over lead-serve runs for sourcing spend),
   never a vendor figure. OPT-IN and requires `limit` 1..500: hot callers (campaign-service
   gate-check lists completed campaign-trigger ROOTS with `limit: maxLeads`, whose subtrees are whole
   campaign trees) never read it and must not pay the walk. Prod: 50 execute-workflow runs, 455
