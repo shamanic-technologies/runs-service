@@ -34,7 +34,7 @@ import {
   inheritAttribution,
   requestAttribution,
 } from "../services/attribution.js";
-import { featureSlugConflicts } from "../services/feature-slug.js";
+import { campaignIdConflicts, featureSlugConflicts } from "../services/feature-slug.js";
 import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
@@ -165,7 +165,16 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           conflicts.push(`brandIds: request="${resolvedBrandIds.join(",")}" vs parent="${parentRun.brandIds.join(",")}"`);
         }
       }
-      if (resolvedCampaignId && parentRun.campaignId && resolvedCampaignId !== parentRun.campaignId) {
+      if (
+        resolvedCampaignId &&
+        parentRun.campaignId &&
+        campaignIdConflicts({
+          childCampaignId: resolvedCampaignId,
+          parentCampaignId: parentRun.campaignId,
+          childFeatureSlug: resolvedFeatureSlug,
+          parentFeatureSlug: parentRun.featureSlug,
+        })
+      ) {
         conflicts.push(`campaignId: request="${resolvedCampaignId}" vs parent="${parentRun.campaignId}"`);
       }
       if (resolvedWorkflowSlug && parentRun.workflowSlug && resolvedWorkflowSlug !== parentRun.workflowSlug) {
