@@ -19,3 +19,25 @@ export function featureSlugConflicts(child: string, parent: string): boolean {
   if (isSourcingFeatureSlug(child) && !isSourcingFeatureSlug(parent)) return false;
   return true;
 }
+
+// SOURCE CAMPAIGNS (owner 2026-10-07): an offer's lead sources are campaigns of
+// their own (campaign-service, keyed offer + origin slug + leg
+// "start_to_lead_found"). The serve opened under an outreach workflow run is
+// FILED under the source campaign that found the lead, so a sourcing child may
+// carry its own campaignId under a non-sourcing parent, exactly like its slug.
+// Its own descendants then inherit (or must equal) the source campaign. Any other
+// campaign mismatch stays a parent-child conflict.
+export function campaignIdConflicts(args: {
+  childCampaignId: string;
+  parentCampaignId: string;
+  childFeatureSlug: string | null;
+  parentFeatureSlug: string | null;
+}): boolean {
+  if (args.childCampaignId === args.parentCampaignId) return false;
+  const sourcingUnderOutreach =
+    !!args.childFeatureSlug &&
+    !!args.parentFeatureSlug &&
+    isSourcingFeatureSlug(args.childFeatureSlug) &&
+    !isSourcingFeatureSlug(args.parentFeatureSlug);
+  return !sourcingUnderOutreach;
+}
