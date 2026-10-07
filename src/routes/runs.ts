@@ -34,6 +34,7 @@ import {
   inheritAttribution,
   requestAttribution,
 } from "../services/attribution.js";
+import { featureSlugConflicts } from "../services/feature-slug.js";
 import {
   CreateRunRequestSchema,
   UpdateRunRequestSchema,
@@ -170,7 +171,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (resolvedWorkflowSlug && parentRun.workflowSlug && resolvedWorkflowSlug !== parentRun.workflowSlug) {
         conflicts.push(`workflowSlug: request="${resolvedWorkflowSlug}" vs parent="${parentRun.workflowSlug}"`);
       }
-      if (resolvedFeatureSlug && parentRun.featureSlug && resolvedFeatureSlug !== parentRun.featureSlug) {
+      if (resolvedFeatureSlug && parentRun.featureSlug && featureSlugConflicts(resolvedFeatureSlug, parentRun.featureSlug)) {
         conflicts.push(`featureSlug: request="${resolvedFeatureSlug}" vs parent="${parentRun.featureSlug}"`);
       }
       if (parentRun.organizationId && resolvedOrgId !== parentRun.organizationId) {

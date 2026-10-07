@@ -631,6 +631,83 @@ describe("Runs CRUD", () => {
         expect.arrayContaining([expect.stringContaining("featureSlug")])
       );
     });
+    it("accepts a sourcing-origin featureSlug under an outreach parent and keeps inheriting the rest", async () => {
+      const parent = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "workflow",
+        taskName: "execute-workflow",
+        featureSlug: "sales-cold-email-outreach",
+        campaignId: "camp-sourcing",
+        workflowSlug: "outreach-wf",
+        brandIds: ["brand-sourcing"],
+      });
+
+      const serve = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-feature-slug": "sourcing-apollo-cold-filters",
+        })
+        .send({ serviceName: "lead-service", taskName: "lead-serve" });
+
+      expect(serve.status).toBe(201);
+      expect(serve.body.featureSlug).toBe("sourcing-apollo-cold-filters");
+      expect(serve.body.parentRunId).toBe(parent.id);
+      expect(serve.body.campaignId).toBe("camp-sourcing");
+      expect(serve.body.workflowSlug).toBe("outreach-wf");
+      expect(serve.body.brandIds).toEqual(["brand-sourcing"]);
+
+      // A descendant of the serve run inherits the sourcing slug.
+      const child = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": serve.body.id })
+        .send({ serviceName: "apollo-service", taskName: "enrich" });
+      expect(child.status).toBe(201);
+      expect(child.body.featureSlug).toBe("sourcing-apollo-cold-filters");
+
+      // Other fields still conflict under a sourcing slug.
+      const badCampaign = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-feature-slug": "sourcing-crm-contacts",
+          "x-campaign-id": "other-campaign",
+        })
+        .send({ serviceName: "lead-service", taskName: "lead-serve" });
+      expect(badCampaign.status).toBe(409);
+      expect(badCampaign.body.conflicts).toEqual([expect.stringContaining("campaignId")]);
+    });
+
+    it("still returns 409 for every featureSlug mismatch that is not sourcing-under-non-sourcing", async () => {
+      const outreach = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "p",
+        taskName: "p",
+        featureSlug: "sales-cold-email-outreach",
+      });
+      const sourcing = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "p",
+        taskName: "p",
+        featureSlug: "sourcing-apollo-cold-filters",
+      });
+      const cases: Array<[string, string]> = [
+        [sourcing.id, "sourcing-crm-contacts"],
+        [sourcing.id, "sales-cold-email-outreach"],
+        [outreach.id, "other-outreach"],
+        [outreach.id, "sourcingapollo"],
+      ];
+      for (const [parentId, slug] of cases) {
+        const res = await request(app)
+          .post("/v1/runs")
+          .set({ ...authHeaders, "x-run-id": parentId, "x-feature-slug": slug })
+          .send({ serviceName: "c", taskName: "c" });
+        expect(res.status, slug).toBe(409);
+        expect(res.body.conflicts).toEqual([expect.stringContaining("featureSlug")]);
+      }
+    });
   });
 
   describe("POST /v1/runs/:id/costs", () => {
