@@ -1608,6 +1608,64 @@ registry.registerPath({
   },
 });
 
+export const StatsCostsTimeseriesQuerySchema = z
+  .object({
+    interval: z.enum(["day", "week", "month"]).optional().openapi({ description: "Bucket granularity: DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day." }),
+    tz: z.string().optional().openapi({ description: "IANA timezone the buckets are aligned to (e.g. Europe/Paris), so a day bucket is the caller's local day. Default UTC. An unknown name is a 400.", example: "Europe/Paris" }),
+    groupBy: z.enum(["campaignId"]).optional().openapi({ description: "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period." }),
+    brandId: z.string().optional().openapi({ description: "Runs where this brand is in brandIds." }),
+    campaignId: z.string().optional(),
+    campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400." }),
+    featureSlug: z.string().optional(),
+    featureSlugs: z.string().optional().openapi({ description: "Comma-separated feature slugs. Takes precedence over featureSlug." }),
+    workflowSlug: z.string().optional(),
+    serviceName: z.string().optional(),
+    taskName: z.string().optional(),
+    startedAfter: z.string().datetime().optional().openapi({ description: "Only runs with started_at >= this ISO-8601 timestamp." }),
+    startedBefore: z.string().datetime().optional().openapi({ description: "Only runs with started_at <= this ISO-8601 timestamp." }),
+  })
+  .openapi("StatsCostsTimeseriesQuery");
+
+export const StatsCostsTimeseriesResponseSchema = z
+  .object({
+    interval: z.enum(["day", "week", "month"]),
+    timezone: z.string(),
+    buckets: z.array(
+      z.object({
+        period: z.string().openapi({ description: "Bucket start date YYYY-MM-DD, local to `timezone`. Buckets with no run are absent.", example: "2026-10-06" }),
+        campaignId: z.string().nullable().optional().openapi({ description: "Present only with groupBy=campaignId (null for runs with no campaign)." }),
+        totalCostInUsdCents: z.string().openapi({ description: "Same field, same definition as GET /v1/stats/costs: cost rows of the bucket's runs, status IN ('actual','provisioned'). 10-decimal string." }),
+        actualCostInUsdCents: z.string(),
+        provisionedCostInUsdCents: z.string(),
+        cancelledCostInUsdCents: z.string(),
+        refundedCostInUsdCents: z.string(),
+        netTotalCostInUsdCents: z.string(),
+        netActualCostInUsdCents: z.string(),
+        netProvisionedCostInUsdCents: z.string(),
+        netRefundedCostInUsdCents: z.string(),
+        runCount: z.number().openapi({ description: "Runs started in the bucket (each run lands in exactly one bucket)." }),
+        minStartedAt: z.string().nullable(),
+        maxStartedAt: z.string().nullable().openapi({ description: "Latest started_at in the bucket (ISO-8601)." }),
+      })
+    ),
+  })
+  .openapi("StatsCostsTimeseriesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/stats/costs/timeseries",
+  summary: "Org-scoped run counts and spend per dated bucket",
+  description:
+    "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign (groupBy=campaignId). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
+  security: [{ apiKey: [] }],
+  request: { query: StatsCostsTimeseriesQuerySchema },
+  responses: {
+    200: { description: "Dated buckets", content: { "application/json": { schema: StatsCostsTimeseriesResponseSchema } } },
+    400: { description: "Invalid interval, tz, groupBy, date or campaignIds", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 export const VendorCostsTimeseriesResponseSchema = z
   .object({
     interval: z.enum(["day", "week", "month"]),

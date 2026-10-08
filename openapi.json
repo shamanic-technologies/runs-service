@@ -2010,6 +2010,101 @@
           "buckets"
         ]
       },
+      "StatsCostsTimeseriesResponse": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "period": {
+                  "type": "string",
+                  "description": "Bucket start date YYYY-MM-DD, local to `timezone`. Buckets with no run are absent.",
+                  "example": "2026-10-06"
+                },
+                "campaignId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy=campaignId (null for runs with no campaign)."
+                },
+                "totalCostInUsdCents": {
+                  "type": "string",
+                  "description": "Same field, same definition as GET /v1/stats/costs: cost rows of the bucket's runs, status IN ('actual','provisioned'). 10-decimal string."
+                },
+                "actualCostInUsdCents": {
+                  "type": "string"
+                },
+                "provisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "cancelledCostInUsdCents": {
+                  "type": "string"
+                },
+                "refundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "netTotalCostInUsdCents": {
+                  "type": "string"
+                },
+                "netActualCostInUsdCents": {
+                  "type": "string"
+                },
+                "netProvisionedCostInUsdCents": {
+                  "type": "string"
+                },
+                "netRefundedCostInUsdCents": {
+                  "type": "string"
+                },
+                "runCount": {
+                  "type": "number",
+                  "description": "Runs started in the bucket (each run lands in exactly one bucket)."
+                },
+                "minStartedAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "maxStartedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Latest started_at in the bucket (ISO-8601)."
+                }
+              },
+              "required": [
+                "period",
+                "totalCostInUsdCents",
+                "actualCostInUsdCents",
+                "provisionedCostInUsdCents",
+                "cancelledCostInUsdCents",
+                "refundedCostInUsdCents",
+                "netTotalCostInUsdCents",
+                "netActualCostInUsdCents",
+                "netProvisionedCostInUsdCents",
+                "netRefundedCostInUsdCents",
+                "runCount",
+                "minStartedAt",
+                "maxStartedAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "interval",
+          "timezone",
+          "buckets"
+        ]
+      },
       "VendorCostsTimeseriesResponse": {
         "type": "object",
         "properties": {
@@ -5173,6 +5268,175 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/stats/costs/timeseries": {
+      "get": {
+        "summary": "Org-scoped run counts and spend per dated bucket",
+        "description": "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign (groupBy=campaignId). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "description": "Bucket granularity: DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day."
+            },
+            "required": false,
+            "description": "Bucket granularity: DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day.",
+            "name": "interval",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "IANA timezone the buckets are aligned to (e.g. Europe/Paris), so a day bucket is the caller's local day. Default UTC. An unknown name is a 400.",
+              "example": "Europe/Paris"
+            },
+            "required": false,
+            "description": "IANA timezone the buckets are aligned to (e.g. Europe/Paris), so a day bucket is the caller's local day. Default UTC. An unknown name is a 400.",
+            "name": "tz",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "campaignId"
+              ],
+              "description": "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period."
+            },
+            "required": false,
+            "description": "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period.",
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Runs where this brand is in brandIds."
+            },
+            "required": false,
+            "description": "Runs where this brand is in brandIds.",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400.",
+            "name": "campaignIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "featureSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated feature slugs. Takes precedence over featureSlug."
+            },
+            "required": false,
+            "description": "Comma-separated feature slugs. Takes precedence over featureSlug.",
+            "name": "featureSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "workflowSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "taskName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only runs with started_at >= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only runs with started_at >= this ISO-8601 timestamp.",
+            "name": "startedAfter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only runs with started_at <= this ISO-8601 timestamp."
+            },
+            "required": false,
+            "description": "Only runs with started_at <= this ISO-8601 timestamp.",
+            "name": "startedBefore",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dated buckets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsCostsTimeseriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid interval, tz, groupBy, date or campaignIds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

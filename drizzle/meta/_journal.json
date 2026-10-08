@@ -281,6 +281,13 @@
       "when": 1781568000000,
       "tag": "0039_stats_read_isolation",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1781654400000,
+      "tag": "0040_dashboard_reads_speed",
+      "breakpoints": true
     }
   ]
 }

@@ -516,6 +516,149 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
   }
 });
 
+// GET /v1/stats/costs/timeseries — org-scoped run counts + spend per dated bucket
+// (and per campaign with groupBy=campaignId), in the caller's timezone. One read
+// for a chart that used to call GET /v1/stats/costs once per local day.
+//
+// Each run lands in exactly one bucket (its started_at truncated to `interval` in
+// `tz`), so a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with
+// startedAfter/startedBefore set to that bucket's bounds. Run-side filters only.
+// Empty buckets are absent. Money as in GET /v1/stats/costs (10-decimal strings,
+// gross + frozen net).
+const ORG_TIMESERIES_INTERVALS = new Set(["day", "week", "month"]);
+
+router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
+  try {
+    const {
+      interval: intervalParam,
+      tz: tzParam,
+      groupBy,
+      brandId,
+      campaignId,
+      campaignIds: campaignIdsParam,
+      featureSlug,
+      featureSlugs: featureSlugsParam,
+      workflowSlug,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    } = req.query as Record<string, string | undefined>;
+
+    const interval = intervalParam ?? "day";
+    if (!ORG_TIMESERIES_INTERVALS.has(interval)) {
+      res.status(400).json({ error: `Invalid interval value. Allowed: ${Array.from(ORG_TIMESERIES_INTERVALS).join(", ")}` });
+      return;
+    }
+    const timezone = tzParam ?? "UTC";
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    } catch {
+      res.status(400).json({ error: `Invalid tz value: ${timezone}` });
+      return;
+    }
+    if (groupBy !== undefined && groupBy !== "campaignId") {
+      res.status(400).json({ error: "Invalid groupBy value. Allowed: campaignId" });
+      return;
+    }
+    const byCampaign = groupBy === "campaignId";
+    for (const [name, value] of [["startedAfter", startedAfter], ["startedBefore", startedBefore]] as const) {
+      if (value !== undefined && Number.isNaN(Date.parse(value))) {
+        res.status(400).json({ error: `${name} must be an ISO 8601 date-time` });
+        return;
+      }
+    }
+    const parsedCampaignIds = parseCampaignIds(campaignIdsParam);
+    if (parsedCampaignIds.error) {
+      res.status(400).json({ error: parsedCampaignIds.error });
+      return;
+    }
+
+    const whereSql = buildFilterSql(req.orgId, {
+      brandId,
+      campaignId,
+      campaignIds: parsedCampaignIds.ids,
+      featureSlug,
+      featureSlugs: parseCsv(featureSlugsParam),
+      workflowSlug,
+      serviceName,
+      taskName,
+      startedAfter,
+      startedBefore,
+    });
+
+    // interval is whitelisted, tz validated; both are bound parameters.
+    const period = sql`to_char(DATE_TRUNC(${interval}, r.started_at AT TIME ZONE ${timezone}), 'YYYY-MM-DD')`;
+    const dims = byCampaign ? sql`${period} AS period, r.campaign_id AS campaign_id` : sql`${period} AS period`;
+    const groupCols = byCampaign ? sql`1, 2` : sql`1`;
+    const joinOn = byCampaign
+      ? sql`s.period = c.period AND s.campaign_id IS NOT DISTINCT FROM c.campaign_id`
+      : sql`s.period = c.period`;
+
+    // Split (counts | sums), as the run-side GET /v1/stats/costs: the run count
+    // never needs the cost ledger, and the sums only touch runs that have cost rows.
+    const rows = (await db.execute(sql`
+      WITH counts AS (
+        SELECT ${dims},
+          COUNT(*) AS run_count,
+          MIN(r.started_at) AS min_started_at,
+          MAX(r.started_at) AS max_started_at
+        FROM runs r
+        WHERE ${whereSql}
+        GROUP BY ${groupCols}
+      ),
+      sums AS (
+        SELECT ${dims},
+          ${costAggregateSelectSql("rc")},
+          ${costAggregateNetSelectSql("rc")}
+        FROM runs r
+        INNER JOIN runs_costs rc ON rc.run_id = r.id
+        WHERE ${whereSql}
+        GROUP BY ${groupCols}
+      )
+      SELECT c.period,
+        ${byCampaign ? sql`c.campaign_id,` : sql``}
+        COALESCE(s.total_cost, '0')            AS total_cost,
+        COALESCE(s.actual_cost, '0')           AS actual_cost,
+        COALESCE(s.provisioned_cost, '0')      AS provisioned_cost,
+        COALESCE(s.cancelled_cost, '0')        AS cancelled_cost,
+        COALESCE(s.refunded_cost, '0')         AS refunded_cost,
+        COALESCE(s.net_total_cost, '0')        AS net_total_cost,
+        COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
+        COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
+        COALESCE(s.net_refunded_cost, '0')     AS net_refunded_cost,
+        c.run_count,
+        c.min_started_at,
+        c.max_started_at
+      FROM counts c
+      LEFT JOIN sums s ON ${joinOn}
+      ORDER BY c.period${byCampaign ? sql`, c.campaign_id` : sql``}
+    `)) as any[];
+
+    const buckets = rows.map((row) => ({
+      period: row.period as string,
+      ...(byCampaign ? { campaignId: (row.campaign_id as string | null) ?? null } : {}),
+      totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
+      actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
+      provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
+      cancelledCostInUsdCents: new Decimal(row.cancelled_cost).toFixed(10),
+      refundedCostInUsdCents: new Decimal(row.refunded_cost).toFixed(10),
+      netTotalCostInUsdCents: new Decimal(row.net_total_cost).toFixed(10),
+      netActualCostInUsdCents: new Decimal(row.net_actual_cost).toFixed(10),
+      netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
+      netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
+      runCount: Number(row.run_count),
+      minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
+      maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
+    }));
+
+    res.json({ interval, timezone, buckets });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /v1/stats/costs/timeseries:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // POST /v1/stats/costs — batched aggregation across multiple (serviceName, taskName) tuples in ONE SQL pass
 router.post("/v1/stats/costs", requireApiKey, async (req, res) => {
   try {
