@@ -32,6 +32,7 @@ import {
   readCampaignCostsFromRollup,
 } from "../services/stats-rollup-campaign.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
+import { ORG_HOUR_ROLLUP_NAME, readOrgHourTimeseries } from "../services/stats-rollup-org-hour.js";
 import { BRAND_ROLLUP_GROUP_BY, readBrandRollupGroups } from "../services/stats-rollup-brand.js";
 
 const router = Router();
@@ -627,9 +628,26 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
       ? sql`s.period = c.period AND s.campaign_id IS NOT DISTINCT FROM c.campaign_id`
       : sql`s.period = c.period`;
 
+    // Hour rollup (migration 0042): org + brand / campaign filters only, and a
+    // timezone whose local hours start on UTC hours (readOrgHourTimeseries returns
+    // null otherwise). Anything else keeps the live query below.
+    const hourRollupServes =
+      !featureSlug && !featureSlugsParam && !workflowSlug && !serviceName && !taskName &&
+      (await isStatsRollupReady(ORG_HOUR_ROLLUP_NAME));
+    const fromRollup = hourRollupServes
+      ? await readOrgHourTimeseries({
+          interval,
+          timezone,
+          byCampaign,
+          filters: { orgId: req.orgId, brandId, campaignId, campaignIds: parsedCampaignIds.ids },
+          startedAfter,
+          startedBefore,
+        })
+      : null;
+
     // Split (counts | sums), as the run-side GET /v1/stats/costs: the run count
     // never needs the cost ledger, and the sums only touch runs that have cost rows.
-    const rows = (await db.execute(sql`
+    const rows: any[] = fromRollup ?? ((await db.execute(sql`
       WITH counts AS (
         SELECT ${dims},
           COUNT(*) AS run_count,
@@ -665,7 +683,7 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
       FROM counts c
       LEFT JOIN sums s ON ${joinOn}
       ORDER BY c.period${byCampaign ? sql`, c.campaign_id` : sql``}
-    `)) as any[];
+    `)) as any[]);
 
     const buckets = rows.map((row) => ({
       period: row.period as string,

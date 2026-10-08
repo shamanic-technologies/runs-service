@@ -463,6 +463,12 @@ structure is stamped in `stats_rollups`.
 - **`GET /v1/stats/costs/timeseries`** — org-scoped twin of the public timeseries:
   run count + money + min/maxStartedAt per (local `tz` day|week|month[, campaign]),
   one read for the Today chart's week instead of one `/v1/stats/costs` per day.
+  Served from **`stats_rollup_org_hour`** (migration 0042, stamp `org_hour`):
+  (org, brand set, campaign, UTC hour) — a local day is whole UTC hours in any
+  whole-hour tz (a :30/:45 zone falls back live, checked per row). Bound hours with
+  a run on the excluded side and hours with a `minmax_stale` row are read live
+  (0041's rule). Only org/brand/campaign filters; anything else is live. Rebuild:
+  `scripts/rebuild-stats-rollup.ts org_hour`.
 - TRUNCATE fires no triggers: `tests/global-setup.ts` truncates both tables.
   Parity guard: `tests/integration/dashboard-reads-speed.test.ts` (ready vs live,
   raw bodies).
