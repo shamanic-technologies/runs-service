@@ -13,6 +13,8 @@ import { parseCampaignIds } from "../services/campaign-ids.js";
 import { VendorCostCatalogError, fetchVendorCostCatalog, type VendorCostVersion } from "../services/vendor-costs.js";
 import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv } from "./stats.js";
 import { listRunsPage } from "./runs.js";
+import { isStatsRollupReady } from "../services/stats-rollup.js";
+import { COST_DAY_ROLLUP_NAME } from "../services/stats-rollup-cost-day.js";
 
 const router = Router();
 
@@ -627,22 +629,87 @@ function providerWindowsSql(versions: VendorCostVersion[]) {
 }
 
 /**
- * The margin reads' row set as CTEs ending in `costed`: PLATFORM rows that were
- * charged ('actual') or refunded, each with its provider, gross/net, vendor cost
- * and whether it is priced. Shared by the since-inception margin and its monthly
- * series so both attribute every row to the same provider on the same basis.
+ * Served-from instants of every catalogue version, per cost name: the only points
+ * in time where a cost row's vendor price or provider can change (the edges of
+ * versionWindowsSql and providerWindowsSql).
  */
-function marginCostedCtesSql(versions: VendorCostVersion[], orgSql: SQL) {
+function servedFromEdgesSql(versions: VendorCostVersion[]) {
+  const rows = versions.map((v) => ({ cost_name: v.costName, served_from: v.servedFrom }));
   return sql`
-      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
-      pw AS MATERIALIZED (${providerWindowsSql(versions)}),
+    SELECT DISTINCT x.cost_name, x.served_from AS at
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(cost_name text, served_from timestamptz)
+  `;
+}
+
+/**
+ * The rows the margin reads price — PLATFORM rows that were charged ('actual') or
+ * refunded — as (status, cost_name, unit_cost_in_usd_cents, created_at, quantity,
+ * gross, net).
+ *
+ * Live: one row per ledger row. From the (org, cost name, billed price, status,
+ * UTC day) rollup (migration 0040): one row per group, carrying its summed
+ * quantity / gross / net at its earliest created_at. That prices exactly like its
+ * ledger rows whenever no served-from instant of the name falls in the group's
+ * (min, max] created_at: every row is then on the same side of every window edge
+ * as the earliest one, and Σ(quantity × vendor) = Σquantity × vendor in numeric.
+ * A group that straddles an instant is read row by row from the ledger.
+ */
+function marginBaseSql(versions: VendorCostVersion[], orgId: string | undefined, fromRollup: boolean) {
+  if (!fromRollup) {
+    // runs_costs.organization_id is the RUN's org frozen at write (migration 0029).
+    const orgSql = orgId ? sql`AND rc.organization_id = ${orgId}::uuid` : sql``;
+    return sql`
       base AS MATERIALIZED (
         SELECT rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
                rc.total_cost_in_usd_cents AS gross,
                COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
         FROM runs_costs rc
         WHERE rc.cost_source = 'platform' AND rc.status IN ('actual','refunded') ${orgSql}
+      )`;
+  }
+  const orgSql = orgId ? sql`AND d.organization_id = ${orgId}::uuid` : sql``;
+  return sql`
+      e AS MATERIALIZED (${servedFromEdgesSql(versions)}),
+      g AS MATERIALIZED (
+        SELECT d.*,
+               EXISTS (
+                 SELECT 1 FROM e
+                 WHERE e.cost_name = d.cost_name AND e.at > d.min_created_at AND e.at <= d.max_created_at
+               ) AS split
+        FROM stats_rollup_cost_day d
+        WHERE d.n > 0 ${orgSql}
       ),
+      base AS MATERIALIZED (
+        SELECT g.status, g.cost_name, g.unit_cost_in_usd_cents, g.min_created_at AS created_at,
+               g.quantity, g.gross, g.net
+        FROM g
+        WHERE NOT g.split
+        UNION ALL
+        SELECT rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
+               rc.total_cost_in_usd_cents AS gross,
+               COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
+        FROM g
+        JOIN runs_costs rc
+          ON rc.cost_name = g.cost_name
+         AND rc.created_at >= g.min_created_at AND rc.created_at <= g.max_created_at
+         AND rc.unit_cost_in_usd_cents = g.unit_cost_in_usd_cents
+         AND rc.status = g.status
+         AND rc.organization_id IS NOT DISTINCT FROM g.organization_id
+        WHERE g.split AND rc.cost_source = 'platform' AND rc.status IN ('actual','refunded')
+      )`;
+}
+
+/**
+ * The margin reads' row set as CTEs ending in `costed`: PLATFORM rows that were
+ * charged ('actual') or refunded, each with its provider, gross/net, vendor cost
+ * and whether it is priced. Shared by the since-inception margin and its monthly
+ * series so both attribute every row to the same provider on the same basis.
+ */
+function marginCostedCtesSql(versions: VendorCostVersion[], orgId: string | undefined, fromRollup: boolean) {
+  return sql`
+      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      pw AS MATERIALIZED (${providerWindowsSql(versions)}),
+      ${marginBaseSql(versions, orgId, fromRollup)},
       costed AS (
         SELECT
           COALESCE(v.provider, pw.provider) AS provider,
@@ -717,14 +784,11 @@ router.get("/internal/stats/costs/margin", requireInternalAuth, async (req, res)
       res.status(400).json({ error: "orgId must be a valid UUID" });
       return;
     }
-    // runs_costs.organization_id is the RUN's org frozen at write (migration 0029):
-    // no runs join needed, the whole read is one pass over the ledger.
-    const orgSql = orgId ? sql`AND rc.organization_id = ${orgId}::uuid` : sql``;
-
     const versions = await fetchVendorCostCatalog();
+    const fromRollup = await isStatsRollupReady(COST_DAY_ROLLUP_NAME);
 
     const rows = (await db.execute(sql`
-      ${marginCostedCtesSql(versions, orgSql)},
+      ${marginCostedCtesSql(versions, orgId, fromRollup)},
       sums AS (
         SELECT
           provider,
@@ -807,12 +871,11 @@ router.get("/internal/stats/costs/margin/timeseries", requireInternalAuth, async
       res.status(400).json({ error: "orgId must be a valid UUID" });
       return;
     }
-    const orgSql = orgId ? sql`AND rc.organization_id = ${orgId}::uuid` : sql``;
-
     const versions = await fetchVendorCostCatalog();
+    const fromRollup = await isStatsRollupReady(COST_DAY_ROLLUP_NAME);
 
     const rows = (await db.execute(sql`
-      ${marginCostedCtesSql(versions, orgSql)},
+      ${marginCostedCtesSql(versions, orgId, fromRollup)},
       monthly AS (
         SELECT
           provider,

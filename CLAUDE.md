@@ -27,6 +27,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
+- `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -395,6 +396,40 @@ parallel with every other service) moves a brand's history to another org.
   the audit record); an event written later for a moved run with the source org in
   `x-org-id` stays on the source org.
 - `TRUNCATE` fires no triggers: `tests/global-setup.ts` truncates the ledger too.
+
+## Dashboard v2 reads — precomputed where a scan cannot be fast (migration 0040)
+
+Measured in prod 2026-10-08 (owner org 91e76989, box at load ~27): staff margin
+9-13 s, run-outcomes 2-24 s, Billing runs list 1.5-6.5 s, per-day cost stats
+0.6-4 s. Same figures, same shapes; each read keeps its live query until its
+structure is stamped in `stats_rollups`.
+
+- **`stats_rollup_cost_day`** (stamp `cost_day`) — platform `actual`/`refunded`
+  cost rows per (org, cost name, billed unit price, status, UTC day): n, Σquantity,
+  Σgross, Σnet, min/max created_at. The margin reads (`marginBaseSql` in
+  `routes/vendor-costs.ts`) price one row per group at its min created_at; a group
+  whose (min, max] contains a catalogue served-from instant of its name is read
+  row by row (`idx_runs_costs_margin_raw`). Exact: every other group's rows sit on
+  one side of every window edge, and Σ(q × vendor) = Σq × vendor in numeric.
+  min/max only widen (removal keeps them), which can only send a group raw.
+  Rebuild: `scripts/rebuild-stats-rollup.ts cost_day` (snapshot protocol).
+- **`run_campaign_entries`** (stamp `campaign_entry`) — projection of every
+  campaign's ENTRY runs (campaign set, parent not a run of the same campaign) with
+  the run's current filter/outcome columns. Trigger on runs INSERT/UPDATE upserts
+  or deletes the row (one parent PK probe per write); a campaign change recomputes
+  the run's children; FK cascade on delete. `GET /v1/stats/run-outcomes`
+  scope=entry reads it only WITH a campaign filter (no NULL-campaign rows here).
+  Backfill: `scripts/rebuild-stats-rollup.ts campaign_entry` — lock-free
+  one-day windows, `ON CONFLICT DO NOTHING` (a trigger-written row is newer).
+- **`idx_runs_org_started`** (org window reads) and **`idx_runs_campaign_task_started`**
+  (`GET /v1/runs?campaignIds&taskName&limit`: the per-member walk stops at the
+  page instead of filtering ~64k runs). Built CONCURRENTLY out-of-band on prod.
+- **`GET /v1/stats/costs/timeseries`** — org-scoped twin of the public timeseries:
+  run count + money + min/maxStartedAt per (local `tz` day|week|month[, campaign]),
+  one read for the Today chart's week instead of one `/v1/stats/costs` per day.
+- TRUNCATE fires no triggers: `tests/global-setup.ts` truncates both tables.
+  Parity guard: `tests/integration/dashboard-reads-speed.test.ts` (ready vs live,
+  raw bodies).
 
 ## Cost predicate doctrine
 

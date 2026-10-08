@@ -3,6 +3,8 @@ import { sql, type SQL } from "drizzle-orm";
 import { statsDb as db } from "../db/index.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
+import { CAMPAIGN_ENTRY_ROLLUP_NAME } from "../services/run-campaign-entries.js";
+import { isStatsRollupReady } from "../services/stats-rollup.js";
 
 // GET /v1/stats/run-outcomes — how the runs of a group ENDED, and how long they
 // took: completed / failed / still running, the success rate, and the median
@@ -18,6 +20,12 @@ import { parseCampaignIds } from "../services/campaign-ids.js";
 // same campaign (or it has no parent): one row per run the agent actually
 // started. `scope=all` counts every run the filters match, i.e. exactly what
 // GET /v1/runs lists for the same filters.
+//
+// With a campaign filter, scope=entry reads `run_campaign_entries` (migration
+// 0040) once it is stamped ready: the same runs with the same column values,
+// membership decided at write time instead of by one parent lookup per candidate
+// run (167k lookups, 2-24 s for the owner's campaign family). Without a campaign
+// filter the NULL-campaign group needs the live query, which it keeps.
 
 const router = Router();
 
@@ -89,6 +97,13 @@ router.get("/v1/stats/run-outcomes", requireApiKey, async (req, res) => {
       }
     }
 
+    // Entry runs of a campaign, precomputed. The table holds only runs with a
+    // campaign, so it can answer only a request that filters on one.
+    const fromEntries =
+      scope === "entry" &&
+      Boolean(campaignId || parsedCampaignIds.ids) &&
+      (await isStatsRollupReady(CAMPAIGN_ENTRY_ROLLUP_NAME));
+
     const parts: SQL[] = [sql`r.organization_id = ${req.orgId}`];
     if (brandId) parts.push(sql`${brandId} = ANY(r.brand_ids)`);
     if (campaignId) parts.push(sql`r.campaign_id = ${campaignId}`);
@@ -101,7 +116,7 @@ router.get("/v1/stats/run-outcomes", requireApiKey, async (req, res) => {
     if (taskName) parts.push(sql`r.task_name = ${taskName}`);
     if (startedAfter) parts.push(sql`r.started_at >= ${startedAfter}::timestamptz`);
     if (startedBefore) parts.push(sql`r.started_at <= ${startedBefore}::timestamptz`);
-    if (scope === "entry") {
+    if (scope === "entry" && !fromEntries) {
       // PK lookup per candidate run; the parent is never window-filtered, so a
       // child whose parent started before `startedAfter` is still a child.
       parts.push(sql`NOT EXISTS (
@@ -128,7 +143,7 @@ router.get("/v1/stats/run-outcomes", requireApiKey, async (req, res) => {
         ) AS median_duration_ms,
         MIN(r.started_at) AS min_started_at,
         MAX(r.started_at) AS max_started_at
-      FROM runs r
+      FROM ${fromEntries ? sql`run_campaign_entries r` : sql`runs r`}
       WHERE ${where}
       GROUP BY ${dimRefs}
       ORDER BY run_count DESC, ${dimRefs}
