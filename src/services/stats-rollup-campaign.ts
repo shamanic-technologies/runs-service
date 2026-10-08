@@ -1,19 +1,14 @@
 // Read + rebuild side of the (campaign, UTC day) rollup maintained by the
-// triggers in migration 0037.
+// triggers in migration 0037, extended by 0041 to every run (campaign or not)
+// with exact min/max started_at per run group.
 //
-// It serves the campaign-FAMILY reads features-service makes on every campaign
-// Overview refresh — the dated spend and the totals of a set of stored campaign
-// rows, combined or per row:
-//   GET /v1/stats/public/costs/timeseries  (interval day|week|month, tz UTC,
-//                                           optional groupBy=campaignId)
-//   GET /v1/stats/public/costs              (groupBy campaignId | workflowSlug |
-//                                           workflowDynastySlug | featureSlug)
-// when the request carries a campaign filter (`campaignId` and/or
-// `campaignIds`) and otherwise only filters the rollup carries exactly: orgId,
-// brandId, featureSlug(s), workflowSlugs (incl. a resolved dynasty), costSource.
-// A taskName, a startedAfter / startedBefore bound or a non-UTC tz keeps the
-// live query — the rollup has no task and no finer time than a UTC day, and
-// serving them from it would answer a different question.
+// This file serves GET /v1/stats/public/costs (groupBy campaignId | workflowSlug
+// | workflowDynastySlug | featureSlug) when the request carries a campaign filter
+// (`campaignId` and/or `campaignIds`) and otherwise only filters the rollup
+// carries exactly: orgId, brandId, featureSlug(s), workflowSlugs (incl. a
+// resolved dynasty), costSource. A taskName keeps the live query. The other
+// reads of these tables (org-scoped GET /v1/stats/costs, the public timeseries)
+// live in stats-rollup-brand.ts.
 //
 // Same byte-identity rules as the 0034 rollup: money renders `'0'` when no row of
 // that status matched and `round(sum, 10)::text` otherwise, so an ORDER BY on the
@@ -90,49 +85,6 @@ const MONEY_OUT = sql.raw(`
 const ANY_COST_ROW = sql.raw(`HAVING SUM(n_actual + n_provisioned + n_cancelled + n_refunded) > 0`);
 
 /**
- * Dated buckets, same row shape as the live timeseries query: `period`
- * (YYYY-MM-DD, UTC), optionally `campaign_id`, the nine money columns as TEXT
- * and `run_count`, ordered by period (then campaign) ascending.
- */
-export async function readCampaignTimeseriesFromRollup(opts: {
-  interval: string;
-  groupByCampaign: boolean;
-  filters: CampaignRollupFilters;
-  costSource?: string;
-}): Promise<any[]> {
-  const parts = whereParts(opts.filters);
-  const costParts = [...parts];
-  if (opts.costSource) costParts.push(sql`cost_source = ${opts.costSource}`);
-  const period = sql`to_char(date_trunc(${opts.interval}, day::timestamp), 'YYYY-MM-DD')`;
-  const dims = opts.groupByCampaign ? sql`${period} AS period, campaign_id` : sql`${period} AS period`;
-  const groupCols = opts.groupByCampaign ? sql`1, 2` : sql`1`;
-  const campaignOut = opts.groupByCampaign ? sql`, c.campaign_id` : sql``;
-  const campaignJoin = opts.groupByCampaign ? sql` AND s.campaign_id = c.campaign_id` : sql``;
-
-  const result = await db.execute(sql`
-    WITH counts AS (
-      SELECT ${dims}, SUM(run_count)::bigint AS run_count
-      FROM stats_rollup_campaign_runs
-      ${whereSql(parts)}
-      GROUP BY ${groupCols}
-      HAVING SUM(run_count) > 0
-    ),
-    sums AS (
-      SELECT ${dims}, ${MONEY_COLUMNS}
-      FROM stats_rollup_campaign_costs
-      ${whereSql(costParts)}
-      GROUP BY ${groupCols}
-      ${ANY_COST_ROW}
-    )
-    SELECT c.period ${campaignOut}, ${MONEY_OUT}, c.run_count
-    FROM counts c
-    LEFT JOIN sums s ON s.period = c.period ${campaignJoin}
-    ORDER BY ${groupCols}
-  `);
-  return result as unknown as any[];
-}
-
-/**
  * Untimed groups, same row shape as the live public-costs query: the dimension
  * under `resultCol`, the nine money columns as TEXT and `run_count`, ordered by
  * `total_cost` (text) DESC.
@@ -175,7 +127,9 @@ const KEY = "campaign_id, day, organization_id, brand_ids, feature_slug, workflo
 
 /**
  * Rebuild the campaign_day rollup from the ledger and stamp it ready (see
- * rebuildRollup for the lock / snapshot protocol). Only runs with a campaign.
+ * rebuildRollup for the lock / snapshot protocol). Every run, with exact min/max
+ * started_at per run group (minmax_stale false). A group a trigger marked stale
+ * while the rebuild ran stays stale (the merge ORs the flag).
  */
 export async function rebuildCampaignDayRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
   return rebuildRollup(url, {
@@ -185,9 +139,9 @@ export async function rebuildCampaignDayRollup(url: string): Promise<{ runGroups
       await b`
         CREATE TEMP TABLE rebuild_campaign_runs ON COMMIT PRESERVE ROWS AS
         SELECT campaign_id, (started_at AT TIME ZONE 'UTC')::date AS day, organization_id, brand_ids,
-          feature_slug, workflow_slug, count(*) AS run_count
+          feature_slug, workflow_slug, count(*) AS run_count,
+          min(started_at) AS min_started_at, max(started_at) AS max_started_at
         FROM runs
-        WHERE campaign_id IS NOT NULL
         GROUP BY 1, 2, 3, 4, 5, 6
       `;
       await b`
@@ -207,17 +161,18 @@ export async function rebuildCampaignDayRollup(url: string): Promise<{ runGroups
           COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'refunded'), 0)    AS net_refunded
         FROM runs_costs rc
         JOIN runs r ON r.id = rc.run_id
-        WHERE r.campaign_id IS NOT NULL
-          AND rc.status IN ('actual', 'provisioned', 'cancelled', 'refunded')
+        WHERE rc.status IN ('actual', 'provisioned', 'cancelled', 'refunded')
         GROUP BY 1, 2, 3, 4, 5, 6, 7
       `;
     },
     merge: async (tx: postgres.Sql) => {
       const runGroups = await tx.unsafe(`
-        INSERT INTO stats_rollup_campaign_runs (${KEY}, run_count)
-        SELECT ${KEY}, run_count FROM rebuild_campaign_runs
-        ON CONFLICT ON CONSTRAINT stats_rollup_campaign_runs_key
-        DO UPDATE SET run_count = stats_rollup_campaign_runs.run_count + EXCLUDED.run_count
+        INSERT INTO stats_rollup_campaign_runs (${KEY}, run_count, min_started_at, max_started_at, minmax_stale)
+        SELECT ${KEY}, run_count, min_started_at, max_started_at, false FROM rebuild_campaign_runs
+        ON CONFLICT ON CONSTRAINT stats_rollup_campaign_runs_key DO UPDATE SET
+          run_count      = stats_rollup_campaign_runs.run_count + EXCLUDED.run_count,
+          min_started_at = LEAST(stats_rollup_campaign_runs.min_started_at, EXCLUDED.min_started_at),
+          max_started_at = GREATEST(stats_rollup_campaign_runs.max_started_at, EXCLUDED.max_started_at)
       `);
       const costGroups = await tx.unsafe(`
         INSERT INTO stats_rollup_campaign_costs (
