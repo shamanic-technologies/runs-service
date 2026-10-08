@@ -269,7 +269,7 @@ describe("campaign-day rollup — campaign-family cost reads", () => {
     await allComparisons();
   });
 
-  it("keeps the live query for anything finer than a campaign's UTC day", async () => {
+  it("keeps the live query for anything finer than a UTC day (bounds are served, see stats-rollup-brand.test.ts)", async () => {
     // Plant a row only the rollup can see: a request routed to the rollup counts
     // it, a request that must stay live does not.
     const PLANTED = randomUUID();
@@ -278,11 +278,11 @@ describe("campaign-day rollup — campaign-family cost reads", () => {
     try {
       const routed = await get("/v1/stats/public/costs/timeseries", { campaignId: PLANTED });
       expect(routed.buckets).toHaveLength(1);
+      // A UTC-midnight bound with no run in the part it excludes stays on the rollup.
+      expect((await get("/v1/stats/public/costs/timeseries", { campaignId: PLANTED, startedAfter: "2026-01-01T00:00:00Z" })).buckets).toHaveLength(1);
       for (const q of [
         { campaignId: PLANTED, tz: "America/New_York" },
         { campaignId: PLANTED, taskName: "t" },
-        { campaignId: PLANTED, startedAfter: "2026-01-01T00:00:00Z" },
-        { campaignId: PLANTED, startedBefore: "2027-01-01T00:00:00Z" },
       ]) {
         expect((await get("/v1/stats/public/costs/timeseries", q)).buckets).toEqual([]);
       }
