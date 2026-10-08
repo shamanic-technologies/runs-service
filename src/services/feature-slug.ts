@@ -25,6 +25,9 @@ export function featureSlugConflicts(child: string, parent: string): boolean {
 // "start_to_lead_found"). The serve opened under an outreach workflow run is
 // FILED under the source campaign that found the lead, so a sourcing child may
 // carry its own campaignId under a non-sourcing parent, exactly like its slug.
+// A parent with NO feature slug counts as non-sourcing, as in featureSlugConflicts:
+// workflow-service opens many execute-workflow runs unlabelled, and requiring a
+// parent slug 409'd every lead-serve under them (prod 2026-10-08, zero leads served).
 // Its own descendants then inherit (or must equal) the source campaign. Any other
 // campaign mismatch stays a parent-child conflict.
 export function campaignIdConflicts(args: {
@@ -36,8 +39,7 @@ export function campaignIdConflicts(args: {
   if (args.childCampaignId === args.parentCampaignId) return false;
   const sourcingUnderOutreach =
     !!args.childFeatureSlug &&
-    !!args.parentFeatureSlug &&
     isSourcingFeatureSlug(args.childFeatureSlug) &&
-    !isSourcingFeatureSlug(args.parentFeatureSlug);
+    !(args.parentFeatureSlug && isSourcingFeatureSlug(args.parentFeatureSlug));
   return !sourcingUnderOutreach;
 }

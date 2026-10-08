@@ -731,6 +731,46 @@ describe("Runs CRUD", () => {
       expect(other.body.conflicts).toEqual([expect.stringContaining("campaignId")]);
     });
 
+    it("SOURCE CAMPAIGNS: a sourcing serve under a parent with NO feature slug is filed under its own source campaign", async () => {
+      // Prod 2026-10-08: execute-workflow parents with a NULL feature_slug 409'd every lead-serve.
+      const parent = await insertTestRun({
+        organizationId: ORG_ID,
+        serviceName: "workflow",
+        taskName: "execute-workflow",
+        campaignId: "camp-outreach-unlabelled",
+        workflowSlug: "outreach-wf-unlabelled",
+      });
+
+      const serve = await request(app)
+        .post("/v1/runs")
+        .set({
+          ...authHeaders,
+          "x-run-id": parent.id,
+          "x-feature-slug": "sourcing-apollo-cold-filters",
+          "x-campaign-id": "camp-source-unlabelled",
+        })
+        .send({ serviceName: "lead-service", taskName: "lead-serve" });
+      expect(serve.status).toBe(201);
+      expect(serve.body.campaignId).toBe("camp-source-unlabelled");
+      expect(serve.body.featureSlug).toBe("sourcing-apollo-cold-filters");
+
+      // A non-sourcing child naming another campaign under that parent still conflicts.
+      const other = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": parent.id, "x-feature-slug": "sales-cold-email-outreach", "x-campaign-id": "camp-source-unlabelled" })
+        .send({ serviceName: "email", taskName: "send" });
+      expect(other.status).toBe(409);
+      expect(other.body.conflicts).toEqual([expect.stringContaining("campaignId")]);
+
+      // So does a child with no feature slug at all.
+      const bare = await request(app)
+        .post("/v1/runs")
+        .set({ ...authHeaders, "x-run-id": parent.id, "x-campaign-id": "camp-source-unlabelled" })
+        .send({ serviceName: "email", taskName: "send" });
+      expect(bare.status).toBe(409);
+      expect(bare.body.conflicts).toEqual([expect.stringContaining("campaignId")]);
+    });
+
     it("still returns 409 for every featureSlug mismatch that is not sourcing-under-non-sourcing", async () => {
       const outreach = await insertTestRun({
         organizationId: ORG_ID,
