@@ -1918,6 +1918,46 @@ registry.registerPath({
   },
 });
 
+export const RunSubtreeCostsResponseSchema = z
+  .object({
+    runs: z.array(
+      z.object({
+        id: z.string().uuid(),
+        audienceId: z.string().nullable(),
+        campaignId: z.string().nullable(),
+        actualCostInUsdCents: z.string().openapi({ description: "BILLED committed (status 'actual') cost of the run's whole subtree (its own rows + every descendant's). Equals GET /internal/runs/vendor's actualCostInUsdCents for the run." }),
+        netActualCostInUsdCents: z.string().openapi({ description: "Same rows on the frozen NET basis (COALESCE(net, gross) per row). Equals GET /v1/runs?include=subtreeCost's netActualCostInUsdCents." }),
+        vendorActualCostInUsdCents: z.string().openapi({ description: "Same rows on the VENDOR basis, rows whose vendor cost is known only. Equals GET /internal/runs/vendor's vendorActualCostInUsdCents." }),
+        unpricedActualCostInUsdCents: z.string().openapi({ description: "BILLED amount of the same rows with no known vendor cost. Equals GET /internal/runs/vendor's unpricedActualCostInUsdCents." }),
+      }),
+    ),
+  })
+  .openapi("RunSubtreeCostsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/runs/subtree-costs",
+  summary: "Every matching run with its subtree's committed cost on the billed, net and vendor bases (service-auth only)",
+  description:
+    "EVERY run of the org (REQUIRED `orgId` query parameter) matching the filters, newest first, no paging, read in one statement: each run's whole-subtree committed (status 'actual') cost on the billed, frozen-net and vendor bases, plus the billed amount with no known vendor cost. A run whose subtree has no committed cost row reads 0 on every basis. Per run the figures equal GET /internal/runs/vendor (billed, vendor, unpriced) and GET /v1/runs?include=subtreeCost (net). Requires `brandId` or `campaignId`. Service-auth only: the vendor cost reveals the margin. 502 when the costs-service vendor catalogue cannot be read.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      orgId: z.string().uuid(),
+      brandId: z.string().optional().openapi({ description: "Runs whose brand_ids contain this brand. brandId or campaignId is required." }),
+      campaignId: z.string().optional(),
+      serviceName: z.string().optional(),
+      taskName: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Every matching run with its subtree committed cost", content: { "application/json": { schema: RunSubtreeCostsResponseSchema } } },
+    400: { description: "Missing/invalid orgId, no brandId nor campaignId, or an empty filter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable or malformed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/public/stats/runs",

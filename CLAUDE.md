@@ -25,7 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
-- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
+- `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041). See "Brand-history cost reads".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
@@ -367,6 +367,11 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   gate-check lists completed campaign-trigger ROOTS with `limit: maxLeads`, whose subtrees are whole
   campaign trees) never read it and must not pay the walk. Prod: 50 execute-workflow runs, 455
   descendants: the walk is a per-run LATERAL on idx_runs_costs_run_agg (~15 ms join; a plain JOIN hash-joined a seq scan of the ledger, 1.2 s). An unknown `include` value is a 400.
+- **Every run at once: `GET /internal/runs/subtree-costs?orgId=…&brandId|campaignId=…[&serviceName&taskName]`** — no page,
+  one statement: each matching run's committed (`actual`) SUBTREE cost on billed, frozen net, vendor and unpriced, equal run for
+  run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). features-service's
+  sourcing investment reads it instead of walking both lists in OFFSET pages of 500 (owner brand: 244 calls, each page
+  re-scanning the ones before). brandId or campaignId required (400): unbounded, it is an org's whole history.
 - Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
   09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
   cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
