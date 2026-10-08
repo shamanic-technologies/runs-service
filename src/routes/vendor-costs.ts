@@ -367,6 +367,121 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /internal/runs/subtree-costs — EVERY run matching the filters (no page),
+ * each with its whole subtree's COMMITTED (`actual`) cost on the three bases a
+ * caller needs together: billed, frozen net (COALESCE(net, gross) per row) and
+ * vendor (+ the billed amount with no known vendor cost). One statement, one
+ * snapshot.
+ *
+ * Built for features-service's sourcing investment, which needs every
+ * lead-serve run of a brand with its subtree cost, keyed by run id. It used to
+ * walk GET /internal/runs/vendor and GET /v1/runs?include=subtreeCost in OFFSET
+ * pages of 500 (the owner brand: 60,697 runs = 122 pages x 2, each page
+ * re-scanning the ones before). Per run, the figures equal those two reads'
+ * `actualCostInUsdCents` / `vendorActualCostInUsdCents` /
+ * `unpricedActualCostInUsdCents` / `netActualCostInUsdCents` byte-for-byte.
+ *
+ * Bounded by a brand or a campaign (400 otherwise): without one the walk is an
+ * org's whole history. Service-auth only — the vendor cost reveals the margin.
+ */
+router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res) => {
+  try {
+    const { orgId, brandId, campaignId, serviceName, taskName } = req.query as Record<string, unknown>;
+    if (typeof orgId !== "string" || !UUID_RE.test(orgId)) {
+      res.status(400).json({ error: "orgId query parameter is required and must be a valid UUID" });
+      return;
+    }
+    for (const [name, value] of Object.entries({ brandId, campaignId, serviceName, taskName })) {
+      if (value !== undefined && (typeof value !== "string" || value === "")) {
+        res.status(400).json({ error: `${name} must be a non-empty string` });
+        return;
+      }
+    }
+    if (!brandId && !campaignId) {
+      res.status(400).json({ error: "brandId or campaignId is required" });
+      return;
+    }
+
+    const conditions = [sql`organization_id = ${orgId}::uuid`];
+    if (brandId) conditions.push(sql`${brandId as string} = ANY(brand_ids)`);
+    if (campaignId) conditions.push(sql`campaign_id = ${campaignId as string}`);
+    if (serviceName) conditions.push(sql`service_name = ${serviceName as string}`);
+    if (taskName) conditions.push(sql`task_name = ${taskName as string}`);
+
+    const versions = await fetchVendorCostCatalog();
+    const rows = (await db.execute(sql`
+      WITH RECURSIVE roots AS MATERIALIZED (
+        SELECT id, audience_id, campaign_id, started_at FROM runs
+        WHERE ${sql.join(conditions, sql` AND `)}
+      ),
+      descendants AS (
+        SELECT id, id AS root_run_id FROM roots
+        UNION ALL
+        SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+      ),
+      v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      costed AS (
+        SELECT
+          d.root_run_id,
+          rc.total_cost_in_usd_cents AS billed,
+          COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net,
+          rc.quantity * v.vendor AS vendor,
+          (v.vendor IS NOT NULL) AS priced
+        FROM descendants d
+        -- Per-run LATERAL fenced by OFFSET 0, as GET /internal/runs/vendor: a
+        -- plain JOIN hash-joins a seq scan of the whole ledger.
+        CROSS JOIN LATERAL (
+          SELECT rc.cost_name, rc.total_cost_in_usd_cents, rc.net_cost_in_usd_cents,
+                 rc.quantity, rc.unit_cost_in_usd_cents, rc.created_at
+          FROM runs_costs rc WHERE rc.run_id = d.id AND rc.status = 'actual'
+          OFFSET 0
+        ) rc
+        LEFT JOIN v
+          ON v.cost_name = rc.cost_name
+         AND v.billed = rc.unit_cost_in_usd_cents
+         AND rc.created_at >= v.valid_from
+         AND (v.valid_to IS NULL OR rc.created_at < v.valid_to)
+      ),
+      sums AS (
+        SELECT
+          root_run_id,
+          SUM(billed)::text AS billed_actual,
+          SUM(net)::text AS net_actual,
+          COALESCE(SUM(vendor) FILTER (WHERE priced), 0)::text AS vendor_actual,
+          COALESCE(SUM(billed) FILTER (WHERE NOT priced), 0)::text AS unpriced_actual
+        FROM costed
+        GROUP BY root_run_id
+      )
+      SELECT ro.id, ro.audience_id, ro.campaign_id, s.billed_actual, s.net_actual, s.vendor_actual, s.unpriced_actual
+      FROM roots ro
+      LEFT JOIN sums s ON s.root_run_id = ro.id
+      ORDER BY ro.started_at DESC, ro.id DESC
+    `)) as any[];
+
+    // A run whose subtree has no committed cost row has no sums row: 0 on every basis.
+    const zero = "0";
+    res.json({
+      runs: rows.map((r) => ({
+        id: r.id as string,
+        audienceId: (r.audience_id as string | null) ?? null,
+        campaignId: (r.campaign_id as string | null) ?? null,
+        actualCostInUsdCents: fixed(r.billed_actual ?? zero),
+        netActualCostInUsdCents: fixed(r.net_actual ?? zero),
+        vendorActualCostInUsdCents: fixed(r.vendor_actual ?? zero),
+        unpricedActualCostInUsdCents: fixed(r.unpriced_actual ?? zero),
+      })),
+    });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/runs/subtree-costs:", err);
+    if (err instanceof VendorCostCatalogError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // --- Grouped (undated) twin ---
 
 /**
