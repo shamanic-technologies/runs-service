@@ -30,9 +30,9 @@ import {
   CAMPAIGN_DAY_ROLLUP_NAME,
   CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS,
   readCampaignCostsFromRollup,
-  readCampaignTimeseriesFromRollup,
 } from "../services/stats-rollup-campaign.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
+import { BRAND_ROLLUP_GROUP_BY, readBrandRollupGroups } from "../services/stats-rollup-brand.js";
 
 const router = Router();
 
@@ -454,9 +454,41 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       !goal && !brandProfileId && !audienceId && !workflowContext &&
       (!attributionStatus || attributionStatus === "all");
 
+    // Rollup path (migration 0041): the brand-history reads features-service makes
+    // several times a minute (org + brand + feature slugs, grouped by workflow
+    // and/or campaign, optionally bounded) are served from the (campaign, UTC
+    // day) rollup in O(groups) — same rows, same text, see stats-rollup-brand.ts.
+    // A service/task filter or any other grouping keeps the split/joined query.
+    const brandRollupServes =
+      splitServes &&
+      uniqueSqlGroupByKeys.every((k) => !!BRAND_ROLLUP_GROUP_BY[k]) &&
+      !serviceName && !taskName &&
+      (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
+
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = splitServes
+    const result = brandRollupServes
+      ? await readBrandRollupGroups({
+          dims: uniqueSqlGroupByKeys.map((k) => BRAND_ROLLUP_GROUP_BY[k]),
+          outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
+          filters: {
+            orgId: req.orgId,
+            brandId,
+            campaignId,
+            campaignIds: parsedCampaignIds.ids,
+            featureSlugs: dynastyFilters.featureSlugs && dynastyFilters.featureSlugs.length > 0
+              ? dynastyFilters.featureSlugs
+              : featureSlug ? [featureSlug] : undefined,
+            workflowSlugs: dynastyFilters.workflowSlugs && dynastyFilters.workflowSlugs.length > 0
+              ? dynastyFilters.workflowSlugs
+              : workflowSlug ? [workflowSlug] : undefined,
+          },
+          startedAfter,
+          startedBefore,
+          minMax: true,
+          orderBy: "total_cost DESC",
+        })
+      : splitServes
       ? await db.execute(splitRunSideCostsSql(uniqueSqlGroupByKeys, whereSql))
       : await db.execute(sql`
       SELECT ${sql.join(selectCols, sql`, `)},
@@ -1441,20 +1473,26 @@ function handlePublicCostsTimeseries(req: any, res: any) {
 
       const groupCols = groupByCampaign ? sql`1, 2` : sql`1`;
 
-      // Campaign rollup path (migration 0037): a campaign-scoped read (one row or
-      // a whole family) whose buckets are unions of UTC days and whose other
-      // filters are all carried by the (campaign, day) rollup. A non-UTC tz, a
-      // started_at bound or a task filter needs finer data than a UTC day per
-      // campaign, so it keeps the live query.
-      const campaignRollupServes =
-        (!!campaignId || !!campaignIds) &&
-        timezone === "UTC" && !taskName && !startedAfter && !startedBefore &&
+      // Rollup path (migrations 0037 + 0041): buckets in UTC are unions of UTC
+      // days, and every other filter (org, brand, campaign(s), feature, workflow,
+      // payer) is carried by the (campaign, day) rollup, which holds every run.
+      // A startedAfter / startedBefore bound is exact (stats-rollup-brand.ts reads
+      // a day the bound cuts through live). A non-UTC tz or a task filter needs
+      // finer data than a UTC day, so it keeps the live query.
+      const rollupServes =
+        timezone === "UTC" && !taskName &&
         (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
 
-      const result = campaignRollupServes
-        ? await readCampaignTimeseriesFromRollup({
-            interval,
-            groupByCampaign,
+      const result = rollupServes
+        ? await readBrandRollupGroups({
+            dims: [
+              {
+                rollup: `to_char(date_trunc('${interval}', day::timestamp), 'YYYY-MM-DD')`,
+                live: `to_char(date_trunc('${interval}', r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`,
+              },
+              ...(groupByCampaign ? [BRAND_ROLLUP_GROUP_BY.campaignId] : []),
+            ],
+            outNames: groupByCampaign ? ["period", "campaign_id"] : ["period"],
             filters: {
               orgId,
               brandId,
@@ -1463,7 +1501,11 @@ function handlePublicCostsTimeseries(req: any, res: any) {
               featureSlugs: featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined,
               workflowSlugs,
             },
+            startedAfter,
+            startedBefore,
             costSource,
+            minMax: false,
+            orderBy: groupByCampaign ? "1, 2" : "1",
           })
         : await db.execute(sql`
         SELECT

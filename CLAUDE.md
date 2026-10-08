@@ -27,6 +27,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
+- `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041). See "Brand-history cost reads".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -138,8 +139,9 @@ row lands. So it is maintained at WRITE time.
   Measured 9.9 s → 2.5 s, identical rows in one snapshot. A cost-row dimension or
   filter (`audienceId`, `goal`, `brandProfileId`, `workflowContext`,
   `attributionStatus`, `costName`) can put one run in several groups, so
-  `audienceId,workflowSlug` keeps the joined query (JIT-off only). Taking the
-  brand-scoped reads to O(groups) needs a brand-grain rollup — its own PR.
+  `audienceId,workflowSlug` keeps the joined query (JIT-off only). The run-side
+  brand-scoped reads are now O(groups) from the campaign-day rollup (migration
+  0041, "Brand-history cost reads"); the audience reads are not (cost-row dimension).
 ## Org actualized total — maintained on write, read in O(1) (migration 0035)
 
 billing-service reads an org's ACTUALIZED platform charges (net of the usage
@@ -224,16 +226,14 @@ time, same pattern and same byte-identity rules as 0034.
   Per-row totals = `GET /v1/stats/public/costs?groupBy=campaignId&campaignIds=…`.
 - **Tables** `stats_rollup_campaign_runs` / `stats_rollup_campaign_costs`, key
   `(campaign_id, day, organization_id, brand_ids, feature_slug, workflow_slug[,
-  cost_source])`, `day` = `started_at` as a UTC date. Runs with no campaign are not
-  rolled up. Triggers on `runs` (insert, update of any key column incl.
+  cost_source])`, `day` = `started_at` as a UTC date. Since 0041 EVERY run is rolled
+  up (a NULL campaign is its own group) with min/max started_at per run group. Triggers on `runs` (insert, update of any key column incl.
   `started_at`/`brand_ids`, BEFORE delete) and `runs_costs`.
-- **Served shape**: a campaign filter (`campaignId` and/or `campaignIds`) and
-  otherwise only orgId / brandId / featureSlug(s) / workflowDynastySlug /
-  costSource. Timeseries also needs tz UTC and no startedAfter/startedBefore; public
-  costs needs groupBy ∈ {campaignId, workflowSlug, workflowDynastySlug,
-  featureSlug}. A taskName or anything finer than a campaign's UTC day keeps the
-  live query. `GET /v1/stats/costs` (org-scoped, returns exact min/maxStartedAt)
-  is NOT served from the rollup — `campaignIds` there is a live filter.
+- **Served shape (public costs)**: a campaign filter (`campaignId` and/or
+  `campaignIds`) and otherwise only orgId / brandId / featureSlug(s) /
+  workflowDynastySlug / costSource; groupBy ∈ {campaignId, workflowSlug,
+  workflowDynastySlug, featureSlug}. A taskName keeps the live query. The
+  timeseries and org-scoped `GET /v1/stats/costs` reads: see "Brand-history cost reads".
 - **Readiness** stamp `campaign_day` in `stats_rollups`; on an existing database run
   `scripts/rebuild-stats-rollup.ts campaign_day` after the deploy (in prod: inside
   the container against the compiled `dist/`). `rebuildRollup` in
@@ -241,6 +241,40 @@ time, same pattern and same byte-identity rules as 0034.
   rollups.
 - **TRUNCATE fires no row triggers** — `tests/global-setup.ts` truncates these two
   tables with the ledger.
+
+## Brand-history cost reads — the campaign-day rollup, every run (migration 0041)
+
+features-service reads a brand's whole cost history (`GET /v1/stats/costs`, org +
+brand + 5 feature slugs, groupBy workflowSlug / campaignId / both, often split at a
+UTC midnight into a past half `startedBefore=…T23:59:59.999Z` and a today half
+`startedAfter=…T00:00:00Z`) several times a minute. Live, 1-3 s each over 500k+
+runs; ~60% of runs-service's active DB time (2026-10-08). Served from the 0037
+tables, extended rather than duplicated (same grain).
+
+- **Extension**: `campaign_id` nullable (runs without a campaign rolled up; every
+  0037 read filters on a campaign so never sees them); `min_started_at`,
+  `max_started_at`, `minmax_stale` on the runs table. A removal (delete, key move)
+  cannot shrink min/max without a scan, so it sets `minmax_stale`; a rebuild clears it.
+- **Served** (`src/services/stats-rollup-brand.ts`, statsDb): org-scoped
+  `GET /v1/stats/costs` with groupBy ⊆ {workflowSlug, workflowDynastySlug,
+  campaignId, featureSlug} and filters ⊆ {brandId, campaignId(s), featureSlug(s),
+  workflowSlug(s)/dynasty, startedAfter, startedBefore}; and
+  `GET /v1/stats/public/costs/timeseries` with tz UTC and no taskName (any other
+  filter, bounds included, campaign or not). Anything else stays live.
+- **Exact bounds**: a bound cuts through one UTC day; that day comes from the
+  rollup when the excluded part of it holds no run matching the filters (always,
+  for midnight bounds), else it is read LIVE with the exact bound. Days holding a
+  stale group (min/max reads only) are read live too. Rollup days and live days
+  are disjoint, one statement, one snapshot.
+- **Readiness**: same `campaign_day` stamp. The 0041 migration un-stamps an existing
+  database (NULL-campaign history and min/max missing) → run
+  `rebuild-stats-rollup.ts campaign_day` right after the deploy. Un-stamping is also
+  the instant kill switch (every gated read goes live).
+- **Parity guard**: `tests/integration/stats-rollup-brand.test.ts` (rollup vs live,
+  raw bodies, through inserts, transitions, deletes, key moves, racing rebuilds;
+  red if the boundary-day or stale-day logic is disabled).
+- **Not served**: `audienceId` groupings (cost-row dimension, a run can sit in
+  several audience groups). Next candidate if they dominate again.
 
 ## Run outcomes — how runs ended and how long they took (`GET /v1/stats/run-outcomes`)
 
