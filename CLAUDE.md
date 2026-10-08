@@ -409,7 +409,9 @@ structure is stamped in `stats_rollups`.
   Σgross, Σnet, min/max created_at. The margin reads (`marginBaseSql` in
   `routes/vendor-costs.ts`) price one row per group at its min created_at; a group
   whose (min, max] contains a catalogue served-from instant of its name is read
-  row by row (`idx_runs_costs_margin_raw`). Exact: every other group's rows sit on
+  row by row (`idx_runs_costs_margin_raw`, per-group LATERAL fenced by `OFFSET 0`:
+  flattened, it merge-joined a sort of the whole ledger, 5 s; edges are one array per
+  name, hash-joined, not a per-group EXISTS over all 1.1k instants, 1.4 s). Exact: every other group's rows sit on
   one side of every window edge, and Σ(q × vendor) = Σq × vendor in numeric.
   min/max only widen (removal keeps them), which can only send a group raw.
   Rebuild: `scripts/rebuild-stats-rollup.ts cost_day` (snapshot protocol).

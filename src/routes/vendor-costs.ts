@@ -629,15 +629,18 @@ function providerWindowsSql(versions: VendorCostVersion[]) {
 }
 
 /**
- * Served-from instants of every catalogue version, per cost name: the only points
- * in time where a cost row's vendor price or provider can change (the edges of
- * versionWindowsSql and providerWindowsSql).
+ * Served-from instants of every catalogue version, one array per cost name: the
+ * only points in time where a cost row's vendor price or provider can change (the
+ * edges of versionWindowsSql and providerWindowsSql). An array hash-joined on the
+ * name, not one row per instant: a per-group EXISTS over every instant compared
+ * 7.8k groups x 1.1k instants (1.4 s on prod).
  */
 function servedFromEdgesSql(versions: VendorCostVersion[]) {
   const rows = versions.map((v) => ({ cost_name: v.costName, served_from: v.servedFrom }));
   return sql`
-    SELECT DISTINCT x.cost_name, x.served_from AS at
+    SELECT x.cost_name, array_agg(x.served_from) AS ats
     FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(cost_name text, served_from timestamptz)
+    GROUP BY x.cost_name
   `;
 }
 
@@ -672,11 +675,12 @@ function marginBaseSql(versions: VendorCostVersion[], orgId: string | undefined,
       e AS MATERIALIZED (${servedFromEdgesSql(versions)}),
       g AS MATERIALIZED (
         SELECT d.*,
-               EXISTS (
-                 SELECT 1 FROM e
-                 WHERE e.cost_name = d.cost_name AND e.at > d.min_created_at AND e.at <= d.max_created_at
+               COALESCE(
+                 (SELECT bool_or(t > d.min_created_at AND t <= d.max_created_at) FROM unnest(e.ats) t),
+                 false
                ) AS split
         FROM stats_rollup_cost_day d
+        LEFT JOIN e ON e.cost_name = d.cost_name
         WHERE d.n > 0 ${orgSql}
       ),
       base AS MATERIALIZED (
@@ -689,13 +693,20 @@ function marginBaseSql(versions: VendorCostVersion[], orgId: string | undefined,
                rc.total_cost_in_usd_cents AS gross,
                COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net
         FROM g
-        JOIN runs_costs rc
-          ON rc.cost_name = g.cost_name
-         AND rc.created_at >= g.min_created_at AND rc.created_at <= g.max_created_at
-         AND rc.unit_cost_in_usd_cents = g.unit_cost_in_usd_cents
-         AND rc.status = g.status
-         AND rc.organization_id IS NOT DISTINCT FROM g.organization_id
-        WHERE g.split AND rc.cost_source = 'platform' AND rc.status IN ('actual','refunded')
+        -- Per straddling group, its rows off idx_runs_costs_margin_raw. OFFSET 0
+        -- fences the subquery: flattened into a plain join, the planner merge-joined
+        -- a sort of the whole ledger (5 s on prod for 22 groups).
+        CROSS JOIN LATERAL (
+          SELECT * FROM runs_costs rc
+          WHERE rc.cost_name = g.cost_name
+            AND rc.created_at >= g.min_created_at AND rc.created_at <= g.max_created_at
+            AND rc.unit_cost_in_usd_cents = g.unit_cost_in_usd_cents
+            AND rc.status = g.status
+            AND rc.organization_id IS NOT DISTINCT FROM g.organization_id
+            AND rc.cost_source = 'platform' AND rc.status IN ('actual','refunded')
+          OFFSET 0
+        ) rc
+        WHERE g.split
       )`;
 }
 
