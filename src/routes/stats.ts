@@ -34,6 +34,7 @@ import {
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { ORG_HOUR_ROLLUP_NAME, readOrgHourTimeseries } from "../services/stats-rollup-org-hour.js";
 import { BRAND_ROLLUP_GROUP_BY, readBrandRollupGroups } from "../services/stats-rollup-brand.js";
+import { ORG_TASK_GROUP_BY, ORG_TASK_ROLLUP_NAME, readOrgTaskGroups } from "../services/stats-rollup-org-task.js";
 
 const router = Router();
 
@@ -466,9 +467,32 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       !serviceName && !taskName &&
       (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
 
+    // Rollup path (migration 0043): the org usage read (features-service
+    // GET /orgs/usage: groupBy serviceName,taskName,campaignId, whole org, no
+    // bound) groups every run of the org; live it ran past the 30 s statement
+    // timeout for the largest orgs. Served from the (org, service, task,
+    // campaign, UTC day) rollup — same rows, same text, see stats-rollup-org-task.ts.
+    const orgTaskRollupServes =
+      splitServes && !brandRollupServes && !!req.orgId &&
+      uniqueSqlGroupByKeys.every((k) => !!ORG_TASK_GROUP_BY[k]) &&
+      !brandId && !workflowSlug && !workflowSlugsParam && !workflowDynastySlug &&
+      !featureSlug && !featureSlugsParam && !startedAfter && !startedBefore &&
+      (await isStatsRollupReady(ORG_TASK_ROLLUP_NAME));
+
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = brandRollupServes
+    const result = orgTaskRollupServes
+      ? await readOrgTaskGroups({
+          groupBy: uniqueSqlGroupByKeys,
+          filters: {
+            orgId: req.orgId!,
+            campaignId,
+            campaignIds: parsedCampaignIds.ids,
+            serviceName,
+            taskName,
+          },
+        })
+      : brandRollupServes
       ? await readBrandRollupGroups({
           dims: uniqueSqlGroupByKeys.map((k) => BRAND_ROLLUP_GROUP_BY[k]),
           outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
