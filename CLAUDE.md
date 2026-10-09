@@ -28,6 +28,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041). See "Brand-history cost reads".
+- `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -305,6 +306,27 @@ tables, extended rather than duplicated (same grain).
   red if the boundary-day or stale-day logic is disabled).
 - **Not served**: `audienceId` groupings (cost-row dimension, a run can sit in
   several audience groups). Next candidate if they dominate again.
+
+## Org usage read — (org, service, task, campaign, UTC day) rollup (migration 0043)
+
+features-service `GET /orgs/usage` (Billing, Today, copilot `get_org_usage`) asks
+`GET /v1/stats/costs?groupBy=serviceName,taskName,campaignId` for the WHOLE org.
+Live that groups every run of the org: 985k runs for the owner org f0420eb5, ~33 s,
+past the 30 s stats `statement_timeout` (12 × 500/day, 2026-10-09). The 0037/0041
+rollup has no service/task, hence its own table.
+
+- **Served** (`src/services/stats-rollup-org-task.ts`, statsDb): org-scoped, groupBy
+  ⊆ {serviceName, taskName, campaignId}, filters ⊆ {campaignId(s), serviceName,
+  taskName}, NO bounds (a bound, brand, feature or workflow filter stays live). The
+  brand rollup keeps priority where both could serve.
+- **One table** `stats_rollup_org_task`: run count, min/max/`minmax_stale`, and per
+  status n + gross + net. Triggers on runs (insert, update of org/service/task/
+  campaign/started_at, BEFORE delete) and runs_costs. A UTC day holding a stale row
+  is read live (0041's rule).
+- **Readiness** stamp `org_task`; run `scripts/rebuild-stats-rollup.ts org_task`
+  after the deploy (prod: inside the container against `dist/`).
+- **Parity guard**: `tests/integration/stats-rollup-org-task.test.ts` (raw bodies,
+  red if the stale-day logic is disabled).
 
 ## Run outcomes — how runs ended and how long they took (`GET /v1/stats/run-outcomes`)
 

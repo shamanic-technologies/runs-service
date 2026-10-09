@@ -302,6 +302,13 @@
       "when": 1781827200000,
       "tag": "0042_stats_rollup_org_hour",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1781913600000,
+      "tag": "0043_stats_rollup_org_task",
+      "breakpoints": true
     }
   ]
 }

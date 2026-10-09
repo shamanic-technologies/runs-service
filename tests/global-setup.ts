@@ -18,7 +18,7 @@ export async function setup() {
     // rollups, migrations 0034 + 0037 + 0040; org_actual_totals, migration 0035;
     // run_campaign_entries, migration 0040) are emptied
     // alongside the ledger they summarise.
-    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs, stats_rollup_campaign_runs, stats_rollup_campaign_costs, org_actual_totals, brand_transfer_moves, stats_rollup_cost_day, run_campaign_entries, stats_rollup_org_hour CASCADE`;
+    await sql`TRUNCATE run_lifecycle_events, cost_lifecycle_events, run_events, runs_costs, runs, stats_rollup_runs, stats_rollup_costs, stats_rollup_campaign_runs, stats_rollup_campaign_costs, org_actual_totals, brand_transfer_moves, stats_rollup_cost_day, run_campaign_entries, stats_rollup_org_hour, stats_rollup_org_task CASCADE`;
   } finally {
     await sql.end();
   }
