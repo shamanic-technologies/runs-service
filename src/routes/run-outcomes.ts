@@ -1,10 +1,15 @@
 import { Router } from "express";
 import { sql, type SQL } from "drizzle-orm";
 import { statsDb as db } from "../db/index.js";
-import { requireApiKey } from "../middleware/auth.js";
+import { requireApiKey, requireInternalAuth } from "../middleware/auth.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { CAMPAIGN_ENTRY_ROLLUP_NAME } from "../services/run-campaign-entries.js";
 import { isStatsRollupReady } from "../services/stats-rollup.js";
+import {
+  TASK_OUTCOMES_SAMPLE_DEFAULT,
+  TASK_OUTCOMES_SAMPLE_MAX,
+  getTaskOutcomes,
+} from "../services/task-outcomes.js";
 
 // GET /v1/stats/run-outcomes — how the runs of a group ENDED, and how long they
 // took: completed / failed / still running, the success rate, and the median
@@ -173,6 +178,38 @@ router.get("/v1/stats/run-outcomes", requireApiKey, async (req, res) => {
     res.json({ scope, groups });
   } catch (err) {
     console.error("[Runs Service] Error in GET /v1/stats/run-outcomes:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /internal/stats/task-outcomes — fleet-wide (every org and org-less platform
+// runs) outcome, duration and whole-subtree cost per normalized task of ONE
+// service, over each task's most recent `sample` runs. See services/task-outcomes.ts.
+router.get("/internal/stats/task-outcomes", requireInternalAuth, async (req, res) => {
+  try {
+    const { serviceName, sample: sampleParam } = req.query as Record<string, unknown>;
+    if (typeof serviceName !== "string" || serviceName.trim() === "") {
+      res.status(400).json({ error: "serviceName is required (one service name)" });
+      return;
+    }
+    let sample = TASK_OUTCOMES_SAMPLE_DEFAULT;
+    if (sampleParam !== undefined) {
+      const parsed = typeof sampleParam === "string" && /^\d+$/.test(sampleParam) ? Number(sampleParam) : NaN;
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > TASK_OUTCOMES_SAMPLE_MAX) {
+        res.status(400).json({ error: `sample must be an integer from 1 to ${TASK_OUTCOMES_SAMPLE_MAX}` });
+        return;
+      }
+      sample = parsed;
+    }
+
+    const startedMs = Date.now();
+    const tasks = await getTaskOutcomes(serviceName, sample);
+    console.log(
+      `[Runs Service] task-outcomes serviceName=${serviceName} sample=${sample} tasks=${tasks.length} in ${Date.now() - startedMs}ms`,
+    );
+    res.json({ serviceName, sample, tasks });
+  } catch (err) {
+    console.error("[Runs Service] Error in GET /internal/stats/task-outcomes:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

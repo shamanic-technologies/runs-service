@@ -21,6 +21,17 @@ describe("OpenAPI", () => {
     expect(res.body.components.schemas.DescendantRun).toBeDefined();
   });
 
+  it("documents GET /internal/stats/task-outcomes", async () => {
+    const res = await request(app).get("/openapi.json");
+    const op = res.body.paths["/internal/stats/task-outcomes"]?.get;
+    expect(op).toBeDefined();
+    const props = res.body.components.schemas.TaskOutcomesResponse.properties.tasks.items.properties;
+    expect(Object.keys(props).sort()).toEqual([
+      "avgCostInUsdCents", "avgDurationMs", "completedCount", "failedCount", "lastRunAt", "runningCount",
+      "sampleSize", "successRate", "sumCompletedDurationMs", "sumCostInUsdCents", "taskName", "totalRunCount",
+    ]);
+  });
+
   it("GET /openapi.json does not require authentication", async () => {
     const res = await request(app).get("/openapi.json");
     expect(res.status).toBe(200);

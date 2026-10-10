@@ -25,6 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
+- `src/services/task-outcomes.ts` — `GET /internal/stats/task-outcomes` (fleet-wide per-task outcome, duration, whole-subtree cost of ONE service; route in `run-outcomes.ts`). See "Task outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041). See "Brand-history cost reads".
@@ -351,6 +352,33 @@ medians do not merge).
   decided yet. Statuses are enumerated, never negated.
 - Cost: the entry test is one PK lookup per candidate run. Busiest brand, 30 days:
   ~0.95 s warm (229k candidate runs); one day: ~0.23 s.
+
+## Task outcomes — fleet-wide, per task of one service (`GET /internal/stats/task-outcomes`)
+
+api-registry-service shows, per endpoint of every service, the mean cost, mean
+duration and success rate of one run, so an agent can pick endpoints when it
+builds a workflow. Service-auth, no org header: every org AND org-less platform runs.
+
+- **Grouping key** = `task_name` with every UUID (case-insensitive) replaced by
+  `{id}` (`GET /v1/offers/<uuid>/revenue` → `GET /v1/offers/{id}/revenue`).
+  `totalRunCount` is all time; everything else is over the task's newest `sample`
+  runs (default 200, 1..1000, `started_at DESC, id DESC`).
+- **Cost** = each sampled run's WHOLE subtree, `status = 'actual'` rows only, every
+  cost source, gross billed; a run with no cost counts 0. `sum*` fields are there
+  so a consumer can merge groups exactly.
+- **Speed (prod 2026-10-10)**: apollo-service 3-9 s, api-service 27-59 s (box load). The
+  api-service bulk is 200 `POST /v1/campaigns` roots whose subtrees are whole
+  campaign trees (~2.2M of the 2.25M walked runs). Three plan rules, each measured:
+  the sample is `MATERIALIZED`; the child fetch is a LATERAL with `OFFSET 0` (else a
+  merge join index-scans all of `runs` per recursion level); cost is a plain hash
+  join to `runs_costs`, not a per-run LATERAL (2.25M probes = ~25 s). Raising
+  `work_mem` to 128MB made api-service 111 s: do not.
+- **Runs past the 30 s analytics `statement_timeout`**: the read sets
+  `SET LOCAL statement_timeout = '150s'` in its own transaction, holds at most 2 of
+  the 8 analytics connections (in-process queue), and coalesces identical requests.
+  The consumer must cache and refresh in the background.
+- `completed_at < started_at` exists in prod (7,436 completed runs, clock skew
+  between writers): durations are reported raw, never clamped.
 
 ## Vendor-cost basis — dated spend priced at what the vendor charged us (`GET /internal/stats/costs/timeseries/vendor`)
 
