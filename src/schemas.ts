@@ -1444,6 +1444,36 @@ export const StatsRunOutcomesResponseSchema = z
   })
   .openapi("StatsRunOutcomesResponse");
 
+export const TaskOutcomesQuerySchema = z
+  .object({
+    serviceName: z.string().openapi({ description: "Required. ONE service name (runs.service_name), e.g. apollo-service. 400 when absent." }),
+    sample: z.coerce.number().int().min(1).max(1000).optional().openapi({ description: "Per task, only the most recent `sample` runs (by startedAt desc) are measured. Default 200, 1..1000; out of range is a 400." }),
+  })
+  .openapi("TaskOutcomesQuery");
+
+export const TaskOutcomesResponseSchema = z
+  .object({
+    serviceName: z.string(),
+    sample: z.number().int(),
+    tasks: z.array(
+      z.object({
+        taskName: z.string().openapi({ description: "The run's task_name with every UUID (case-insensitive) replaced by the literal {id}: GET /v1/offers/d5ec.../revenue groups as GET /v1/offers/{id}/revenue." }),
+        totalRunCount: z.number().int().openapi({ description: "ALL runs of this normalized task, all time, every org and org-less platform runs." }),
+        sampleSize: z.number().int().openapi({ description: "Runs measured: the task's most recent runs, at most `sample`." }),
+        completedCount: z.number().int().openapi({ description: "Sampled runs with status completed." }),
+        failedCount: z.number().int().openapi({ description: "Sampled runs with status failed." }),
+        runningCount: z.number().int().openapi({ description: "Sampled runs still running." }),
+        successRate: z.number().nullable().openapi({ description: "completedCount / (completedCount + failedCount), in [0,1]. null when no sampled run has ended." }),
+        avgDurationMs: z.number().int().nullable().openapi({ description: "Mean of (completedAt - startedAt) over the COMPLETED sampled runs, rounded to integer ms. null when none completed." }),
+        sumCompletedDurationMs: z.number().int().openapi({ description: "Sum of (completedAt - startedAt) over the completed sampled runs, integer ms, so a consumer can merge groups exactly (sum / completedCount). 0 when none completed." }),
+        avgCostInUsdCents: z.string().openapi({ description: "Mean over the sampled runs of each run's WHOLE-SUBTREE cost: SUM(total_cost_in_usd_cents) of status='actual' cost rows (all cost sources, gross billed basis) on the run and all its descendants. A run with no cost counts as 0. 10-decimal string." }),
+        sumCostInUsdCents: z.string().openapi({ description: "Sum of the sampled runs' whole-subtree actual cost (avgCostInUsdCents x sampleSize). 10-decimal string." }),
+        lastRunAt: z.string().datetime().openapi({ description: "startedAt of the task's most recent run." }),
+      })
+    ),
+  })
+  .openapi("TaskOutcomesResponse");
+
 // --- Stats path registrations ---
 
 registry.registerPath({
@@ -1467,6 +1497,21 @@ registry.registerPath({
   },
 });
 
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/task-outcomes",
+  summary: "Fleet-wide outcome, duration and cost per task of one service (service-auth only)",
+  description:
+    "Fleet-wide (every org and org-less platform runs; no x-org-id), for ONE service: per normalized task (task_name with every UUID replaced by {id}), how its most recent `sample` runs ended (completed / failed / running, success rate), their mean duration, and the mean WHOLE-SUBTREE actual cost of one run (the run and all its descendants, every cost source, gross billed basis; cancelled / provisioned / refunded rows excluded). totalRunCount counts all runs of the task, all time. Tasks are ordered by totalRunCount desc; a service with no runs returns tasks: []. Slow by design (api-service at sample=200: 30-60 s): cache it and refresh in the background.",
+  security: [{ apiKey: [] }],
+  request: { query: TaskOutcomesQuerySchema },
+  responses: {
+    200: { description: "Per-task outcomes", content: { "application/json": { schema: TaskOutcomesResponseSchema } } },
+    400: { description: "Missing serviceName or sample out of range", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
 
 registry.registerPath({
   method: "get",

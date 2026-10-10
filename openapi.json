@@ -1461,6 +1461,95 @@
           "groups"
         ]
       },
+      "TaskOutcomesResponse": {
+        "type": "object",
+        "properties": {
+          "serviceName": {
+            "type": "string"
+          },
+          "sample": {
+            "type": "integer"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "taskName": {
+                  "type": "string",
+                  "description": "The run's task_name with every UUID (case-insensitive) replaced by the literal {id}: GET /v1/offers/d5ec.../revenue groups as GET /v1/offers/{id}/revenue."
+                },
+                "totalRunCount": {
+                  "type": "integer",
+                  "description": "ALL runs of this normalized task, all time, every org and org-less platform runs."
+                },
+                "sampleSize": {
+                  "type": "integer",
+                  "description": "Runs measured: the task's most recent runs, at most `sample`."
+                },
+                "completedCount": {
+                  "type": "integer",
+                  "description": "Sampled runs with status completed."
+                },
+                "failedCount": {
+                  "type": "integer",
+                  "description": "Sampled runs with status failed."
+                },
+                "runningCount": {
+                  "type": "integer",
+                  "description": "Sampled runs still running."
+                },
+                "successRate": {
+                  "type": "number",
+                  "nullable": true,
+                  "description": "completedCount / (completedCount + failedCount), in [0,1]. null when no sampled run has ended."
+                },
+                "avgDurationMs": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "Mean of (completedAt - startedAt) over the COMPLETED sampled runs, rounded to integer ms. null when none completed."
+                },
+                "sumCompletedDurationMs": {
+                  "type": "integer",
+                  "description": "Sum of (completedAt - startedAt) over the completed sampled runs, integer ms, so a consumer can merge groups exactly (sum / completedCount). 0 when none completed."
+                },
+                "avgCostInUsdCents": {
+                  "type": "string",
+                  "description": "Mean over the sampled runs of each run's WHOLE-SUBTREE cost: SUM(total_cost_in_usd_cents) of status='actual' cost rows (all cost sources, gross billed basis) on the run and all its descendants. A run with no cost counts as 0. 10-decimal string."
+                },
+                "sumCostInUsdCents": {
+                  "type": "string",
+                  "description": "Sum of the sampled runs' whole-subtree actual cost (avgCostInUsdCents x sampleSize). 10-decimal string."
+                },
+                "lastRunAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "startedAt of the task's most recent run."
+                }
+              },
+              "required": [
+                "taskName",
+                "totalRunCount",
+                "sampleSize",
+                "completedCount",
+                "failedCount",
+                "runningCount",
+                "successRate",
+                "avgDurationMs",
+                "sumCompletedDurationMs",
+                "avgCostInUsdCents",
+                "sumCostInUsdCents",
+                "lastRunAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "serviceName",
+          "sample",
+          "tasks"
+        ]
+      },
       "StatsCostsResponse": {
         "type": "object",
         "properties": {
@@ -4647,6 +4736,66 @@
           },
           "400": {
             "description": "Invalid groupBy, scope, campaignIds or date",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/stats/task-outcomes": {
+      "get": {
+        "summary": "Fleet-wide outcome, duration and cost per task of one service (service-auth only)",
+        "description": "Fleet-wide (every org and org-less platform runs; no x-org-id), for ONE service: per normalized task (task_name with every UUID replaced by {id}), how its most recent `sample` runs ended (completed / failed / running, success rate), their mean duration, and the mean WHOLE-SUBTREE actual cost of one run (the run and all its descendants, every cost source, gross billed basis; cancelled / provisioned / refunded rows excluded). totalRunCount counts all runs of the task, all time. Tasks are ordered by totalRunCount desc; a service with no runs returns tasks: []. Slow by design (api-service at sample=200: 30-60 s): cache it and refresh in the background.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Required. ONE service name (runs.service_name), e.g. apollo-service. 400 when absent."
+            },
+            "required": true,
+            "description": "Required. ONE service name (runs.service_name), e.g. apollo-service. 400 when absent.",
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Per task, only the most recent `sample` runs (by startedAt desc) are measured. Default 200, 1..1000; out of range is a 400."
+            },
+            "required": false,
+            "description": "Per task, only the most recent `sample` runs (by startedAt desc) are measured. Default 200, 1..1000; out of range is a 400.",
+            "name": "sample",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-task outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskOutcomesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing serviceName or sample out of range",
             "content": {
               "application/json": {
                 "schema": {
