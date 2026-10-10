@@ -366,7 +366,7 @@ builds a workflow. Service-auth, no org header: every org AND org-less platform 
 - **Cost** = each sampled run's WHOLE subtree, `status = 'actual'` rows only, every
   cost source, gross billed; a run with no cost counts 0. `sum*` fields are there
   so a consumer can merge groups exactly.
-- **Speed (prod 2026-10-10)**: apollo-service 3-9 s, api-service 27-59 s (box load). The
+- **Speed (prod 2026-10-10)**: apollo-service 3-32 s, api-service 27-59 s, 80-121 s on a saturated box (load 23). The
   api-service bulk is 200 `POST /v1/campaigns` roots whose subtrees are whole
   campaign trees (~2.2M of the 2.25M walked runs). Three plan rules, each measured:
   the sample is `MATERIALIZED`; the child fetch is a LATERAL with `OFFSET 0` (else a
@@ -374,7 +374,7 @@ builds a workflow. Service-auth, no org header: every org AND org-less platform 
   join to `runs_costs`, not a per-run LATERAL (2.25M probes = ~25 s). Raising
   `work_mem` to 128MB made api-service 111 s: do not.
 - **Runs past the 30 s analytics `statement_timeout`**: the read sets
-  `SET LOCAL statement_timeout = '150s'` in its own transaction, holds at most 2 of
+  `SET LOCAL statement_timeout = '290s'` in its own transaction, holds at most 2 of
   the 8 analytics connections (in-process queue), and coalesces identical requests.
   The consumer must cache and refresh in the background.
 - `completed_at < started_at` exists in prod (7,436 completed runs, clock skew

@@ -19,10 +19,12 @@ export const TASK_OUTCOMES_SAMPLE_MAX = 1000;
  * Per-statement ceiling for this read, above the analytics pool's 30 s default.
  * Prod 2026-10-10: serviceName=api-service at sample=200 walks ~2.25M subtree
  * runs (200 `POST /v1/campaigns` roots are whole campaign trees) and answers in
- * 27-59 s depending on box load; apollo-service 3-9 s. The consumer caches and refreshes in the
- * background, so a slow answer is fine; a timeout at 30 s would never answer.
+ * 27-59 s on a normal box, 80-121 s while the box was saturated (load 23 on 8
+ * vCPU, first calls after the v0.47.33 deploy); apollo-service 3-32 s. The
+ * consumer caches and refreshes in the background, so a slow answer is fine; a
+ * timeout would never answer, and it would fire exactly when the box is busiest.
  */
-const STATEMENT_TIMEOUT = "150s";
+const STATEMENT_TIMEOUT = "290s";
 
 /**
  * At most this many task-outcome reads hold an analytics connection at once (the
