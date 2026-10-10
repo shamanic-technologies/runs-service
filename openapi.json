@@ -4753,7 +4753,7 @@
     "/internal/stats/task-outcomes": {
       "get": {
         "summary": "Fleet-wide outcome, duration and cost per task of one service (service-auth only)",
-        "description": "Fleet-wide (every org and org-less platform runs; no x-org-id), for ONE service: per normalized task (task_name with every UUID replaced by {id}), how its most recent `sample` runs ended (completed / failed / running, success rate), their mean duration, and the mean WHOLE-SUBTREE actual cost of one run (the run and all its descendants, every cost source, gross billed basis; cancelled / provisioned / refunded rows excluded). totalRunCount counts all runs of the task, all time. Tasks are ordered by totalRunCount desc; a service with no runs returns tasks: []. Slow by design (api-service at sample=200: 30-60 s): cache it and refresh in the background.",
+        "description": "Fleet-wide (every org and org-less platform runs; no x-org-id), for ONE service: per normalized task (task_name with every UUID replaced by {id}), how its most recent `sample` runs ended (completed / failed / running, success rate), their mean duration, and the mean WHOLE-SUBTREE actual cost of one run (the run and all its descendants, every cost source, gross billed basis; cancelled / provisioned / refunded rows excluded). totalRunCount counts all runs of the task, all time. Tasks are ordered by totalRunCount desc; a service with no runs returns tasks: []. Slow by design (api-service at sample=200: 30-60 s, up to ~2 min on a busy box): cache it and refresh in the background.",
         "security": [
           {
             "apiKey": []
