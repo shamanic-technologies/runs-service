@@ -456,6 +456,29 @@ parallel with every other service) moves a brand's history to another org.
   `x-org-id` stays on the source org.
 - `TRUNCATE` fires no triggers: `tests/global-setup.ts` truncates the ledger too.
 
+## Feature-slug corrections — a missing slug is filled by a bronze event (migration 0044)
+
+A writer that opens a parent run WITHOUT a feature slug leaves the whole subtree
+unlabelled (children inherit), so every per-campaign cost read filtered by the
+campaign's feature reads that spend as $0 (instantly-service AI Instant Call until
+v0.83.35, DIS-373). `POST /internal/runs/feature-slug-corrections` (staff, api-key)
+`{rootRunIds ≤500, featureSlug, reason, correctedBy}` fixes recorded history.
+
+- **Doctrinal path, not a silver UPDATE**: one bronze `run.feature_slug_corrected`
+  event per run (payload featureSlug/reason/correctedBy = the audit trail), projected
+  by `project_run_lifecycle_to_silver`. The rollups keyed on `feature_slug`
+  (0034, 0037/0041, campaign entries) follow by their `UPDATE OF` triggers; cost
+  amounts never move.
+- **Fills NULL only**: a run stating a slug keeps it (projection re-checks
+  `feature_slug IS NULL`), the walk (`src/services/feature-slug-correction.ts`) does
+  not descend below a run labelled with another slug (a sourcing serve keeps its
+  subtree). 404 unknown root, 409 root stating another slug; idempotent.
+- **Do not point it at `workflow`/`execute-workflow` roots blindly**: those are
+  unlabelled by design (see "Parent-child conflicts") and a correction would move run
+  counts in every feature rollup. Correct the root the faulty WRITER opened.
+- Guard: `tests/integration/feature-slug-corrections.test.ts` (rollup == live after
+  correction).
+
 ## Dashboard v2 reads — precomputed where a scan cannot be fast (migration 0040)
 
 Measured in prod 2026-10-08 (owner org 91e76989, box at load ~27): staff margin

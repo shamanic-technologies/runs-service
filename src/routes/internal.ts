@@ -6,6 +6,7 @@ import { runs, runsCosts } from "../db/schema.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import { logRunLifecycle } from "../services/bronze.js";
 import { transferBrand, movedUsage } from "../services/brand-transfer.js";
+import { correctFeatureSlug } from "../services/feature-slug-correction.js";
 import {
   TransferBrandRequestSchema,
   BrandTransferMovedUsageQuerySchema,
@@ -13,6 +14,7 @@ import {
   OrgUsageTotalQuerySchema,
   OrgActualTotalQuerySchema,
   DeleteRunsByOrgParamsSchema,
+  FeatureSlugCorrectionRequestSchema,
 } from "../schemas.js";
 
 const router = Router();
@@ -72,6 +74,41 @@ router.get("/internal/brand-transfers/moved-usage", requireInternalAuth, async (
   }
   const { sourceOrgId, sourceBrandId, targetOrgId } = parsed.data;
   res.json(await movedUsage(sourceOrgId, sourceBrandId, targetOrgId));
+});
+
+// POST /internal/runs/feature-slug-corrections — fill a feature slug a writer
+// failed to state on run subtrees. Bronze event per run (audit trail), projected
+// by the trigger; rule documented in src/services/feature-slug-correction.ts.
+router.post("/internal/runs/feature-slug-corrections", requireInternalAuth, async (req, res) => {
+  const parsed = FeatureSlugCorrectionRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const r = await correctFeatureSlug(parsed.data);
+    if (r.kind === "missing") {
+      res.status(404).json({ error: "Run not found", missingRunIds: r.missingRunIds });
+      return;
+    }
+    if (r.kind === "conflict") {
+      res.status(409).json({ error: "Root run states another feature slug", conflictingRuns: r.conflictingRuns });
+      return;
+    }
+    console.log(
+      `[runs-service] feature-slug-corrections: ${r.correctedRunIds.length} runs -> ${parsed.data.featureSlug} ` +
+        `by ${parsed.data.correctedBy} (${parsed.data.reason})`
+    );
+    res.json({
+      featureSlug: parsed.data.featureSlug,
+      correctedRuns: r.correctedRunIds.length,
+      correctedRunIds: r.correctedRunIds,
+    });
+  } catch (err) {
+    console.error("[runs-service] Error in POST /internal/runs/feature-slug-corrections:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // DELETE /internal/runs/by-org/:orgId — org cascade teardown.

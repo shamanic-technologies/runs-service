@@ -761,6 +761,50 @@ registry.registerPath({
   },
 });
 
+export const FeatureSlugCorrectionRequestSchema = z
+  .object({
+    rootRunIds: z.array(z.string().uuid()).min(1).max(500),
+    featureSlug: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+    correctedBy: z.string().trim().min(1),
+  })
+  .openapi("FeatureSlugCorrectionRequest");
+
+export const FeatureSlugCorrectionResponseSchema = z
+  .object({
+    featureSlug: z.string(),
+    correctedRuns: z.number(),
+    correctedRunIds: z.array(z.string().uuid()),
+  })
+  .openapi("FeatureSlugCorrectionResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/runs/feature-slug-corrections",
+  summary: "Fill a feature slug a writer failed to state on run subtrees",
+  description:
+    "Staff correction of recorded history. For each root run and its descendants, every run whose feature_slug is NULL gets featureSlug. One bronze run.feature_slug_corrected event is recorded per corrected run (payload: featureSlug, reason, correctedBy: the audit trail) and the projection fills runs.feature_slug; the feature-keyed rollups follow by trigger, so every cost read filtered by that feature then counts the subtree's cost. Only a NULL slug is filled: a run stating a slug keeps it, and the walk does not descend below a run labelled with another slug. Cost amounts are never touched. Idempotent: a re-run corrects nothing. 404 when a root run does not exist, 409 when a root already states another slug (nothing is written in either case).",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: FeatureSlugCorrectionRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Correction recorded",
+      content: { "application/json": { schema: FeatureSlugCorrectionResponseSchema } },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: { description: "A root run does not exist (missingRunIds)" },
+    409: { description: "A root run already states another feature slug (conflictingRuns)" },
+  },
+});
+
 export const BrandTransferMovedUsageQuerySchema = z
   .object({
     sourceOrgId: z.string().uuid(),
