@@ -10,8 +10,13 @@
 // non-sourcing child under a sourcing parent) stays a parent-child conflict.
 const SOURCING_PREFIX = "sourcing-";
 
+// LEAD SOURCING (owner 2026-10-11, features-service `LEAD_SOURCING_CHANNEL`): the sourcing channel that picks its
+// own origins. Its serves are filed under its own source campaign exactly like an origin's, so it is a sourcing slug
+// although it carries no `sourcing-` prefix.
+const LEAD_SOURCING_SLUG = "lead-sourcing";
+
 export function isSourcingFeatureSlug(slug: string): boolean {
-  return slug.startsWith(SOURCING_PREFIX);
+  return slug.startsWith(SOURCING_PREFIX) || slug === LEAD_SOURCING_SLUG;
 }
 
 export function featureSlugConflicts(child: string, parent: string): boolean {
