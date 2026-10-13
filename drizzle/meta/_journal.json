@@ -323,6 +323,13 @@
       "when": 1782086400000,
       "tag": "0045_cost_run_has_campaign",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1782172800000,
+      "tag": "0046_org_no_campaign_days",
+      "breakpoints": true
     }
   ]
 }

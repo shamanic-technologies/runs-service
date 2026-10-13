@@ -28,8 +28,8 @@ const router = Router();
  *     (platform actual + provisioned rows of the org)
  *   total_expected_cents / net_total_expected_cents ⊂ GET /internal/org-actual-total
  *     (platform actual rows of the org's completed/failed runs)
- * Index range scan on idx_runs_costs_org_no_campaign (only no-campaign rows), plus
- * one runs_pkey probe per row for the run status. A row whose campaign is not
+ * O(days since the cutover): whole UTC days from org_no_campaign_days (0046), the
+ * cutover's own partial day live. A row whose campaign is not
  * known yet (pre-backfill) in the window is a 500: folding it either way would
  * move a balance.
  */
@@ -41,19 +41,44 @@ router.get("/internal/org-no-campaign-total", requireInternalAuth, async (req, r
   }
   const { org_id, since } = parsed.data;
 
+  // Whole UTC days after the cutover come from org_no_campaign_days (migration
+  // 0046, maintained on write); the rest of the cutover's own UTC day is read live
+  // (nothing when `since` is a UTC midnight). One statement, one snapshot.
   const [row] = (await db.execute(sql`
-    SELECT
-      COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS spent,
-      COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS net_spent,
-      COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = false AND rc.is_platform_committed AND r.status IN ('completed','failed')), 0)::text AS actual,
-      COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = false AND rc.is_platform_committed AND r.status IN ('completed','failed')), 0)::text AS net_actual,
-      COUNT(*) FILTER (WHERE rc.run_has_campaign IS NULL)::int AS unknown
-    FROM runs_costs rc
-    JOIN runs r ON r.id = rc.run_id
-    WHERE rc.organization_id = ${org_id}::uuid
-      AND rc.is_platform_projected
-      AND rc.run_has_campaign IS NOT TRUE
-      AND rc.created_at >= ${since}::timestamptz
+    WITH b AS (
+      SELECT ${since}::timestamptz AS since,
+             ((${since}::timestamptz AT TIME ZONE 'UTC')::date) AS d0
+    ), w AS (
+      SELECT since, d0, since = (d0::timestamp AT TIME ZONE 'UTC') AS at_midnight FROM b
+    ), u AS (
+      SELECT d.projected_gross AS pg, d.projected_net AS pn, d.actual_gross AS ag, d.actual_net AS an
+        FROM org_no_campaign_days d, w
+       WHERE d.organization_id = ${org_id}::uuid
+         AND d.day >= CASE WHEN w.at_midnight THEN w.d0 ELSE w.d0 + 1 END
+      UNION ALL
+      SELECT rc.total_cost_in_usd_cents,
+             COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents),
+             CASE WHEN rc.is_platform_committed AND r.status IN ('completed','failed') THEN rc.total_cost_in_usd_cents ELSE 0 END,
+             CASE WHEN rc.is_platform_committed AND r.status IN ('completed','failed') THEN COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) ELSE 0 END
+        FROM w, runs_costs rc
+        JOIN runs r ON r.id = rc.run_id
+       WHERE NOT w.at_midnight
+         AND rc.organization_id = ${org_id}::uuid
+         AND rc.is_platform_projected
+         AND rc.run_has_campaign IS FALSE
+         AND rc.created_at >= w.since
+         AND rc.created_at < ((w.d0 + 1)::timestamp AT TIME ZONE 'UTC')
+    )
+    SELECT COALESCE(SUM(pg), 0)::text AS spent,
+           COALESCE(SUM(pn), 0)::text AS net_spent,
+           COALESCE(SUM(ag), 0)::text AS actual,
+           COALESCE(SUM(an), 0)::text AS net_actual,
+           (SELECT COUNT(*)::int FROM runs_costs
+             WHERE organization_id = ${org_id}::uuid
+               AND is_platform_projected
+               AND run_has_campaign IS NULL
+               AND created_at >= ${since}::timestamptz) AS unknown
+      FROM u
   `)) as any[];
 
   if (row.unknown > 0) {
