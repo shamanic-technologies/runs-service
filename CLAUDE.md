@@ -21,6 +21,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
+- `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
@@ -178,6 +179,40 @@ dashboard budget, and the ledger only grows. So the total is KEPT.
   (tests/global-setup.ts) must truncate `org_actual_totals` too.
 - `POST /internal/transfer-brand` now also moves `runs_costs.organization_id`
   with the run, so `org-usage-total` (0029's denormalized org) follows the move.
+
+## Campaign spend vs no-campaign spend (migration 0045)
+
+Owner 2026-10-13: a customer is charged only what its campaigns spend ("à la Google
+Ads"); spend outside a campaign (Copilot chat, onboarding reads, A/B work, card
+fees) stays declared and recorded here, and the platform absorbs it, forward-only
+from a cutover instant billing-service owns.
+
+- **THE RULE: a cost row is campaign spend iff its RUN carries a `campaign_id`.** A
+  run's campaign is set once at creation and no projection changes it; a child run
+  created without one inherits its parent's (`POST /v1/runs`), so every service call
+  inside a campaign workflow is campaign spend, a sourcing serve filed under its
+  source campaign included. A platform run (no parent) is campaign spend only when
+  its writer states the campaign. Prod check: matches the brief's hand-measured
+  monthly no-campaign figures to the cent (Feb..Sep 2026).
+- **Frozen on the cost row at insert**: `runs_costs.run_has_campaign` set by the
+  BEFORE INSERT trigger `trg_freeze_cost_run_has_campaign` (one runs_pkey probe), so
+  test-helper silver inserts get it too. NULL = not known (pre-feature, before
+  `scripts/backfill-cost-run-has-campaign.ts`); never folded into either side.
+- **`GET /internal/org-no-campaign-total?org_id&since`** (billing, every authorize):
+  the no-campaign part of BOTH totals for rows `created_at >= since`, same field
+  names as the totals it splits (`spent_cents`/`net_spent_cents` ⊂ org-usage-total,
+  `total_expected_cents`/`net_total_expected_cents` ⊂ org-actual-total), so total −
+  part = campaign part field for field. Index range scan on
+  `idx_runs_costs_org_no_campaign` (partial: projected AND NOT known-campaign) + a
+  runs_pkey probe per row for run status. A NULL row in the window = 500.
+- **`GET /internal/stats/costs/no-campaign/monthly`** (staff, statsDb): per org per
+  UTC month of `created_at`, projected platform spend split no-campaign / campaign /
+  unknown, gross + net, plus `noCampaignByCostName` (billing sets acquiring fees
+  apart); `months[]` dense fleet totals since the first row.
+- **`hasCampaign=true|false` on `GET /v1/stats/public/costs/timeseries`** (live and
+  rollup paths: `campaign_id IS [NOT] NULL` on the run): billing's 14-day forecast
+  reads campaign spend only.
+- Index built CONCURRENTLY out-of-band on prod (migration `IF NOT EXISTS` no-ops).
 
 ## Runs of a campaign FAMILY in one request (migration 0036)
 

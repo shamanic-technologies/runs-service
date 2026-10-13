@@ -1011,6 +1011,85 @@ registry.registerPath({
   },
 });
 
+export const OrgNoCampaignTotalQuerySchema = z
+  .object({
+    org_id: z.string().uuid(),
+    since: z.string().datetime({ offset: true }).openapi({ description: "Cutover instant (ISO 8601). Only cost rows created at or after it are counted." }),
+  })
+  .openapi("OrgNoCampaignTotalQuery");
+
+export const OrgNoCampaignTotalResponseSchema = z
+  .object({
+    org_id: z.string().uuid(),
+    since: z.string(),
+    spent_cents: z.string().openapi({ description: "GROSS no-campaign part of GET /internal/org-usage-total's spent_cents: platform actual + provisioned rows of the org whose run carries no campaign, created at or after since." }),
+    net_spent_cents: z.string().openapi({ description: "Frozen NET twin of spent_cents (the no-campaign part of net_spent_cents)." }),
+    total_expected_cents: z.string().openapi({ description: "GROSS no-campaign part of GET /internal/org-actual-total's total_expected_cents: platform actual rows of the org's completed/failed runs that carry no campaign, created at or after since." }),
+    net_total_expected_cents: z.string().openapi({ description: "Frozen NET twin of total_expected_cents (the no-campaign part of net_total_expected_cents)." }),
+    as_of: z.string().datetime(),
+  })
+  .openapi("OrgNoCampaignTotalResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/org-no-campaign-total",
+  summary: "No-campaign part of the org's two platform totals, from a cutover instant",
+  description:
+    "For one org, the part of GET /internal/org-usage-total (spent_cents / net_spent_cents) and of GET /internal/org-actual-total (total_expected_cents / net_total_expected_cents) that belongs to NO campaign, counting only cost rows created at or after `since`. Same predicates as those totals, so total minus this figure is the campaign part, field for field. A cost row is campaign spend iff its run carries a campaign (a child run inherits its parent's at creation; a run's campaign never changes). Decimal strings, scale 10. 500 if a cost row in the window has no known campaign status (pre-backfill): never folded either way.",
+  security: [{ apiKey: [] }],
+  request: { query: OrgNoCampaignTotalQuerySchema },
+  responses: {
+    200: { description: "No-campaign parts of the two org totals", content: { "application/json": { schema: OrgNoCampaignTotalResponseSchema } } },
+    400: { description: "Invalid query parameters", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    500: { description: "Cost rows of unknown campaign status in the window", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const NoCampaignFiguresSchema = {
+  noCampaignCostInUsdCents: z.string().openapi({ description: "GROSS platform spend (actual + provisioned) of runs with no campaign." }),
+  netNoCampaignCostInUsdCents: z.string().openapi({ description: "Frozen NET twin of noCampaignCostInUsdCents." }),
+  campaignCostInUsdCents: z.string().openapi({ description: "GROSS platform spend of runs carrying a campaign." }),
+  netCampaignCostInUsdCents: z.string().openapi({ description: "Frozen NET twin of campaignCostInUsdCents." }),
+  unknownCostInUsdCents: z.string().openapi({ description: "GROSS platform spend whose campaign status is not known yet (pre-backfill rows). Stated apart, never folded into either side; '0' once backfilled." }),
+  netUnknownCostInUsdCents: z.string().openapi({ description: "Frozen NET twin of unknownCostInUsdCents." }),
+};
+
+export const NoCampaignMonthlyResponseSchema = z
+  .object({
+    timezone: z.literal("UTC"),
+    statuses: z.array(z.string()),
+    months: z
+      .array(z.object({ month: z.string().openapi({ description: "YYYY-MM, UTC, of the cost row's created_at." }), ...NoCampaignFiguresSchema, orgsWithNoCampaignSpend: z.number().int() }))
+      .openapi({ description: "Fleet totals, DENSE from the month of the first org-attributed platform cost row to the current month." }),
+    orgs: z
+      .array(
+        z.object({
+          orgId: z.string(),
+          month: z.string(),
+          ...NoCampaignFiguresSchema,
+          noCampaignByCostName: z
+            .array(z.object({ costName: z.string(), noCampaignCostInUsdCents: z.string(), netNoCampaignCostInUsdCents: z.string() }))
+            .openapi({ description: "The no-campaign figure split per cost name (names with a non-zero no-campaign spend). Sums to noCampaignCostInUsdCents / netNoCampaignCostInUsdCents." }),
+        })
+      )
+      .openapi({ description: "SPARSE: one entry per (org, month) with at least one platform cost row. Ordered by month, orgId." }),
+  })
+  .openapi("NoCampaignMonthlyResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/no-campaign/monthly",
+  summary: "Fleet-wide platform spend per org per UTC month, campaign vs no campaign (service-auth only)",
+  description:
+    "Every org-attributed platform cost row (actual + provisioned, the org-usage-total predicate), per org per UTC calendar month of its created_at: spend of runs with no campaign, spend of runs carrying a campaign, and spend whose campaign status is not known yet, gross and net, plus the no-campaign figure per cost name. months[] = fleet totals, dense since inception.",
+  security: [{ apiKey: [] }],
+  responses: {
+    200: { description: "Monthly campaign / no-campaign split", content: { "application/json": { schema: NoCampaignMonthlyResponseSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Refund schemas (staff cost-refund action) ---
 
 // The set of cost rows a refund targets. preview and apply take the SAME filter,
@@ -1683,7 +1762,15 @@ registry.registerPath({
   description:
     "Returns fleet-wide (cross-org) spend for a filter, split into dated buckets by run started_at (interval=day|week|month, default day; tz default UTC). Uses the SAME WHERE filters and cost aggregator as GET /v1/stats/public/costs, plus a time partition — so summing the buckets for a filter equals the untimed total from /v1/stats/public/costs for the same filter (reconciliation invariant). Supports filters: orgId, brandId, campaignId, featureSlug, featureSlugs (comma-separated), workflowDynastySlug, taskName, optional startedAfter/startedBefore window bounds, and costSource. costSource=platform counts ONLY spend the platform paid the provider for — i.e. what an org can actually be billed — excluding BYOK rows the org paid directly to its own provider key; combined with an orgId, a date window and netActualCostInUsdCents, that is the org's realized post-discount burn per day. Omitting costSource counts both payers, as this endpoint always has, and the filter never changes run_count or which buckets appear. Buckets are ordered ascending (oldest first); intervals with no runs are absent (never fabricated). Each bucket carries both GROSS (total/actual/provisioned) and frozen NET (netTotal/netActual/netProvisioned, post per-org usage-discount) cost fields; gross fields are unchanged, sum netActual for the fleet's realized post-discount revenue. Cost fields are 10-decimal strings preserving numeric(16,10) precision. No authentication required. Cross-tenant aggregate.",
   request: {
-    query: PublicCostsTimeseriesQuerySchema,
+    query: PublicCostsTimeseriesQuerySchema.extend({
+      hasCampaign: z
+        .enum(["true", "false"])
+        .optional()
+        .openapi({
+          description:
+            "true = only runs carrying a campaign (a child run inherits its parent's at creation; a run's campaign never changes): the spend a customer is charged since billing stopped charging spend outside a campaign. false = only runs with no campaign. Omit for both (unchanged). Narrows runs, so run_count and the bucket set follow it.",
+        }),
+    }),
   },
   responses: {
     200: {

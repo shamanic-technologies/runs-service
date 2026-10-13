@@ -42,6 +42,8 @@ export interface BrandRollupFilters {
   campaignIds?: string[];
   featureSlugs?: string[];
   workflowSlugs?: string[];
+  /** true = runs carrying a campaign only, false = runs with none (migration 0045's rule). */
+  hasCampaign?: boolean;
 }
 
 /** One grouping dimension: its expression on a rollup row and on a live `runs r` row. */
@@ -71,6 +73,7 @@ function filterParts(f: BrandRollupFilters, prefix: string): SQL[] {
   if (f.campaignIds && f.campaignIds.length > 0) parts.push(inList(p("campaign_id"), f.campaignIds));
   if (f.featureSlugs && f.featureSlugs.length > 0) parts.push(inList(p("feature_slug"), f.featureSlugs));
   if (f.workflowSlugs && f.workflowSlugs.length > 0) parts.push(inList(p("workflow_slug"), f.workflowSlugs));
+  if (f.hasCampaign !== undefined) parts.push(sql.raw(`${p("campaign_id")} IS ${f.hasCampaign ? "NOT NULL" : "NULL"}`));
   return parts;
 }
 
