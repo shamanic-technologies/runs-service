@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, numeric, integer, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, numeric, integer, index, uniqueIndex, jsonb, boolean } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const runs = pgTable(
@@ -92,6 +92,10 @@ export const runsCosts = pgTable(
     // joining runs for `started_at`. NULL for rows written before the freeze /
     // out-of-band backfill. Frozen from run.started_at — never recomputed.
     runStartedAt: timestamp("run_started_at", { withTimezone: true }),
+    // Whether the owning run carries a campaign (migration 0045), frozen at insert
+    // by a BEFORE INSERT trigger (a run's campaign never changes after creation).
+    // NULL = not known (pre-feature row, before the out-of-band backfill).
+    runHasCampaign: boolean("run_has_campaign"),
     idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
