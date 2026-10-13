@@ -42,32 +42,36 @@ router.get("/internal/org-no-campaign-total", requireInternalAuth, async (req, r
   const { org_id, since } = parsed.data;
 
   // Whole UTC days after the cutover come from org_no_campaign_days (migration
-  // 0046, maintained on write); the rest of the cutover's own UTC day is read live
-  // (nothing when `since` is a UTC midnight). One statement, one snapshot.
-  const [row] = (await db.execute(sql`
-    WITH b AS (
-      SELECT ${since}::timestamptz AS since,
-             ((${since}::timestamptz AT TIME ZONE 'UTC')::date) AS d0
-    ), w AS (
-      SELECT since, d0, since = (d0::timestamp AT TIME ZONE 'UTC') AS at_midnight FROM b
-    ), u AS (
-      SELECT d.projected_gross AS pg, d.projected_net AS pn, d.actual_gross AS ag, d.actual_net AS an
-        FROM org_no_campaign_days d, w
-       WHERE d.organization_id = ${org_id}::uuid
-         AND d.day >= CASE WHEN w.at_midnight THEN w.d0 ELSE w.d0 + 1 END
+  // 0046, maintained on write); the rest of the cutover's own UTC day is read live.
+  // A cutover at a UTC midnight has no partial day, so no live slice is planned
+  // (in SQL the slice was planned and run anyway: ~100 ms for the owner org).
+  const sinceAt = new Date(since);
+  const dayStart = new Date(Date.UTC(sinceAt.getUTCFullYear(), sinceAt.getUTCMonth(), sinceAt.getUTCDate()));
+  const atMidnight = dayStart.getTime() === sinceAt.getTime();
+  const nextDay = new Date(dayStart.getTime() + 86_400_000);
+  const firstFullDay = (atMidnight ? dayStart : nextDay).toISOString().slice(0, 10);
+  const slice = atMidnight
+    ? sql``
+    : sql`
       UNION ALL
       SELECT rc.total_cost_in_usd_cents,
              COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents),
              CASE WHEN rc.is_platform_committed AND r.status IN ('completed','failed') THEN rc.total_cost_in_usd_cents ELSE 0 END,
              CASE WHEN rc.is_platform_committed AND r.status IN ('completed','failed') THEN COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) ELSE 0 END
-        FROM w, runs_costs rc
+        FROM runs_costs rc
         JOIN runs r ON r.id = rc.run_id
-       WHERE NOT w.at_midnight
-         AND rc.organization_id = ${org_id}::uuid
+       WHERE rc.organization_id = ${org_id}::uuid
          AND rc.is_platform_projected
          AND rc.run_has_campaign IS FALSE
-         AND rc.created_at >= w.since
-         AND rc.created_at < ((w.d0 + 1)::timestamp AT TIME ZONE 'UTC')
+         AND rc.created_at >= ${since}::timestamptz
+         AND rc.created_at < ${nextDay.toISOString()}::timestamptz`;
+  const [row] = (await db.execute(sql`
+    WITH u AS (
+      SELECT d.projected_gross AS pg, d.projected_net AS pn, d.actual_gross AS ag, d.actual_net AS an
+        FROM org_no_campaign_days d
+       WHERE d.organization_id = ${org_id}::uuid
+         AND d.day >= ${firstFullDay}::date
+      ${slice}
     )
     SELECT COALESCE(SUM(pg), 0)::text AS spent,
            COALESCE(SUM(pn), 0)::text AS net_spent,
