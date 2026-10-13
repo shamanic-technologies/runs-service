@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, numeric, integer, index, uniqueIndex, jsonb, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, numeric, integer, index, uniqueIndex, jsonb, boolean, date, primaryKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const runs = pgTable(
@@ -137,6 +137,23 @@ export const orgActualTotals = pgTable("org_actual_totals", {
   netCostInUsdCents: numeric("net_cost_in_usd_cents").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// No-campaign platform spend per (org, UTC day of the cost row), migration 0046.
+// Trigger-maintained in the same transaction as each write; app code never writes
+// it. projected_* keyed on the cost row's org, actual_* on the run's org (settled
+// runs). Read by GET /internal/org-no-campaign-total.
+export const orgNoCampaignDays = pgTable(
+  "org_no_campaign_days",
+  {
+    organizationId: uuid("organization_id").notNull(),
+    day: date("day").notNull(),
+    projectedGross: numeric("projected_gross").notNull().default("0"),
+    projectedNet: numeric("projected_net").notNull().default("0"),
+    actualGross: numeric("actual_gross").notNull().default("0"),
+    actualNet: numeric("actual_net").notNull().default("0"),
+  },
+  (table) => [primaryKey({ columns: [table.organizationId, table.day] })]
+);
 
 // What POST /internal/transfer-brand moved, one row per committed chunk
 // (migration 0038). Written in the same transaction as the move; frozen, summed

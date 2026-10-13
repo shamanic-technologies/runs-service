@@ -202,9 +202,16 @@ from a cutover instant billing-service owns.
   the no-campaign part of BOTH totals for rows `created_at >= since`, same field
   names as the totals it splits (`spent_cents`/`net_spent_cents` ⊂ org-usage-total,
   `total_expected_cents`/`net_total_expected_cents` ⊂ org-actual-total), so total −
-  part = campaign part field for field. Index range scan on
-  `idx_runs_costs_org_no_campaign` (partial: projected AND NOT known-campaign) + a
-  runs_pkey probe per row for run status. A NULL row in the window = 500.
+  part = campaign part field for field. Whole UTC days after the cutover come from
+  **`org_no_campaign_days`** (migration 0046: per org × UTC day of the cost row,
+  projected keyed on the cost row's org, actual on the run's org; triggers on
+  runs_costs + runs, actual part locks `org_actual_totals_lock(org)` first, the 0035
+  rule), the cutover's own partial day live (`idx_runs_costs_org_no_campaign`;
+  nothing when `since` is a UTC midnight). Live-only was 3.8 s cold for the owner
+  org over 13 days. A NULL row in the window = 500 (`idx_runs_costs_org_campaign_unknown`).
+  Parity guard (rollup vs live, red if a trigger is disabled):
+  `tests/integration/org-no-campaign-days.test.ts`. TRUNCATE fires no triggers:
+  global-setup truncates the table too.
 - **`GET /internal/stats/costs/no-campaign/monthly`** (staff, statsDb): per org per
   UTC month of `created_at`, projected platform spend split no-campaign / campaign /
   unknown, gross + net, plus `noCampaignByCostName` (billing sets acquiring fees
