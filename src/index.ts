@@ -13,6 +13,7 @@ import internalRoutes from "./routes/internal.js";
 import refundRoutes from "./routes/refunds.js";
 import vendorCostRoutes from "./routes/vendor-costs.js";
 import eventsRoutes from "./routes/events.js";
+import noCampaignSpendRoutes from "./routes/no-campaign-spend.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
 
@@ -47,6 +48,7 @@ app.use(internalRoutes);
 app.use(refundRoutes);
 app.use(vendorCostRoutes);
 app.use(eventsRoutes);
+app.use(noCampaignSpendRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });

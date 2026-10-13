@@ -1192,6 +1192,193 @@
           "as_of"
         ]
       },
+      "OrgNoCampaignTotalResponse": {
+        "type": "object",
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "since": {
+            "type": "string"
+          },
+          "spent_cents": {
+            "type": "string",
+            "description": "GROSS no-campaign part of GET /internal/org-usage-total's spent_cents: platform actual + provisioned rows of the org whose run carries no campaign, created at or after since."
+          },
+          "net_spent_cents": {
+            "type": "string",
+            "description": "Frozen NET twin of spent_cents (the no-campaign part of net_spent_cents)."
+          },
+          "total_expected_cents": {
+            "type": "string",
+            "description": "GROSS no-campaign part of GET /internal/org-actual-total's total_expected_cents: platform actual rows of the org's completed/failed runs that carry no campaign, created at or after since."
+          },
+          "net_total_expected_cents": {
+            "type": "string",
+            "description": "Frozen NET twin of total_expected_cents (the no-campaign part of net_total_expected_cents)."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "org_id",
+          "since",
+          "spent_cents",
+          "net_spent_cents",
+          "total_expected_cents",
+          "net_total_expected_cents",
+          "as_of"
+        ]
+      },
+      "NoCampaignMonthlyResponse": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "enum": [
+              "UTC"
+            ]
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "month": {
+                  "type": "string",
+                  "description": "YYYY-MM, UTC, of the cost row's created_at."
+                },
+                "noCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend (actual + provisioned) of runs with no campaign."
+                },
+                "netNoCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of noCampaignCostInUsdCents."
+                },
+                "campaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend of runs carrying a campaign."
+                },
+                "netCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of campaignCostInUsdCents."
+                },
+                "unknownCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend whose campaign status is not known yet (pre-backfill rows). Stated apart, never folded into either side; '0' once backfilled."
+                },
+                "netUnknownCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of unknownCostInUsdCents."
+                },
+                "orgsWithNoCampaignSpend": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "month",
+                "noCampaignCostInUsdCents",
+                "netNoCampaignCostInUsdCents",
+                "campaignCostInUsdCents",
+                "netCampaignCostInUsdCents",
+                "unknownCostInUsdCents",
+                "netUnknownCostInUsdCents",
+                "orgsWithNoCampaignSpend"
+              ]
+            },
+            "description": "Fleet totals, DENSE from the month of the first org-attributed platform cost row to the current month."
+          },
+          "orgs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "month": {
+                  "type": "string"
+                },
+                "noCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend (actual + provisioned) of runs with no campaign."
+                },
+                "netNoCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of noCampaignCostInUsdCents."
+                },
+                "campaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend of runs carrying a campaign."
+                },
+                "netCampaignCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of campaignCostInUsdCents."
+                },
+                "unknownCostInUsdCents": {
+                  "type": "string",
+                  "description": "GROSS platform spend whose campaign status is not known yet (pre-backfill rows). Stated apart, never folded into either side; '0' once backfilled."
+                },
+                "netUnknownCostInUsdCents": {
+                  "type": "string",
+                  "description": "Frozen NET twin of unknownCostInUsdCents."
+                },
+                "noCampaignByCostName": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "costName": {
+                        "type": "string"
+                      },
+                      "noCampaignCostInUsdCents": {
+                        "type": "string"
+                      },
+                      "netNoCampaignCostInUsdCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "costName",
+                      "noCampaignCostInUsdCents",
+                      "netNoCampaignCostInUsdCents"
+                    ]
+                  },
+                  "description": "The no-campaign figure split per cost name (names with a non-zero no-campaign spend). Sums to noCampaignCostInUsdCents / netNoCampaignCostInUsdCents."
+                }
+              },
+              "required": [
+                "orgId",
+                "month",
+                "noCampaignCostInUsdCents",
+                "netNoCampaignCostInUsdCents",
+                "campaignCostInUsdCents",
+                "netCampaignCostInUsdCents",
+                "unknownCostInUsdCents",
+                "netUnknownCostInUsdCents",
+                "noCampaignByCostName"
+              ]
+            },
+            "description": "SPARSE: one entry per (org, month) with at least one platform cost row. Ordered by month, orgId."
+          }
+        },
+        "required": [
+          "timezone",
+          "statuses",
+          "months",
+          "orgs"
+        ]
+      },
       "RefundPreviewResponse": {
         "type": "object",
         "properties": {
@@ -4612,6 +4799,100 @@
         }
       }
     },
+    "/internal/org-no-campaign-total": {
+      "get": {
+        "summary": "No-campaign part of the org's two platform totals, from a cutover instant",
+        "description": "For one org, the part of GET /internal/org-usage-total (spent_cents / net_spent_cents) and of GET /internal/org-actual-total (total_expected_cents / net_total_expected_cents) that belongs to NO campaign, counting only cost rows created at or after `since`. Same predicates as those totals, so total minus this figure is the campaign part, field for field. A cost row is campaign spend iff its run carries a campaign (a child run inherits its parent's at creation; a run's campaign never changes). Decimal strings, scale 10. 500 if a cost row in the window has no known campaign status (pre-backfill): never folded either way.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "org_id",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Cutover instant (ISO 8601). Only cost rows created at or after it are counted."
+            },
+            "required": true,
+            "description": "Cutover instant (ISO 8601). Only cost rows created at or after it are counted.",
+            "name": "since",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No-campaign parts of the two org totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgNoCampaignTotalResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Cost rows of unknown campaign status in the window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/costs/no-campaign/monthly": {
+      "get": {
+        "summary": "Fleet-wide platform spend per org per UTC month, campaign vs no campaign (service-auth only)",
+        "description": "Every org-attributed platform cost row (actual + provisioned, the org-usage-total predicate), per org per UTC calendar month of its created_at: spend of runs with no campaign, spend of runs carrying a campaign, and spend whose campaign status is not known yet, gross and net, plus the no-campaign figure per cost name. months[] = fleet totals, dense since inception.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Monthly campaign / no-campaign split",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoCampaignMonthlyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
     "/internal/cost-refunds/preview": {
       "post": {
         "summary": "Preview which charged costs a refund would comp, and for how much",
@@ -5553,6 +5834,20 @@
             "required": false,
             "description": "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for — this is the figure to divide by the window length for a per-day burn rate. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). run_count and the bucket set are unaffected by the filter: it narrows only the summed cost rows. An unrecognised value is a 400 — never a silently unfiltered answer.",
             "name": "costSource",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "true = only runs carrying a campaign (a child run inherits its parent's at creation; a run's campaign never changes): the spend a customer is charged since billing stopped charging spend outside a campaign. false = only runs with no campaign. Omit for both (unchanged). Narrows runs, so run_count and the bucket set follow it."
+            },
+            "required": false,
+            "description": "true = only runs carrying a campaign (a child run inherits its parent's at creation; a run's campaign never changes): the spend a customer is charged since billing stopped charging spend outside a campaign. false = only runs with no campaign. Omit for both (unchanged). Narrows runs, so run_count and the bucket set follow it.",
+            "name": "hasCampaign",
             "in": "query"
           }
         ],

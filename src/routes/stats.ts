@@ -1178,9 +1178,11 @@ export function buildPublicFilterSql(filters: {
   taskName?: string;
   startedAfter?: string;
   startedBefore?: string;
+  hasCampaign?: boolean;
 }) {
   const parts: ReturnType<typeof sql>[] = [];
   if (filters.orgId) parts.push(sql`r.organization_id = ${filters.orgId}`);
+  if (filters.hasCampaign !== undefined) parts.push(filters.hasCampaign ? sql`r.campaign_id IS NOT NULL` : sql`r.campaign_id IS NULL`);
   if (filters.brandId) parts.push(sql`${filters.brandId} = ANY(r.brand_ids)`);
   if (filters.campaignId) parts.push(sql`r.campaign_id = ${filters.campaignId}`);
   if (filters.campaignIds) parts.push(campaignIdsSql(filters.campaignIds));
@@ -1449,7 +1451,16 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         startedAfter,
         startedBefore,
         costSource,
+        hasCampaign: hasCampaignParam,
       } = req.query as Record<string, string | undefined>;
+
+      // hasCampaign=true: spend of runs carrying a campaign only (what a customer is
+      // charged since the no-campaign cutover); false: runs with none. Absent = all.
+      if (hasCampaignParam !== undefined && hasCampaignParam !== "true" && hasCampaignParam !== "false") {
+        res.status(400).json({ error: "Invalid hasCampaign value. Allowed: true, false" });
+        return;
+      }
+      const hasCampaign = hasCampaignParam === undefined ? undefined : hasCampaignParam === "true";
 
       const interval = intervalParam ?? "day";
       if (!PUBLIC_TIMESERIES_INTERVALS.has(interval)) {
@@ -1507,6 +1518,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
         taskName,
         startedAfter,
         startedBefore,
+        hasCampaign,
       });
       const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
 
@@ -1542,6 +1554,7 @@ function handlePublicCostsTimeseries(req: any, res: any) {
               campaignIds,
               featureSlugs: featureSlugs && featureSlugs.length > 0 ? featureSlugs : featureSlug ? [featureSlug] : undefined,
               workflowSlugs,
+              hasCampaign,
             },
             startedAfter,
             startedBefore,
