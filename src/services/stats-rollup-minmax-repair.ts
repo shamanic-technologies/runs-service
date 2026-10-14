@@ -81,12 +81,14 @@ export interface MinMaxRepairResult {
   mismatched: number;
   /** Rows a writer held past the lock timeout: retried next pass. */
   skippedLocked: number;
+  /** Rows whose recount ran past the statement timeout: retried next pass. */
+  skippedTimeout: number;
 }
 
 type Sql = typeof defaultSql;
 
 async function repairTable(sql: Sql, spec: RollupSpec, limit: number): Promise<MinMaxRepairResult> {
-  const result: MinMaxRepairResult = { table: spec.table, repaired: 0, mismatched: 0, skippedLocked: 0 };
+  const result: MinMaxRepairResult = { table: spec.table, repaired: 0, mismatched: 0, skippedLocked: 0, skippedTimeout: 0 };
   const cols = [...spec.keys, spec.bucket.column];
   // Every key travels as TEXT and is cast back explicitly: a date read into a JS Date
   // would shift with the process timezone, and an untyped array parameter is ambiguous.
@@ -138,6 +140,12 @@ async function repairTable(sql: Sql, spec: RollupSpec, limit: number): Promise<M
         result.skippedLocked += 1; // lock_not_available: a writer holds the group, next pass
         continue;
       }
+      if (code === "57014") {
+        // statement_timeout on one group's recount (a busy box): skip it, never abort the pass, or one
+        // slow group would stop every row ordered after it forever (prod 2026-10-14, first passes).
+        result.skippedTimeout += 1;
+        continue;
+      }
       throw err;
     }
   }
@@ -166,11 +174,11 @@ export function startStaleMinMaxRepair(): void {
     running = true;
     try {
       const results = await repairStaleMinMax();
-      const touched = results.filter((r) => r.repaired + r.mismatched + r.skippedLocked > 0);
+      const touched = results.filter((r) => r.repaired + r.mismatched + r.skippedLocked + r.skippedTimeout > 0);
       if (touched.length > 0) {
         console.log(
           `[Runs Service] rollup min/max repair: ${touched
-            .map((r) => `${r.table} repaired=${r.repaired} mismatched=${r.mismatched} locked=${r.skippedLocked}`)
+            .map((r) => `${r.table} repaired=${r.repaired} mismatched=${r.mismatched} locked=${r.skippedLocked} timedOut=${r.skippedTimeout}`)
             .join("; ")}`,
         );
       }
