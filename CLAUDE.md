@@ -328,7 +328,14 @@ tables, extended rather than duplicated (same grain).
 - **Extension**: `campaign_id` nullable (runs without a campaign rolled up; every
   0037 read filters on a campaign so never sees them); `min_started_at`,
   `max_started_at`, `minmax_stale` on the runs table. A removal (delete, key move)
-  cannot shrink min/max without a scan, so it sets `minmax_stale`; a rebuild clears it.
+  cannot shrink min/max without a scan, so it sets `minmax_stale`; a rebuild clears it,
+  and so does the in-process REPAIR pass (`src/services/stats-rollup-minmax-repair.ts`,
+  ~60 s after listen then every 5 min, kill switch `STATS_ROLLUP_MINMAX_REPAIR_ENABLED=false`):
+  per stale row of the 0041/0042/0043 tables, lock it, recount its runs, write exact
+  min/max only when the count equals `run_count` (else leave it stale and report).
+  Without it stale rows only accumulated (849 rows / 167 days on 2026-10-14) and a
+  brand-history read of brand f4d73dab read 25 days live = an org-wide scan past the
+  30 s statement timeout. Guard `tests/integration/stats-rollup-minmax-repair.test.ts`.
 - **Served** (`src/services/stats-rollup-brand.ts`, statsDb): org-scoped
   `GET /v1/stats/costs` with groupBy ⊆ {workflowSlug, workflowDynastySlug,
   campaignId, featureSlug} and filters ⊆ {brandId, campaignId(s), featureSlug(s),
