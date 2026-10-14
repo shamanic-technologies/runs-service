@@ -16,6 +16,7 @@ import eventsRoutes from "./routes/events.js";
 import noCampaignSpendRoutes from "./routes/no-campaign-spend.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
+import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -64,6 +65,9 @@ if (process.env.NODE_ENV !== "test") {
         // AFTER the port bind: the sweep touches the database and must never
         // delay listen() (CLAUDE.md "Boot-window hazards").
         startRunEventsRetention();
+        // Clears the rollups' stale min/max so brand-history reads stay on the rollup
+        // (services/stats-rollup-minmax-repair.ts). Also after listen().
+        startStaleMinMaxRepair();
       });
     })
     .catch((err) => {
