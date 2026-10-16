@@ -118,6 +118,8 @@ export const runsCosts = pgTable(
     index("idx_runs_costs_projected_started")
       .on(table.runStartedAt)
       .where(sql`is_platform_projected`),
+    // Every cost row by frozen run start: the fleet vendor timeseries (migration 0047).
+    index("idx_runs_costs_run_started").on(table.runStartedAt),
     uniqueIndex("idx_runs_costs_idempotency_key")
       .on(table.runId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),

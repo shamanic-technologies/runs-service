@@ -415,6 +415,14 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
 - **Unknown is stated, never folded in**: vendor `null`, or no version matching at write time
   → the row's BILLED amount goes to `unpriced*`, its name to `unpricedCostNames`. Catalogue
   unreadable → 502, never an all-unpriced 200.
+- **Speed (migration 0047)**: run counts are read from `runs` alone (index-only), money from the
+  cost rows of a summed status only (counts ⟕ money, as 0030). The FLEET read by run-start window
+  only (no other run filter, no `groupBy`: the admin cash forecast's 14-day call) takes its money
+  from `runs_costs` alone by `run_started_at` (`idx_runs_costs_run_started`): that column is the
+  run's `started_at` truncated to the ms (0 exceptions on 2M prod rows, 2026-10-17), so buckets
+  match and only rows within 1 s of a bound are decided by a PK probe of their run. Any NULL
+  `run_started_at` → the joined path. Prod: 15-47 s (timeouts) → ~2.4 s, byte-equal; guard
+  `vendor-cost-timeseries-ledger.test.ts` (red if the band check is dropped).
 - **Never on a public route** — the vendor cost reveals the margin. The public timeseries is
   untouched; the route is `/internal/*` behind `requireInternalAuth`.
 - **Per run: `GET /internal/runs/vendor?orgId=…`** — `GET /v1/runs`' exact list (shared

@@ -1,0 +1,11 @@
+-- Window index on the frozen run start of EVERY cost row.
+--
+-- GET /internal/stats/costs/timeseries/vendor (fleet, run-start window only:
+-- the admin cash forecast's 14-day read) takes its money from the cost ledger
+-- alone, by `run_started_at` (migration 0030). The 0030 index only covers
+-- platform-projected rows; this read also sums refunded rows and any cost
+-- source, and probes for rows with a NULL run start (btree indexes NULLs).
+--
+-- Built CONCURRENTLY out-of-band on prod before the deploy; IF NOT EXISTS makes
+-- this non-concurrent build a no-op there (same discipline as 0027 / 0029 / 0030).
+CREATE INDEX IF NOT EXISTS "idx_runs_costs_run_started" ON "runs_costs" ("run_started_at");

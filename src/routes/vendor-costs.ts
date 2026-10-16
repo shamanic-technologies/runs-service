@@ -67,7 +67,200 @@ function sumsSql(scope = sql`TRUE`, prefix = "") {
   );
 }
 
+/** Every money column sumsSql() names, for the counts ⟕ money join. */
+const MONEY_COLUMNS = (Object.keys(STATUSES) as Array<keyof typeof STATUSES>).flatMap((k) => [
+  `billed_${k}`,
+  `vendor_${k}`,
+  `unpriced_${k}`,
+]);
+
 const fixed = (v: unknown) => new Decimal(v as string).toFixed(10);
+
+/**
+ * The fleet read by run-start window only (no run-side filter but the bounds, no
+ * campaign grouping) takes its money from the cost ledger alone, through
+ * `runs_costs.run_started_at` (migration 0030), instead of joining every run of
+ * the window. That column is the run's `started_at` frozen at cost write through
+ * a JS Date, so it is `started_at` truncated to the millisecond (or `started_at`
+ * itself, for backfilled rows): 0 of 2,008,077 prod rows otherwise
+ * (2026-10-17). Hence:
+ *   - the day/week/month bucket is the same (a bucket edge is a whole second);
+ *   - a row more than BOUND_BAND from both bounds is decided by the column;
+ *   - a row inside the band (a run started within a second of a bound) is
+ *     decided by its run's own `started_at`, one PK probe each.
+ * A cost row with no `run_started_at` cannot be placed: the read then takes the
+ * joined path (exact, slower) rather than drop it.
+ */
+export interface LedgerOnlyWindow {
+  startedAfter?: string;
+  startedBefore?: string;
+}
+
+const BOUND_BAND = sql`interval '1 second'`;
+
+function ledgerWindowSql(w: LedgerOnlyWindow): { range: SQL; decided: SQL } {
+  const range: SQL[] = [];
+  const sure: SQL[] = [];
+  const exact: SQL[] = [];
+  // exact[] reads the run's own started_at (scalar PK probe below).
+  if (w.startedAfter) {
+    const a = sql`${w.startedAfter}::timestamptz`;
+    range.push(sql`rc.run_started_at >= ${a} - ${BOUND_BAND}`);
+    sure.push(sql`rc.run_started_at >= ${a} + ${BOUND_BAND}`);
+    exact.push(sql`r.started_at >= ${a}`);
+  }
+  if (w.startedBefore) {
+    const b = sql`${w.startedBefore}::timestamptz`;
+    range.push(sql`rc.run_started_at <= ${b} + ${BOUND_BAND}`);
+    sure.push(sql`rc.run_started_at <= ${b} - ${BOUND_BAND}`);
+    exact.push(sql`r.started_at <= ${b}`);
+  }
+  if (range.length === 0) return { range: sql`TRUE`, decided: sql`TRUE` };
+  const and = (xs: SQL[]) => sql.join(xs, sql` AND `);
+  return {
+    range: and(range),
+    // CASE fixes the order: the PK probe runs only for rows inside a band. A
+    // scalar subquery, not EXISTS: the planner turns EXISTS into a hash of every
+    // run of the window (870k for the fleet's 14 days) to serve a handful of rows.
+    decided: sql`CASE WHEN ${and(sure)} THEN TRUE
+      ELSE (SELECT ${and(exact)} FROM runs r WHERE r.id = rc.run_id) END`,
+  };
+}
+
+/** True when some cost row has no frozen run start (the ledger-only path cannot place it). */
+export async function hasUnplacedCostRows(): Promise<boolean> {
+  const rows = (await db.execute(sql`SELECT 1 FROM runs_costs WHERE run_started_at IS NULL LIMIT 1`)) as any[];
+  return rows.length > 0;
+}
+
+/**
+ * The statement behind GET /internal/stats/costs/timeseries/vendor, exported so a
+ * prod probe can run it beside the previous one in one snapshot. `ledgerOnly`
+ * set = the money comes from the cost ledger alone (see LedgerOnlyWindow); the
+ * caller passes it only when the bounds are the sole run-side filter and no
+ * campaign grouping is asked.
+ */
+export function vendorTimeseriesSql(
+  opts: {
+    filterSql: SQL | null;
+    interval: string;
+    timezone: string;
+    groupByCampaign: boolean;
+    costSource: string | undefined;
+    ledgerOnly?: LedgerOnlyWindow;
+  },
+  versions: VendorCostVersion[],
+): SQL {
+  const { filterSql, interval, timezone, groupByCampaign, costSource, ledgerOnly } = opts;
+  if (ledgerOnly && groupByCampaign) throw new Error("ledgerOnly cannot group by campaign");
+  const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
+  const bucketOf = (col: SQL) => sql`DATE_TRUNC(${interval}, ${col} AT TIME ZONE ${timezone})`;
+  const groupCols = groupByCampaign ? sql`1, 2` : sql`1`;
+  const campaignCol = groupByCampaign ? sql`r.campaign_id,` : sql``;
+
+  let baseFrom: SQL;
+  if (ledgerOnly) {
+    const w = ledgerWindowSql(ledgerOnly);
+    // The window rows are fetched behind an OFFSET 0 fence, by the run-start
+    // index alone: given the status predicate in the same scan, the planner
+    // BitmapAnds idx_runs_costs_status (1.46M entries, 1.6 s) for nothing.
+    baseFrom = sql`
+      SELECT
+        ${bucketOf(sql`w.run_started_at`)} AS bucket,
+        w.status, w.cost_name, w.unit_cost_in_usd_cents, w.created_at, w.quantity, w.total_cost_in_usd_cents
+      FROM (
+        SELECT rc.run_started_at, rc.status, rc.cost_source, rc.cost_name, rc.unit_cost_in_usd_cents,
+               rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
+        FROM runs_costs rc
+        WHERE ${w.range} AND ${w.decided}
+        OFFSET 0
+      ) w
+      WHERE w.status IN ('actual','provisioned','refunded') ${costSourceJoinSql(costSource, "w")}`;
+  } else {
+    baseFrom = sql`
+      SELECT
+        ${bucketOf(sql`r.started_at`)} AS bucket,
+        ${campaignCol}
+        rc.status, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
+      FROM runs r
+      INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(costSource)}
+        AND rc.status IN ('actual','provisioned','refunded')
+      ${whereSql}`;
+  }
+
+  return sql`
+    -- Counts and money are read apart (same split as the public reads,
+    -- migration 0030). run_count counts RUNS, so it never needed the cost
+    -- ledger: read from runs alone. The money reads only rows of a status some
+    -- figure sums (cancelled rows are in none), so the materialized set is the
+    -- cost rows, not every run of the window. The old single LEFT JOIN
+    -- materialized ~1M rows for the fleet's 14 days and sorted them for
+    -- COUNT(DISTINCT run_id): 17-47 s, past the 30 s stats timeout on a busy box
+    -- (2026-10-17). Buckets are grouped as timestamps and formatted once at the
+    -- end (to_char per row sorted 870k strings).
+    --
+    -- v and base are MATERIALIZED on purpose. Inlined, the planner walks runs
+    -- in a nested loop and rebuilds the version windows (sort + LEAD over the
+    -- whole catalogue) or a hash of them once PER RUN: 19s on a brand's
+    -- cold-email dynasty in prod (2026-09-27).
+    WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+    counts AS (
+      SELECT
+        ${bucketOf(sql`r.started_at`)} AS bucket,
+        ${campaignCol}
+        COUNT(*) AS run_count
+      FROM runs r
+      ${whereSql}
+      GROUP BY ${groupCols}
+    ),
+    base AS MATERIALIZED (${baseFrom}),
+    costed AS (
+      SELECT
+        b.bucket,
+        ${groupByCampaign ? sql`b.campaign_id,` : sql``}
+        b.status,
+        b.cost_name,
+        b.total_cost_in_usd_cents AS billed_total,
+        b.quantity * v.vendor AS vendor_total,
+        (v.vendor IS NOT NULL) AS priced
+      FROM base b
+      LEFT JOIN v
+        ON v.cost_name = b.cost_name
+       AND v.billed = b.unit_cost_in_usd_cents
+       AND b.created_at >= v.valid_from
+       AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
+    ),
+    money AS MATERIALIZED (
+      SELECT
+        bucket,
+        ${groupByCampaign ? sql`campaign_id,` : sql``}
+        ${sumsSql()},
+        COALESCE(
+          array_agg(DISTINCT cost_name ORDER BY cost_name)
+            FILTER (WHERE status IN ('actual','provisioned') AND NOT priced),
+          '{}'
+        ) AS unpriced_cost_names
+      FROM costed
+      GROUP BY ${groupCols}
+    )
+    -- Every cost row belongs to a run of the window, so every money group has
+    -- its counts group; a run window with no cost row reads 0 everywhere.
+    SELECT
+      to_char(c.bucket, 'YYYY-MM-DD') AS period,
+      ${groupByCampaign ? sql`c.campaign_id,` : sql``}
+      ${sql.join(
+        MONEY_COLUMNS.map((col) => sql`COALESCE(m.${sql.raw(col)}, '0') AS ${sql.raw(col)}`),
+        sql`, `,
+      )},
+      COALESCE(m.unpriced_cost_names, '{}') AS unpriced_cost_names,
+      c.run_count
+    FROM counts c
+    LEFT JOIN money m
+      ON m.bucket = c.bucket
+      ${groupByCampaign ? sql`AND m.campaign_id IS NOT DISTINCT FROM c.campaign_id` : sql``}
+    ORDER BY ${groupByCampaign ? sql`1, c.campaign_id` : sql`1`}
+  `;
+}
 
 /**
  * GET /internal/stats/costs/timeseries/vendor — the dated spend of
@@ -145,65 +338,25 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
       startedAfter,
       startedBefore,
     });
-    const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
-    const bucketExpr = sql`DATE_TRUNC(${interval}, r.started_at AT TIME ZONE ${timezone})`;
-    const groupCols = groupByCampaign ? sql`1, 2` : sql`1`;
+    // Bounds are the only run-side filter → the money can come from the cost
+    // ledger alone (see LedgerOnlyWindow), unless a cost row cannot be placed.
+    const boundsOnly =
+      !groupByCampaign &&
+      !orgId &&
+      !brandId &&
+      !campaignId &&
+      !parsedCampaignIds.ids &&
+      !featureSlug &&
+      !featureSlugsParam &&
+      !workflowSlugs &&
+      !taskName;
+    const ledgerOnly = boundsOnly && !(await hasUnplacedCostRows()) ? { startedAfter, startedBefore } : undefined;
 
     const versions = await fetchVendorCostCatalog();
 
-    const rows = (await db.execute(sql`
-      -- Both CTEs are MATERIALIZED on purpose. Inlined, the planner walks runs in a
-      -- nested loop and rebuilds the version windows (sort + LEAD over the whole
-      -- catalogue) or a hash of them once PER RUN: 19s on a brand's cold-email
-      -- dynasty in prod (2026-09-27) against 0.8s for the public twin. Materialized,
-      -- the runs x costs scan happens once and the catalogue joins by one hash.
-      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
-      base AS MATERIALIZED (
-        SELECT
-          to_char(${bucketExpr}, 'YYYY-MM-DD') AS period,
-          ${groupByCampaign ? sql`r.campaign_id,` : sql``}
-          r.id AS run_id,
-          rc.status,
-          rc.cost_name,
-          rc.unit_cost_in_usd_cents,
-          rc.created_at,
-          rc.quantity,
-          rc.total_cost_in_usd_cents
-        FROM runs r
-        LEFT JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(costSource)}
-        ${whereSql}
-      ),
-      costed AS (
-        SELECT
-          b.period,
-          ${groupByCampaign ? sql`b.campaign_id,` : sql``}
-          b.run_id,
-          b.status,
-          b.cost_name,
-          b.total_cost_in_usd_cents AS billed_total,
-          b.quantity * v.vendor AS vendor_total,
-          (v.vendor IS NOT NULL) AS priced
-        FROM base b
-        LEFT JOIN v
-          ON v.cost_name = b.cost_name
-         AND v.billed = b.unit_cost_in_usd_cents
-         AND b.created_at >= v.valid_from
-         AND (v.valid_to IS NULL OR b.created_at < v.valid_to)
-      )
-      SELECT
-        period,
-        ${groupByCampaign ? sql`campaign_id,` : sql``}
-        ${sumsSql()},
-        COALESCE(
-          array_agg(DISTINCT cost_name ORDER BY cost_name)
-            FILTER (WHERE status IN ('actual','provisioned') AND NOT priced),
-          '{}'
-        ) AS unpriced_cost_names,
-        COUNT(DISTINCT run_id) AS run_count
-      FROM costed
-      GROUP BY ${groupCols}
-      ORDER BY ${groupCols}
-    `)) as any[];
+    const rows = (await db.execute(
+      vendorTimeseriesSql({ filterSql, interval, timezone, groupByCampaign, costSource, ledgerOnly }, versions),
+    )) as any[];
 
     const buckets = rows.map((row) => ({
       period: row.period as string,
