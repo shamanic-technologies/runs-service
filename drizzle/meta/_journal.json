@@ -330,6 +330,13 @@
       "when": 1782172800000,
       "tag": "0046_org_no_campaign_days",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1782259200000,
+      "tag": "0047_cost_run_started_index",
+      "breakpoints": true
     }
   ]
 }
