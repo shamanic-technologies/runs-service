@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
-import { db } from "../db/index.js";
+import { db, readDb } from "../db/index.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
@@ -50,6 +50,27 @@ import {
 } from "../services/cost-aggregator.js";
 
 const router = Router();
+
+// RUN_TREE_PLAN_NOTE — every run-tree read below walks a subtree with
+// `CROSS JOIN LATERAL (… WHERE c.parent_run_id = d.id OFFSET 0)` and reads each
+// walked run's cost rows with a fenced LATERAL too, and the walk CARRIES the
+// columns it returns instead of joining back to `runs`. The planner estimates a
+// recursive CTE at millions of rows (73 children per parent per level), so the
+// plain-join forms hashed ALL of `runs` (5.5M rows) or seq-scanned ALL of
+// `runs_costs` (2M rows) once per call, whatever the subtree size. Prod
+// 2026-10-17, 500 lead-serve roots / 6.8k walked runs: descendant rows 6.6 s ->
+// 49 ms, rollup 1.7 s full ledger scan -> index-only; on a loaded box the old forms
+// took ~55 s each and twenty of them held the whole write pool (run creation
+// waited ~48 s). Same rule as task-outcomes and run-subtree-cost.
+const RUN_TREE_COLUMNS = sql.raw(
+  "id, parent_run_id, service_name, task_name, status, goal, brand_profile_id, audience_id, workflow_context, started_at, completed_at",
+);
+
+/** One run's cost rows, every column a cost aggregate reads (fenced, index on run_id). */
+function runCostRowsSql(runId: SQL) {
+  return sql`SELECT c.status, c.cost_source, c.total_cost_in_usd_cents, c.net_cost_in_usd_cents
+    FROM runs_costs c WHERE c.run_id = ${runId} OFFSET 0`;
+}
 
 // ---------------------------------------------------------------------------
 // Org-level platform spend. All math in Postgres. Single source of truth for
@@ -288,22 +309,24 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 
     const { runIds } = parsed.data;
 
-    const result = await db.execute(sql`
+    // Walk + cost fetch per run (fenced LATERALs): see RUN_TREE_PLAN_NOTE.
+    const result = await readDb.execute(sql`
       WITH RECURSIVE descendants AS (
         SELECT id, id AS root_run_id
         FROM runs
         WHERE id IN (${sql.join(runIds.map((id) => sql`${id}`), sql`, `)})
           AND organization_id = ${req.orgId}
         UNION ALL
-        SELECT r.id, d.root_run_id
-        FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        SELECT ch.id, d.root_run_id
+        FROM descendants d
+        CROSS JOIN LATERAL (SELECT c.id FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
       )
       SELECT
         d.root_run_id,
         ${costAggregateSelectSql("rc")},
         ${costAggregateOwnPlatformSelectSql("rc", "d")}
       FROM descendants d
-      LEFT JOIN runs_costs rc ON rc.run_id = d.id
+      LEFT JOIN LATERAL (${runCostRowsSql(sql`d.id`)}) rc ON true
       GROUP BY d.root_run_id
     `);
 
@@ -342,7 +365,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     const { runIds } = parsed.data;
 
     // Query 1 — base run rows scoped to org.
-    const runRows = await db
+    const runRows = await readDb
       .select()
       .from(runs)
       .where(and(eq(runs.organizationId, req.orgId), inArray(runs.id, runIds)));
@@ -358,17 +381,20 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     // Query 2 — rolled-up aggregates via INLINE bounded recursive CTE.
     // Gold view removed (unbounded walk caused 20+ GB OOM on prod).
     // Predicates atomic via cost-aggregator (no `!= 'cancelled'`).
-    const rollupResult = await db.execute(sql`
+    // Fenced LATERALs: see RUN_TREE_PLAN_NOTE.
+    const rollupResult = await readDb.execute(sql`
       WITH RECURSIVE descendants AS (
         SELECT id, id AS root_run_id FROM runs WHERE id IN (${foundIdsList})
         UNION ALL
-        SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        SELECT ch.id, d.root_run_id
+        FROM descendants d
+        CROSS JOIN LATERAL (SELECT c.id FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
       )
       SELECT
         d.root_run_id,
         ${costAggregateSelectSql("rc")}
       FROM descendants d
-      LEFT JOIN runs_costs rc ON rc.run_id = d.id
+      LEFT JOIN LATERAL (${runCostRowsSql(sql`d.id`)}) rc ON true
       GROUP BY d.root_run_id
     `);
     const rollupByRoot = new Map<string, any>(
@@ -376,30 +402,31 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     );
 
     // Query 3 — descendant run rows via INLINE bounded recursive CTE.
-    const descendantResult = await db.execute(sql`
+    // The walk carries each run's columns (no join back to runs): see RUN_TREE_PLAN_NOTE.
+    const descendantResult = await readDb.execute(sql`
       WITH RECURSIVE walk AS (
-        SELECT id, id AS root_run_id, 0 AS depth
+        SELECT ${RUN_TREE_COLUMNS}, id AS root_run_id, 0 AS depth
         FROM runs WHERE id IN (${foundIdsList})
         UNION ALL
-        SELECT r.id, w.root_run_id, w.depth + 1
-        FROM runs r INNER JOIN walk w ON r.parent_run_id = w.id
+        SELECT ch.*, w.root_run_id, w.depth + 1
+        FROM walk w
+        CROSS JOIN LATERAL (SELECT ${RUN_TREE_COLUMNS} FROM runs c WHERE c.parent_run_id = w.id OFFSET 0) ch
       )
       SELECT
-        w.root_run_id,
-        r.id,
-        r.parent_run_id,
-        r.service_name,
-        r.task_name,
-        r.status,
-        r.goal,
-        r.brand_profile_id,
-        r.audience_id,
-        r.workflow_context,
-        r.started_at,
-        r.completed_at
-      FROM walk w
-      INNER JOIN runs r ON r.id = w.id
-      WHERE w.depth > 0
+        root_run_id,
+        id,
+        parent_run_id,
+        service_name,
+        task_name,
+        status,
+        goal,
+        brand_profile_id,
+        audience_id,
+        workflow_context,
+        started_at,
+        completed_at
+      FROM walk
+      WHERE depth > 0
     `);
     const descendantRows = descendantResult as any[];
     const descendantIds = descendantRows.map((r) => r.id);
@@ -414,7 +441,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     const allCostRunIds = [...foundIds, ...descendantIds];
     const allCosts = allCostRunIds.length === 0
       ? []
-      : await db.select().from(runsCosts).where(inArray(runsCosts.runId, allCostRunIds));
+      : await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, allCostRunIds));
     const costsByRunId = new Map<string, any[]>();
     for (const cost of allCosts) {
       const list = costsByRunId.get(cost.runId) || [];
@@ -423,7 +450,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     }
 
     // Per-descendant own-cost aggregates (depth>0). Atomic literals via cost-aggregator.
-    const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
+    const descendantOwnResult = descendantIds.length === 0 ? [] : await readDb.execute(sql`
       SELECT
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
@@ -436,7 +463,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     );
 
     // Per-root own-cost aggregates (depth=0). Atomic literals via cost-aggregator.
-    const rootOwnResult = await db.execute(sql`
+    const rootOwnResult = await readDb.execute(sql`
       SELECT
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
@@ -522,30 +549,33 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    const [run] = await readDb.select().from(runs).where(eq(runs.id, id)).limit(1);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    const costs = await db.select().from(runsCosts).where(eq(runsCosts.runId, id));
+    const costs = await readDb.select().from(runsCosts).where(eq(runsCosts.runId, id));
 
     // Rolled-up cost aggregates via INLINE bounded recursive CTE.
     // Atomic literals via cost-aggregator (no `!= 'cancelled'`).
-    const rollupResult = await db.execute(sql`
+    // Fenced LATERALs: see RUN_TREE_PLAN_NOTE.
+    const rollupResult = await readDb.execute(sql`
       WITH RECURSIVE descendants AS (
         SELECT id FROM runs WHERE id = ${id}
         UNION ALL
-        SELECT r.id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        SELECT ch.id
+        FROM descendants d
+        CROSS JOIN LATERAL (SELECT c.id FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
       )
       SELECT ${costAggregateSelectSql("rc")}
       FROM descendants d
-      LEFT JOIN runs_costs rc ON rc.run_id = d.id
+      LEFT JOIN LATERAL (${runCostRowsSql(sql`d.id`)}) rc ON true
     `);
     const rollup = (rollupResult as any[])[0] ?? { total_cost: "0", actual_cost: "0", provisioned_cost: "0", cancelled_cost: "0" };
 
     // Own-row aggregates (depth=0 only). Atomic literals via cost-aggregator.
-    const ownResult = await db.execute(sql`
+    const ownResult = await readDb.execute(sql`
       SELECT ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
       WHERE run_id = ${id}
@@ -553,17 +583,14 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
     const own = (ownResult as any[])[0];
 
     // Descendant rows for the response shape (parent's view of children).
-    const descendantResult = await db.execute(
+    const descendantResult = await readDb.execute(
       sql`WITH RECURSIVE descendants AS (
-        SELECT id, parent_run_id, service_name, task_name, status,
-               goal, brand_profile_id, audience_id, workflow_context,
-               started_at, completed_at
+        SELECT ${RUN_TREE_COLUMNS}
         FROM runs WHERE parent_run_id = ${id}
         UNION ALL
-        SELECT r.id, r.parent_run_id, r.service_name, r.task_name, r.status,
-               r.goal, r.brand_profile_id, r.audience_id, r.workflow_context,
-               r.started_at, r.completed_at
-        FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        SELECT ch.*
+        FROM descendants d
+        CROSS JOIN LATERAL (SELECT ${RUN_TREE_COLUMNS} FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
       )
       SELECT * FROM descendants`
     );
@@ -572,11 +599,11 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
 
     let allDescendantCosts: any[] = [];
     if (descendantIds.length > 0) {
-      allDescendantCosts = await db.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
+      allDescendantCosts = await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
     }
 
     // Per-descendant own-cost via SQL aggregation. Atomic literals via cost-aggregator.
-    const descendantOwnResult = descendantIds.length === 0 ? [] : await db.execute(sql`
+    const descendantOwnResult = descendantIds.length === 0 ? [] : await readDb.execute(sql`
       SELECT
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
@@ -1114,7 +1141,7 @@ export async function listRunsPage(
     // the 47-row family in prod. With bitmaps off it walks the index in order
     // and stops at the limit, or uses a selective btree when a filter has one.
     const perMember = limit + offset;
-    const rows = await db.transaction(async (tx) => {
+    const rows = await readDb.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL enable_bitmapscan = off`);
       return tx.execute(sql`
         SELECT p.id FROM unnest(string_to_array(${campaignIds.join(",")}, ',')) AS m(cid)
@@ -1132,7 +1159,7 @@ export async function listRunsPage(
   } else {
     if (campaignIds) conditions.push(inArray(runs.campaignId, campaignIds));
     if (limit !== undefined) {
-      const page = db
+      const page = readDb
         .select({ id: runs.id })
         .from(runs)
         .where(and(...conditions))
@@ -1158,7 +1185,7 @@ export async function listRunsPage(
 
 /** Runs matching `where`, newest first, each with the sum of its own cost rows. */
 function selectRunsWithOwnCost(where: SQL) {
-  return db
+  return readDb
     .select({
       id: runs.id,
       parentRunId: runs.parentRunId,
