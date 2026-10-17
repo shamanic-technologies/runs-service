@@ -54,3 +54,24 @@ export const statsSql = postgres(connectionString, {
   connection: { jit: "off", statement_timeout: 30000 },
 });
 export const statsDb = coalesceExecute(drizzle(statsSql, { schema }));
+
+// READ pool — run-tree and event reads that fleet services call outside the
+// write path: `POST /v1/runs/batch`, `POST /v1/runs/costs/batch`,
+// `GET /v1/runs/:id`, `GET /v1/runs`, the event feeds.
+//
+// Why a third pool: run CREATION is on every service's hot path (onboarding's
+// "Read your company" step waits on it). On 2026-10-17 apollo-service's
+// acquisition-cost reads sent bursts of 500-id `/v1/runs/batch` calls; each took
+// ~55 s on a loaded box, twenty were in flight at once, so they held all 20
+// connections of the write pool and a `POST /v1/runs` waited ~48 s for a
+// connection. Here they can only queue behind each other.
+//
+// `statement_timeout` 60 s: apollo gives up at 20 s, outlets at 30 s, and a query
+// whose caller is gone must not keep a connection and a core for minutes. 60 s, not
+// 30, so an unbounded `GET /v1/runs` list that used to answer slowly still answers.
+export const readSql = postgres(connectionString, {
+  max: 10,
+  connect_timeout: 10,
+  connection: { jit: "off", statement_timeout: 60000 },
+});
+export const readDb = drizzle(readSql, { schema });

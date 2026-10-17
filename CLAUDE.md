@@ -19,7 +19,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 ## Architecture
 
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
-- `src/routes/runs.ts` — CRUD routes for runs and costs
+- `src/routes/runs.ts` — CRUD routes for runs and costs (run-tree reads on `readDb`, see "Run creation never queues behind run-tree reads")
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
@@ -748,6 +748,23 @@ them. Reproduced from inside the box: 72 concurrent stats reads → a cost POST 
   6.5 s → 2.5 s. Built CONCURRENTLY out-of-band on prod (905 MB).
 - **Autovacuum at 2 %** on `runs` / `runs_costs` (default 20 % let `runs` go six
   days with 540k dead rows; the per-day run count fell back to a 7.4 s seq scan).
+
+## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
+
+2026-10-17 12:31 UTC: onboarding step 1 waited ~48 s because `POST /v1/runs` waited for a
+write-pool connection. Twenty `POST /v1/runs/batch` calls (apollo-service acquisition
+costs, 500 ids each, 20 s client timeout + retries) held all 20, ~55 s each. task-outcomes
+was NOT the cause (statsDb, max 2 in flight).
+
+- **`readDb` (max 10, `statement_timeout` 60 s)** serves `POST /v1/runs/batch`,
+  `POST /v1/runs/costs/batch`, `GET /v1/runs/:id`, `GET /v1/runs` (`listRunsPage`,
+  `include=subtreeCost`) and the event GETs. `db` keeps writes, lifecycle and billing reads.
+  A new read route that walks trees or lists runs imports `readDb`, never `db`.
+  Guard: `tests/integration/run-create-isolation.test.ts` (red if the reads share `db`).
+- **Every run-tree walk is fenced** (`RUN_TREE_PLAN_NOTE` in `routes/runs.ts`): children
+  via `CROSS JOIN LATERAL (… OFFSET 0)`, cost rows via a fenced LATERAL, the walk carries
+  its columns. The plain-join forms hashed all of `runs` / seq-scanned all of `runs_costs`
+  per call (prod, 500 roots: 6.6 s -> 49 ms, byte-identical).
 
 ## Deploy ordering with billing-service
 

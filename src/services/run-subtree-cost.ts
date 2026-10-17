@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { db } from "../db/index.js";
+import { readDb } from "../db/index.js";
 import { costAggregateNetSelectSql, costAggregateSelectSql } from "./cost-aggregator.js";
 
 /** Tokens GET /v1/runs accepts in `include`. */
@@ -50,7 +50,7 @@ export interface SubtreeBilledCost {
 export async function subtreeBilledCostByRoot(runIds: string[]): Promise<Map<string, SubtreeBilledCost>> {
   const out = new Map<string, SubtreeBilledCost>();
   if (runIds.length === 0) return out;
-  const rows = (await db.execute(sql`
+  const rows = (await readDb.execute(sql`
     WITH RECURSIVE descendants AS (
       SELECT id, id AS root_run_id FROM runs
       WHERE id = ANY(string_to_array(${runIds.join(",")}, ',')::uuid[])

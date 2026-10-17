@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { eq, and, desc, asc, gt, sql, inArray } from "drizzle-orm";
-import { db } from "../db/index.js";
+import { db, readDb } from "../db/index.js";
 import { runs, runEvents } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { CreateRunEventRequestSchema } from "../schemas.js";
@@ -64,7 +64,7 @@ router.get("/v1/runs/:id/events", requireApiKey, async (req, res) => {
     const { level } = req.query;
 
     // Verify run exists
-    const [run] = await db
+    const [run] = await readDb
       .select({ id: runs.id })
       .from(runs)
       .where(eq(runs.id, id))
@@ -80,7 +80,7 @@ router.get("/v1/runs/:id/events", requireApiKey, async (req, res) => {
       conditions.push(eq(runEvents.level, level as string));
     }
 
-    const events = await db
+    const events = await readDb
       .select()
       .from(runEvents)
       .where(and(...conditions))
@@ -99,7 +99,7 @@ router.get("/v1/runs/:id/events/stream", requireApiKey, async (req, res) => {
     const { id } = req.params;
 
     // Verify run exists
-    const [run] = await db
+    const [run] = await readDb
       .select({ id: runs.id })
       .from(runs)
       .where(eq(runs.id, id))
@@ -124,7 +124,7 @@ router.get("/v1/runs/:id/events/stream", requireApiKey, async (req, res) => {
         conditions.push(gt(runEvents.id, lastId));
       }
 
-      const events = await db
+      const events = await readDb
         .select()
         .from(runEvents)
         .where(and(...conditions))
@@ -198,7 +198,7 @@ router.get("/v1/events", requireApiKey, async (req, res) => {
     const limit = limitStr ? Number(limitStr) : undefined;
     const offset = offsetStr ? Number(offsetStr) : 0;
 
-    const baseQuery = db
+    const baseQuery = readDb
       .select()
       .from(runEvents)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
