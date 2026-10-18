@@ -1200,6 +1200,115 @@ registry.registerPath({
   },
 });
 
+// --- Incurred, never-charged costs (late declaration of past spend) ---
+//
+// A cost that REALLY happened at the provider, that the platform decided never to
+// charge, and that was never declared at the time. It is born in the state a
+// refund leaves a row in (`refunded`), so it is in NO charge predicate at any
+// instant, while every incurred/refunded read counts it. `created_at` = the stated
+// `incurredAt` (migration 0048), so dated reads place it on the day it happened.
+// See CLAUDE.md "Incurred, never-charged costs".
+
+export const INCURRED_COSTS_MAX_ITEMS = 500;
+
+export const IncurredCostItemSchema = z
+  .object({
+    runId: z.string().uuid().openapi({ description: "EXISTING run the spend belongs to (org, campaign, workflow attribution come from it)." }),
+    costName: z.string().min(1).openapi({ description: "Catalogue cost name. Priced by runs-service at the costs-service platform price of the name as resolved now (same resolution as a live cost write).", example: "instantly-account-email-sent" }),
+    quantity: z.number().positive(),
+    incurredAt: z.string().datetime({ offset: true }).openapi({ description: "When the spend really happened. Must not be in the future nor before the run's started_at. Becomes the cost row's created_at.", example: "2026-09-02T14:31:07.000Z" }),
+    idempotencyKey: z.string().min(1).max(256).openapi({
+      description: "Mandatory per-item dedup key, unique PER RUN (same index as live cost writes). An item whose (runId, idempotencyKey) already exists is reported `already_recorded` and never written twice. Self-namespace it.",
+      example: "instantly:incurred:<sequence-cost-id>:account",
+    }),
+  })
+  .openapi("IncurredCostItem");
+
+export const IncurredCostsPreviewRequestSchema = z
+  .object({
+    items: z.array(IncurredCostItemSchema).min(1).max(INCURRED_COSTS_MAX_ITEMS),
+  })
+  .openapi("IncurredCostsPreviewRequest");
+
+export const IncurredCostsApplyRequestSchema = IncurredCostsPreviewRequestSchema.extend({
+  reason: RefundReasonSchema,
+  authorizedBy: RefundedBySchema.openapi({ description: "Who decided not to charge this spend (staff email / user id). Recorded in the bronze audit trail." }),
+}).openapi("IncurredCostsApplyRequest");
+
+export const IncurredCostOutcomeEnum = z
+  .enum(["to_record", "recorded", "already_recorded", "invalid"])
+  .openapi("IncurredCostOutcome");
+
+export const IncurredCostItemResultSchema = z
+  .object({
+    runId: z.string().uuid(),
+    idempotencyKey: z.string(),
+    costName: z.string(),
+    outcome: IncurredCostOutcomeEnum.openapi({ description: "preview: to_record | already_recorded | invalid. apply: recorded | already_recorded." }),
+    costId: z.string().uuid().nullable().openapi({ description: "The cost row (new or existing). Null for to_record and invalid." }),
+    status: CostStatusEnum.nullable().openapi({ description: "Stored status: 'refunded' for a row recorded here; for already_recorded, whatever the existing row holds." }),
+    incurredAt: z.string().datetime().nullable().openapi({ description: "Stated instant (to_record), or the stored created_at (recorded / already_recorded)." }),
+    totalCostInUsdCents: z.string().nullable().openapi({ description: "GROSS. To be written (to_record) or stored. 10-decimal string. Null for invalid." }),
+    netCostInUsdCents: z.string().nullable().openapi({ description: "Frozen NET (org usage discount at write time). 10-decimal string. Null for invalid." }),
+    error: z.string().nullable().openapi({ description: "Why the item is invalid. Null otherwise." }),
+  })
+  .openapi("IncurredCostItemResult");
+
+const IncurredCostsTotalsSchema = z.object({
+  itemCount: z.number(),
+  toRecordCount: z.number().openapi({ description: "Items this call writes (apply: wrote)." }),
+  alreadyRecordedCount: z.number().openapi({ description: "Items whose (runId, idempotencyKey) already exists. Written nothing." }),
+  invalidCount: z.number(),
+  totalCostInUsdCents: z.string().openapi({ description: "GROSS incurred total of the items to record (apply: recorded). Excludes already_recorded. 10-decimal string." }),
+  netTotalCostInUsdCents: z.string().openapi({ description: "Frozen NET total of the same items. 10-decimal string." }),
+  alreadyRecordedTotalCostInUsdCents: z.string().openapi({ description: "GROSS total of the already_recorded rows as stored. 10-decimal string." }),
+  unitPrices: z.record(z.string(), z.string()).openapi({ description: "Price per unit in USD cents applied per cost name (costs-service platform price resolved by this call)." }),
+});
+
+export const IncurredCostsPreviewResponseSchema = IncurredCostsTotalsSchema.extend({
+  items: z.array(IncurredCostItemResultSchema),
+}).openapi("IncurredCostsPreviewResponse");
+
+export const IncurredCostsApplyResponseSchema = IncurredCostsTotalsSchema.extend({
+  recordedCount: z.number().openapi({ description: "Rows written by this call (status 'refunded'). Zero on a re-run." }),
+  items: z.array(IncurredCostItemResultSchema),
+}).openapi("IncurredCostsApplyResponse");
+
+const incurredDescription =
+  "Never in a charge predicate at any instant: the row is born `refunded` (no transient `actual`), so org-usage-total, org-actual-total, runs-expected-totals, no-campaign totals, budget/pacing reads and billing never see it, and nothing is notified to billing. Counted wherever incurred spend is: the refunded columns of GET/POST /v1/stats/costs, /v1/stats/public/costs and their timeseries, every rollup. Dated: created_at = incurredAt; run-dated reads use the run's started_at as for any cost. Priced by runs-service: costs-service platform price of each name resolved now, × quantity; net frozen with the org's current usage discount. Platform cost source only. Max 500 items per call, one transaction.";
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/incurred-costs/preview",
+  summary: "Dry run: price late-declared, never-charged past spend without writing",
+  description: `Prices exactly the items apply would record and reports, per item, to_record / already_recorded / invalid (unknown run, incurredAt in the future or before the run started, duplicate key in the body). Writes nothing. ${incurredDescription}`,
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: IncurredCostsPreviewRequestSchema } } } },
+  responses: {
+    200: { description: "Priced preview", content: { "application/json": { schema: IncurredCostsPreviewResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "Unknown cost name", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "costs-service or billing (usage discount) unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/incurred-costs/apply",
+  summary: "Record past spend that really happened and was never charged, at the date it happened",
+  description: `Writes one cost row per item not already recorded, status 'refunded', with reason + authorizedBy in the append-only bronze audit (cost.added payload, origin 'incurred_uncharged'). Idempotent per (runId, idempotencyKey). Any invalid item = 422 with the per-item list and nothing written. ${incurredDescription}`,
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: IncurredCostsApplyRequestSchema } } } },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: IncurredCostsApplyResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "Unknown cost name, or at least one invalid item (body = the preview shape, nothing written)", content: { "application/json": { schema: IncurredCostsPreviewResponseSchema } } },
+    502: { description: "costs-service or billing (usage discount) unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Public runs stats schemas ---
 
 export const PublicRunsStatsStatusBreakdownSchema = z
