@@ -15,6 +15,7 @@ import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv 
 import { listRunsPage } from "./runs.js";
 import { isStatsRollupReady } from "../services/stats-rollup.js";
 import { COST_DAY_ROLLUP_NAME } from "../services/stats-rollup-cost-day.js";
+import { CAMPAIGN_COST_ITEMS_ROLLUP_NAME } from "../services/stats-rollup-campaign-cost-items.js";
 
 const router = Router();
 
@@ -655,6 +656,148 @@ const VENDOR_GROUP_BY_COLUMNS: Record<string, string> = {
 };
 const VENDOR_GROUP_BY_KEYS = [...Object.keys(VENDOR_GROUP_BY_COLUMNS), "workflowDynastySlug"];
 
+/**
+ * The same groupBy keys over migration 0050's rollup rows (`i`), each the column
+ * the live expression above reads. audienceId, serviceName and taskName are not
+ * carried: a read naming one keeps the live join.
+ */
+const VENDOR_ROLLUP_GROUP_BY_COLUMNS: Record<string, string> = {
+  brandId: "unnest(i.brand_ids)",
+  workflowSlug: "i.workflow_slug",
+  campaignId: "i.campaign_id",
+  featureSlug: "i.feature_slug",
+  costName: "i.cost_name",
+};
+
+/** buildPublicFilterSql's feature precedence: a non-empty list wins over the single slug. */
+function rollupFeatureSlugs(list: string[] | undefined, single: string | undefined): string[] | undefined {
+  if (list && list.length > 0) return list;
+  return single ? [single] : undefined;
+}
+
+const inList = (col: string, xs: string[]) =>
+  xs.length > 0 ? sql`${sql.raw(col)} IN (${sql.join(xs.map((x) => sql`${x}`), sql`, `)})` : sql`FALSE`;
+
+/**
+ * The grouped vendor read's `base` CTE from the (campaign, run-start UTC day, …,
+ * cost name, billed unit price) rollup of migration 0050, with the same columns
+ * as the live base: one row per rollup group at its earliest created_at, a group
+ * straddling a served-from instant of its name read row by row from the ledger
+ * (see marginBaseSql for why that prices exactly like the ledger rows), and the
+ * run-start bounds' partial UTC days read live with the live WHERE.
+ *
+ * Days. `startedAfter` is inclusive (>=): its day is whole when it is a UTC
+ * midnight, else partial. `startedBefore` is inclusive (<=): its day is always
+ * partial (a midnight bound still takes the runs started at that instant). Rollup
+ * days are the whole ones strictly inside; the partial days (at most two, one if
+ * they coincide) come from the ledger, so no day is read twice.
+ */
+function vendorGroupedRollupBaseSql(
+  versions: VendorCostVersion[],
+  opts: {
+    dimSelect: SQL;
+    filters: {
+      orgId?: string;
+      brandId?: string;
+      campaignId?: string;
+      campaignIds?: string[];
+      featureSlugs?: string[];
+      workflowSlugs?: string[];
+    };
+    costSource?: string;
+    startedAfter?: string;
+    startedBefore?: string;
+    liveWhereSql: SQL;
+  },
+): SQL {
+  const f = opts.filters;
+  const where: SQL[] = [sql`d.n > 0`];
+  if (f.orgId) where.push(sql`d.organization_id = ${f.orgId}`);
+  if (f.brandId) where.push(sql`${f.brandId} = ANY(d.brand_ids)`);
+  if (f.campaignId) where.push(sql`d.campaign_id = ${f.campaignId}`);
+  if (f.campaignIds) where.push(inList("d.campaign_id", f.campaignIds));
+  if (f.featureSlugs) where.push(inList("d.feature_slug", f.featureSlugs));
+  if (f.workflowSlugs && f.workflowSlugs.length > 0) where.push(inList("d.workflow_slug", f.workflowSlugs));
+  if (opts.costSource) where.push(sql`d.cost_source = ${opts.costSource}`);
+
+  const utcDay = (b: string) => sql`(${b}::timestamptz AT TIME ZONE 'UTC')::date`;
+  const dayStart = (day: SQL) => sql`((${day})::timestamp AT TIME ZONE 'UTC')`;
+  const dayRange = (day: SQL) => sql`(r.started_at >= ${dayStart(day)} AND r.started_at < ${dayStart(sql`(${day}) + 1`)})`;
+  const partial: SQL[] = [];
+  if (opts.startedAfter) {
+    const a = opts.startedAfter;
+    const aMidnight = sql`(${a}::timestamptz AT TIME ZONE 'UTC') = ${utcDay(a)}::timestamp`;
+    where.push(sql`(d.day > ${utcDay(a)} OR (d.day = ${utcDay(a)} AND ${aMidnight}))`);
+    partial.push(sql`(NOT ${aMidnight} AND ${dayRange(utcDay(a))})`);
+  }
+  if (opts.startedBefore) {
+    where.push(sql`d.day < ${utcDay(opts.startedBefore)}`);
+    partial.push(dayRange(utcDay(opts.startedBefore)));
+  }
+
+  const itemCols = sql`campaign_id, organization_id, brand_ids, feature_slug, workflow_slug, status, cost_name,
+    unit_cost_in_usd_cents, created_at, quantity, total_cost_in_usd_cents`;
+  const liveDays =
+    partial.length > 0
+      ? sql`
+        UNION ALL
+        SELECT r.campaign_id, r.organization_id, r.brand_ids, r.feature_slug, r.workflow_slug, rc.status, rc.cost_name,
+               rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
+        FROM runs r
+        INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(opts.costSource)}
+        WHERE ${opts.liveWhereSql} AND (${sql.join(partial, sql` OR `)})`
+      : sql``;
+
+  return sql`
+      e AS MATERIALIZED (${servedFromEdgesSql(versions)}),
+      g AS MATERIALIZED (
+        SELECT d.*,
+               COALESCE(
+                 (SELECT bool_or(t > d.min_created_at AND t <= d.max_created_at) FROM unnest(e.ats) t),
+                 false
+               ) AS split
+        FROM stats_rollup_campaign_cost_items d
+        LEFT JOIN e ON e.cost_name = d.cost_name
+        WHERE ${sql.join(where, sql` AND `)}
+      ),
+      items (${itemCols}) AS MATERIALIZED (
+        SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, g.status, g.cost_name,
+               g.unit_cost_in_usd_cents, g.min_created_at, g.quantity, g.gross
+        FROM g
+        WHERE NOT g.split
+        UNION ALL
+        SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, rc.status, rc.cost_name,
+               rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
+        FROM g
+        -- A straddling group's own ledger rows: its runs (started that UTC day,
+        -- same identity), then their cost rows of the group's key. OFFSET 0
+        -- fences the subquery so it stays a per-group probe.
+        CROSS JOIN LATERAL (
+          SELECT rc.* FROM runs r
+          INNER JOIN runs_costs rc ON rc.run_id = r.id
+          WHERE ${dayRange(sql`g.day`)}
+            AND r.campaign_id IS NOT DISTINCT FROM g.campaign_id
+            AND r.organization_id IS NOT DISTINCT FROM g.organization_id
+            AND r.brand_ids IS NOT DISTINCT FROM g.brand_ids
+            AND r.feature_slug IS NOT DISTINCT FROM g.feature_slug
+            AND r.workflow_slug IS NOT DISTINCT FROM g.workflow_slug
+            AND rc.cost_source = g.cost_source
+            AND rc.status = g.status
+            AND rc.cost_name = g.cost_name
+            AND rc.unit_cost_in_usd_cents = g.unit_cost_in_usd_cents
+            -- The group's bounds hold every one of its rows (they never narrow).
+            AND rc.created_at >= g.min_created_at AND rc.created_at <= g.max_created_at
+          OFFSET 0
+        ) rc
+        WHERE g.split
+        ${liveDays}
+      ),
+      base AS MATERIALIZED (
+        SELECT ${opts.dimSelect}, i.status, i.cost_name, i.unit_cost_in_usd_cents, i.created_at, i.quantity, i.total_cost_in_usd_cents
+        FROM items i
+      )`;
+}
+
 const MONEY_FIELDS = [
   "totalCostInUsdCents",
   "actualCostInUsdCents",
@@ -788,10 +931,29 @@ router.get("/internal/stats/costs/vendor", requireInternalAuth, async (req, res)
 
     const versions = await fetchVendorCostCatalog();
 
-    const rows = (await db.execute(sql`
-      -- MATERIALIZED for the same reason as the timeseries twin: inlined, the
-      -- planner rebuilds the version windows (or their hash) once per row.
-      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+    // The rollup carries every run-side dimension but task, service and audience.
+    const fromRollup =
+      !q.taskName && !q.serviceName && !q.audienceId &&
+      sqlKeys.every((k) => k in VENDOR_ROLLUP_GROUP_BY_COLUMNS) &&
+      (await isStatsRollupReady(CAMPAIGN_COST_ITEMS_ROLLUP_NAME));
+
+    const baseSql = fromRollup
+      ? vendorGroupedRollupBaseSql(versions, {
+          dimSelect: sql.raw(sqlKeys.map((k, i) => `${VENDOR_ROLLUP_GROUP_BY_COLUMNS[k]} AS d${i}`).join(", ")),
+          filters: {
+            orgId: q.orgId,
+            brandId: q.brandId,
+            campaignId: q.campaignId,
+            campaignIds: parsedCampaignIds.ids,
+            featureSlugs: rollupFeatureSlugs(parseCsv(q.featureSlugs), q.featureSlug),
+            workflowSlugs,
+          },
+          costSource: q.costSource,
+          startedAfter: q.startedAfter,
+          startedBefore: q.startedBefore,
+          liveWhereSql: whereSql,
+        })
+      : sql`
       base AS MATERIALIZED (
         SELECT
           ${dimSelect},
@@ -804,7 +966,13 @@ router.get("/internal/stats/costs/vendor", requireInternalAuth, async (req, res)
         FROM runs r
         INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(q.costSource)}
         WHERE ${whereSql}
-      ),
+      )`;
+
+    const rows = (await db.execute(sql`
+      -- MATERIALIZED for the same reason as the timeseries twin: inlined, the
+      -- planner rebuilds the version windows (or their hash) once per row.
+      WITH v AS MATERIALIZED (${versionWindowsSql(versions)}),
+      ${baseSql},
       costed AS (
         SELECT
           ${dimRefs},
