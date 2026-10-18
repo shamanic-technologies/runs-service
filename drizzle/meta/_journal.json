@@ -358,6 +358,13 @@
       "when": 1782518400000,
       "tag": "0050_stats_rollup_campaign_cost_items",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1782604800000,
+      "tag": "0051_campaign_cost_items_cost_hour",
+      "breakpoints": true
     }
   ]
 }

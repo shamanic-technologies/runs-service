@@ -11,8 +11,8 @@ import {
   rebuildCampaignCostItemsRollup,
 } from "../../src/services/stats-rollup-campaign-cost-items.js";
 
-// Migration 0050: the (campaign, run-start day, org, brands, feature, workflow,
-// cost source, status, cost name, billed unit price) rollup must hold what the
+// Migrations 0050 + 0051: the (campaign, run-start day, org, brands, feature,
+// workflow, cost source, status, cost name, billed unit price, cost-row hour) rollup must hold what the
 // ledger holds through every write the triggers see, and
 // GET /internal/stats/costs/vendor read from it must answer byte for byte what
 // the live join answers — including a group straddling a served-from instant
@@ -38,11 +38,11 @@ vi.mock("../../src/services/dynasty-resolver.js", async (importOriginal) => {
   return { ...actual, fetchAllWorkflowDynasties: dynasties.fn };
 });
 
-// tok at billed 6 changes vendor cost mid-day on 09-15: a group of rows written
-// both sides of 12:00 straddles it and must be priced row by row.
+// tok at billed 6 changes vendor cost at 09-15 12:30: a group of rows written in
+// that hour on both sides of it straddles it and must be priced row by row.
 const VERSIONS = [
   { costName: "ci-tok", servedFrom: "2026-09-01T00:00:00Z", billedUnitCostInUsdCents: "6", vendorUnitCostInUsdCents: "1" },
-  { costName: "ci-tok", servedFrom: "2026-09-15T12:00:00Z", billedUnitCostInUsdCents: "6", vendorUnitCostInUsdCents: "2" },
+  { costName: "ci-tok", servedFrom: "2026-09-15T12:30:00Z", billedUnitCostInUsdCents: "6", vendorUnitCostInUsdCents: "2" },
   { costName: "ci-tok", servedFrom: "2026-09-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "3" },
   { costName: "ci-unknown", servedFrom: "2026-09-01T00:00:00Z", billedUnitCostInUsdCents: "2", vendorUnitCostInUsdCents: null },
 ];
@@ -85,19 +85,19 @@ const FEATURES = [FEATURE, FEATURE_2];
 /** The rollup's grain computed LIVE from the ledger (same SELECT as the rebuild). */
 async function ledgerGrain() {
   return rawSql`
-    SELECT r.campaign_id, (r.started_at AT TIME ZONE 'UTC')::date::text AS day, r.organization_id::text AS org,
+    SELECT r.campaign_id, (r.started_at AT TIME ZONE 'UTC')::date::text AS day, date_trunc('hour', rc.created_at AT TIME ZONE 'UTC')::text AS cost_hour, r.organization_id::text AS org,
       r.brand_ids, r.workflow_slug, rc.cost_source, rc.status, rc.cost_name, rc.unit_cost_in_usd_cents::text AS unit,
       count(*)::text AS n, SUM(rc.quantity)::numeric AS q, SUM(rc.total_cost_in_usd_cents)::numeric AS g,
       MIN(rc.created_at) AS min_at, MAX(rc.created_at) AS max_at
     FROM runs_costs rc JOIN runs r ON r.id = rc.run_id
     WHERE r.feature_slug = ANY(${FEATURES}) AND rc.status IN ('actual','provisioned','refunded')
-    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
   `;
 }
 
 async function rollupGrain() {
   return rawSql`
-    SELECT campaign_id, day::text AS day, organization_id::text AS org, brand_ids, workflow_slug, cost_source, status,
+    SELECT campaign_id, day::text AS day, cost_hour::text AS cost_hour, organization_id::text AS org, brand_ids, workflow_slug, cost_source, status,
       cost_name, unit_cost_in_usd_cents::text AS unit, n::text AS n, quantity AS q, gross AS g,
       min_created_at AS min_at, max_created_at AS max_at
     FROM stats_rollup_campaign_cost_items
@@ -105,7 +105,7 @@ async function rollupGrain() {
   `;
 }
 
-const keyOf = (r: any) => [r.campaign_id, r.day, r.org, JSON.stringify(r.brand_ids), r.workflow_slug, r.cost_source, r.status, r.cost_name, r.unit].join("|");
+const keyOf = (r: any) => [r.campaign_id, r.day, r.cost_hour, r.org, JSON.stringify(r.brand_ids), r.workflow_slug, r.cost_source, r.status, r.cost_name, r.unit].join("|");
 
 async function expectRollupMatchesLedger() {
   const ledger = new Map((await ledgerGrain()).map((r: any) => [keyOf(r), r]));
@@ -187,12 +187,15 @@ describe("campaign_cost_items rollup (migration 0050) and the grouped vendor rea
     await cost(a1, "ci-tok", "10", "6", "2026-09-10T10:00:01Z");
     await cost(a1, "ci-unknown", "1", "2", "2026-09-10T10:00:01Z");
     await cost(a1, "ci-tok", "4", "6", "2026-09-10T10:00:02Z", "cancelled");
-    // Straddles the 09-15 12:00 instant: 3 x vendor 1 + 4 x vendor 2.
+    // Written days after the run started, both sides of the 09-15 12:30 instant.
+    await cost(a1, "ci-tok", "8", "6", "2026-09-15T12:25:00Z");
+    await cost(a1, "ci-tok", "9", "6", "2026-09-15T12:35:00Z");
+    // Straddles the 09-15 12:30 instant: 3 x vendor 1 + 4 x vendor 2.
     const a2 = await run(ORG_A, [BRAND_A], "alpha-v2", CAMP_1, "2026-09-15T08:00:00Z");
-    await cost(a2, "ci-tok", "3", "6", "2026-09-15T10:00:00Z");
-    await cost(a2, "ci-tok", "4", "6", "2026-09-15T14:00:00Z");
-    await cost(a2, "ci-tok", "2", "5", "2026-09-15T14:00:00Z", "refunded");
-    provisionedId = await cost(a2, "ci-tok", "1", "6", "2026-09-15T15:00:00Z", "provisioned");
+    await cost(a2, "ci-tok", "3", "6", "2026-09-15T12:20:00Z");
+    await cost(a2, "ci-tok", "4", "6", "2026-09-15T12:40:00Z");
+    await cost(a2, "ci-tok", "2", "5", "2026-09-15T12:40:00Z", "refunded");
+    provisionedId = await cost(a2, "ci-tok", "1", "6", "2026-09-15T12:50:00Z", "provisioned");
     // A run at a UTC midnight, and one later the same day.
     const b1 = await run(ORG_B, [BRAND_B], "beta", CAMP_2, "2026-09-20T00:00:00Z");
     await cost(b1, "ci-tok", "2", "6", "2026-09-20T00:00:05Z");
@@ -227,6 +230,10 @@ describe("campaign_cost_items rollup (migration 0050) and the grouped vendor rea
       vendorTotalCostInUsdCents: "13.0000000000",
       vendorRefundedCostInUsdCents: "6.0000000000",
     });
+    // alpha: 10x1 at run start, then 8x1 before and 9x2 after the instant on 09-15,
+    // plus the no-campaign run's 7x1 (09-12).
+    const alpha = groups.find((g: any) => g.dimensions.workflowSlug === "alpha");
+    expect(alpha.vendorActualCostInUsdCents).toBe("43.0000000000");
   });
 
   it("serves from the rollup when it is ready (a tampered group shows through)", async () => {

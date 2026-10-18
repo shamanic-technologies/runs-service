@@ -680,7 +680,7 @@ const inList = (col: string, xs: string[]) =>
 
 /**
  * The grouped vendor read's `base` CTE from the (campaign, run-start UTC day, …,
- * cost name, billed unit price) rollup of migration 0050, with the same columns
+ * cost name, billed unit price, cost-row UTC hour) rollup of migrations 0050 + 0051, with the same columns
  * as the live base: one row per rollup group at its earliest created_at, a group
  * straddling a served-from instant of its name read row by row from the ledger
  * (see marginBaseSql for why that prices exactly like the ledger rows), and the
@@ -760,36 +760,61 @@ function vendorGroupedRollupBaseSql(
         LEFT JOIN e ON e.cost_name = d.cost_name
         WHERE ${sql.join(where, sql` AND `)}
       ),
+      s AS MATERIALIZED (SELECT * FROM g WHERE g.split),
+      -- The ledger rows of the straddling groups, read in ONE pass per straddling
+      -- cost hour (a group spans one UTC hour of cost rows, migration 0051): that
+      -- hour's rows of a straddling key inside a straddling window, off
+      -- idx_runs_costs_created_at, each with its run by primary key, matched to
+      -- their group below. Both laterals are fenced (OFFSET 0): unfenced, the
+      -- planner sorted all 5.7M runs to merge-join them on the run day. Prod
+      -- 2026-10-18, cold email feature: 2 straddling groups, 64 rows.
+      srows AS MATERIALIZED (
+        SELECT rc.status, rc.cost_source, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,
+               rc.total_cost_in_usd_cents, sd.cost_hour,
+               r.campaign_id, r.organization_id, r.brand_ids, r.feature_slug, r.workflow_slug, r.run_day
+        FROM (SELECT DISTINCT cost_hour FROM s) sd
+        CROSS JOIN LATERAL (
+          SELECT rc0.* FROM runs_costs rc0
+          WHERE rc0.created_at >= (sd.cost_hour AT TIME ZONE 'UTC')
+            AND rc0.created_at < ((sd.cost_hour + interval '1 hour') AT TIME ZONE 'UTC')
+            AND EXISTS (
+              SELECT 1 FROM s s2
+              WHERE s2.cost_hour = sd.cost_hour AND s2.cost_name = rc0.cost_name
+                AND s2.unit_cost_in_usd_cents = rc0.unit_cost_in_usd_cents
+                AND s2.status = rc0.status AND s2.cost_source = rc0.cost_source
+                AND rc0.created_at >= s2.min_created_at AND rc0.created_at <= s2.max_created_at
+            )
+          OFFSET 0
+        ) rc
+        CROSS JOIN LATERAL (
+          SELECT r0.campaign_id, r0.organization_id, r0.brand_ids, r0.feature_slug, r0.workflow_slug,
+                 (r0.started_at AT TIME ZONE 'UTC')::date AS run_day
+          FROM runs r0 WHERE r0.id = rc.run_id
+          OFFSET 0
+        ) r
+      ),
       items (${itemCols}) AS MATERIALIZED (
         SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, g.status, g.cost_name,
                g.unit_cost_in_usd_cents, g.min_created_at, g.quantity, g.gross
         FROM g
         WHERE NOT g.split
         UNION ALL
-        SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, rc.status, rc.cost_name,
-               rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
-        FROM g
-        -- A straddling group's own ledger rows: its runs (started that UTC day,
-        -- same identity), then their cost rows of the group's key. OFFSET 0
-        -- fences the subquery so it stays a per-group probe.
-        CROSS JOIN LATERAL (
-          SELECT rc.* FROM runs r
-          INNER JOIN runs_costs rc ON rc.run_id = r.id
-          WHERE ${dayRange(sql`g.day`)}
-            AND r.campaign_id IS NOT DISTINCT FROM g.campaign_id
-            AND r.organization_id IS NOT DISTINCT FROM g.organization_id
-            AND r.brand_ids IS NOT DISTINCT FROM g.brand_ids
-            AND r.feature_slug IS NOT DISTINCT FROM g.feature_slug
-            AND r.workflow_slug IS NOT DISTINCT FROM g.workflow_slug
-            AND rc.cost_source = g.cost_source
-            AND rc.status = g.status
-            AND rc.cost_name = g.cost_name
-            AND rc.unit_cost_in_usd_cents = g.unit_cost_in_usd_cents
-            -- The group's bounds hold every one of its rows (they never narrow).
-            AND rc.created_at >= g.min_created_at AND rc.created_at <= g.max_created_at
-          OFFSET 0
-        ) rc
-        WHERE g.split
+        SELECT s.campaign_id, s.organization_id, s.brand_ids, s.feature_slug, s.workflow_slug, x.status, x.cost_name,
+               x.unit_cost_in_usd_cents, x.created_at, x.quantity, x.total_cost_in_usd_cents
+        -- A straddling group's own ledger rows (see srows).
+        FROM srows x
+        INNER JOIN s
+           ON s.cost_hour = x.cost_hour
+          AND s.cost_name = x.cost_name
+          AND s.unit_cost_in_usd_cents = x.unit_cost_in_usd_cents
+          AND s.status = x.status
+          AND s.cost_source = x.cost_source
+          AND s.day = x.run_day
+        WHERE x.campaign_id IS NOT DISTINCT FROM s.campaign_id
+          AND x.organization_id IS NOT DISTINCT FROM s.organization_id
+          AND x.brand_ids IS NOT DISTINCT FROM s.brand_ids
+          AND x.feature_slug IS NOT DISTINCT FROM s.feature_slug
+          AND x.workflow_slug IS NOT DISTINCT FROM s.workflow_slug
         ${liveDays}
       ),
       base AS MATERIALIZED (
