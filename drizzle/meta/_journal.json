@@ -351,6 +351,13 @@
       "when": 1782432000000,
       "tag": "0049_stats_rollup_task_units",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1782518400000,
+      "tag": "0050_stats_rollup_campaign_cost_items",
+      "breakpoints": true
     }
   ]
 }

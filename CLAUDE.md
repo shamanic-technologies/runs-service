@@ -464,8 +464,13 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   featureSlug(s), workflowSlug(s), workflowDynastySlug, audienceId, serviceName, taskName,
   startedAfter/Before, costSource. INNER join on actual/provisioned/refunded rows: a group with
   none is ABSENT (all its figures would be 0) and there is no runCount. Billed totals equal the
-  billed reads' per group (guarded in `vendor-cost-grouped.test.ts`). Prod: fleet
-  `sales-cold-email-outreach` by workflow ~2-4 s, one brand's audience x workflow ~1.2 s.
+  billed reads' per group (guarded in `vendor-cost-grouped.test.ts`). Served from the
+  (campaign, run-start UTC day, org, brands, feature, workflow, cost source, status, cost name,
+  billed unit price) rollup of migration 0050 (stamp `campaign_cost_items`, 27k groups for 2.16M
+  ledger rows) unless the read names audienceId/serviceName/taskName: a group straddling a
+  served-from instant and the bounds' partial UTC days are read from the ledger. Live it was
+  16 s for the 144-campaign leg and 500'd on the statement timeout at 3-4 concurrent reads
+  (2026-10-18). Parity: `stats-rollup-campaign-cost-items.test.ts`.
 - **Margin `GET /internal/stats/costs/margin[?orgId=]`** (staff Monitoring page): platform rows only,
   one pass over `runs_costs` (no runs join; `orgId` reads the frozen 0029 org), `GROUPING SETS` →
   `{ total, providers[], costItems[] }`. Billed = CHARGED (`actual`); refunded stated apart; holds,
