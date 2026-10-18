@@ -21,6 +21,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs (run-tree reads on `readDb`, see "Run creation never queues behind run-tree reads")
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
+- `src/routes/incurred-costs.ts` — late declaration of never-charged past spend (preview + apply). See "Incurred, never-charged costs".
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
@@ -693,6 +694,34 @@ platform-level action has no `x-user-id` to satisfy billing's `requireOrgHeaders
 That is fine and deliberate: `runs_costs` is the source of truth and
 billing-service re-derives from `GET /internal/org-usage-total` on every authorize.
 The per-row PATCH path keeps its existing fire-and-forget hint.
+
+## Incurred, never-charged costs — late declaration of past spend (migration 0048)
+
+`POST /internal/incurred-costs/preview` then `/apply` (`src/routes/incurred-costs.ts`,
+internal key). Spend that really happened at the provider, that the owner decided not
+to charge, and that was never declared (first caller: instantly-service, ~102k
+per-email send costs of 2026-08-23 -> 10-02 that made those workflows read ~4x
+cheaper on the incurred basis).
+
+- **Born `refunded`, never `actual`.** One `cost.added` bronze event per item with
+  `status:'refunded'`, so the row is in NO charge predicate at ANY instant (POST actual
+  then refund would charge the org between the two calls). Counted by every incurred
+  read (refunded columns, every rollup). No billing notify (nothing chargeable moved).
+- **Dated.** `incurredAt` rides in the payload; the projection writes it as the row's
+  `created_at` (0048: `COALESCE(payload incurredAt, occurred_at)`, no other change, no
+  pre-0048 payload carries it). Bronze `occurred_at` stays = when we recorded it.
+  Run-dated reads use the run's `started_at` as for any cost. Refused (invalid): future
+  instant, instant before the run started, unknown run, duplicate key in the body.
+- **Priced like a live write**: costs-service platform price of each name resolved
+  now, x quantity; net frozen with the org's current usage discount. Platform only.
+- **Audit**: `reason` + `authorizedBy` + `origin:'incurred_uncharged'` in the payload.
+- **Idempotent** per `(runId, idempotencyKey)` (key mandatory, same per-run unique index
+  as live writes); an existing row is `already_recorded` whatever its status. A
+  concurrent duplicate (23505) re-classifies. preview and apply share `classify`.
+- **Batch**: <=500 items, one statement in one transaction on `db` (short rollup-row
+  locks). Apply 422s with the per-item list if any item is invalid, writing nothing.
+- Guard: `tests/integration/incurred-costs.test.ts` (charge reads byte-equal before /
+  after, refunded columns + cost-day rows on the stated days, rollup vs live).
 
 ## `/health` answers about the pool, and never queues behind it
 
