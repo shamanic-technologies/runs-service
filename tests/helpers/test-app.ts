@@ -14,6 +14,7 @@ import incurredCostRoutes from "../../src/routes/incurred-costs.js";
 import eventsRoutes from "../../src/routes/events.js";
 import noCampaignSpendRoutes from "../../src/routes/no-campaign-spend.js";
 import vendorCostRoutes from "../../src/routes/vendor-costs.js";
+import taskUnitsRoutes from "../../src/routes/task-units.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -47,6 +48,7 @@ export function createTestApp() {
   app.use(vendorCostRoutes);
   app.use(eventsRoutes);
   app.use(noCampaignSpendRoutes);
+  app.use(taskUnitsRoutes);
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
   });

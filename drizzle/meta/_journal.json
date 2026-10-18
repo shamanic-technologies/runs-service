@@ -344,6 +344,13 @@
       "when": 1782345600000,
       "tag": "0048_cost_incurred_at",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1782432000000,
+      "tag": "0049_stats_rollup_task_units",
+      "breakpoints": true
     }
   ]
 }

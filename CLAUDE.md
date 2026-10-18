@@ -26,6 +26,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
+- `src/routes/task-units.ts` + `src/services/stats-rollup-task-units.ts` — `GET /internal/stats/costs/task-units` (fleet charged runs/orgs/units per task × asking service, migration 0049). See "Task units".
 - `src/routes/run-outcomes.ts` — `GET /v1/stats/run-outcomes` (completed/failed/running, success rate, median duration). See "Run outcomes".
 - `src/services/task-outcomes.ts` — `GET /internal/stats/task-outcomes` (fleet-wide per-task outcome, duration, whole-subtree cost of ONE service; route in `run-outcomes.ts`). See "Task outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
@@ -514,6 +515,26 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   that part). Also billed money per row (`billed*`/`netBilled*` = `actual`, `refunded*` apart, as margin). `orgId` /
   `brandId` filters + `groupBy=orgId,brandId` (org = 0029 frozen org; brand = `runs.brand_ids`, joined only when asked;
   a co-branded run counts under EACH brand). No catalogue call.
+
+## Task units — charged runs, orgs and units per task, fleet-wide (migration 0049)
+
+`GET /internal/stats/costs/task-units?serviceName=…[&taskNames&costNames|costNamePrefix&costSource&since&groupBy]`
+(api-key, no identity headers). The Research page's typed-judgment studies (features-service): judgments
+= `serviceName=chat-service&taskNames=judgments,platform-judgments&costNamePrefix=typesafe-jev-&groupBy=month,taskName,parentServiceName`;
+one Apollo reveal as billed = `serviceName=apollo-service&taskNames=enrichment&costNames=apollo-credit&costSource=platform&since=2026-09-28`.
+Live it was a seq scan of every run + 2 probes per judgment: 124 s in prod (2026-10-18).
+
+- **Rollup `stats_rollup_task_units`**: (run-start UTC day, run org, service, task, PARENT run's service,
+  cost name, cost source) over `status='actual'` rows only: run_count, n, quantity, gross, net. groupBy ⊆
+  {month, taskName, parentServiceName, costName, costSource}; orgCount = DISTINCT over rollup rows (GROUPING
+  SETS gives the scope total), never summed.
+- **run_count = runs with ≥1 charged row under the key.** Trigger upserts the key row FIRST (lock), then checks
+  OTHER rows of the run in a later statement (0035 lock-then-read). Summed over cost names a run counts once
+  per name. Guard: `tests/integration/stats-rollup-task-units.test.ts` (ledger parity through every write,
+  20 concurrent rows on one run; red if the "other row" check is dropped).
+- **Readiness** stamp `task_units`; prod needs `scripts/rebuild-stats-rollup.ts task_units` after the deploy;
+  the read answers 503 until then (never a live fallback: it cannot finish under the stats timeout).
+- TRUNCATE fires no triggers: `tests/global-setup.ts` truncates the table too.
 
 ## Brand transfer — history moves, money does not (migration 0038)
 
