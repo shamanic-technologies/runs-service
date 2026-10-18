@@ -2474,3 +2474,64 @@ registry.registerPath({
     401: { description: "Unauthorized" },
   },
 });
+
+// --- Charged runs / orgs / units of one service's tasks, fleet-wide (migration 0049) ---
+
+export const TaskUnitsQuerySchema = z
+  .object({
+    serviceName: z.string().openapi({ description: "REQUIRED. The service whose runs are counted (the run's own service_name), e.g. 'chat-service'." }),
+    taskNames: z.string().optional().openapi({ description: "Comma-separated task names of those runs (max 100), e.g. 'judgments,platform-judgments'. Absent = every task of the service." }),
+    costNames: z.string().optional().openapi({ description: "Comma-separated cost names counted (max 100), e.g. 'apollo-credit'. Absent (and no costNamePrefix) = every cost name." }),
+    costNamePrefix: z.string().optional().openapi({ description: "Only cost names starting with this prefix, e.g. 'typesafe-jev-' (every Jev version). Not with costNames." }),
+    costSource: z.enum(["platform", "org"]).optional().openapi({ description: "'platform' = paid through our vendor account (billed to the customer), 'org' = the customer's own key. Absent = both." }),
+    since: z.string().optional().openapi({ description: "YYYY-MM-DD: only runs STARTED on or after this UTC day. Absent = since inception." }),
+    groupBy: z.string().optional().openapi({ description: "Comma-separated subset of month, taskName, parentServiceName, costName, costSource. month = UTC month (YYYY-MM) of the run's start. parentServiceName = the service of the PARENT run, i.e. the service that asked for the run (null for a root run). Absent = only the total." }),
+  })
+  .openapi("TaskUnitsQuery");
+
+const TaskUnitsFiguresSchema = {
+  runCount: z.number().int().openapi({ description: "Runs that were CHARGED: runs holding at least one 'actual' cost row matching the filters. Exact per cost name; summed over several cost names, a run charged under two of them counts once per name." }),
+  orgCount: z.number().int().openapi({ description: "DISTINCT orgs (the run's org) among those runs. Org-less platform runs are not counted. Not additive: the total's orgCount is distinct over the whole scope, never the sum of the groups'." }),
+  costRowCount: z.number().int().openapi({ description: "'actual' cost rows counted." }),
+  quantity: z.string().openapi({ description: "SUM(quantity) of those rows, in the cost name's unit (input tokens for a 'typesafe-jev-*-tokens-input' name, credits for 'apollo-credit'). Decimal string, scale 6." }),
+  billedCostInUsdCents: z.string().openapi({ description: "Gross billed: SUM(total_cost_in_usd_cents) of those rows, as charged before the per-org usage discount. Decimal string, scale 10." }),
+  netBilledCostInUsdCents: z.string().openapi({ description: "Billed net of the per-org usage discount frozen on each row (gross when the row predates the freeze). Decimal string, scale 10." }),
+};
+
+export const TaskUnitsResponseSchema = z
+  .object({
+    serviceName: z.string(),
+    since: z.string().nullable(),
+    statuses: z.array(z.string()).openapi({ description: "Cost row statuses counted: ['actual'] (charged). Holds, cancels and refunds are in no figure." }),
+    groupBy: z.array(z.enum(["month", "taskName", "parentServiceName", "costName", "costSource"])).openapi({ description: "Grouping keys applied, canonical order; [] when none." }),
+    groups: z
+      .array(
+        z.object({
+          month: z.string().optional().openapi({ description: "With groupBy month: YYYY-MM, UTC month of the run's start." }),
+          taskName: z.string().optional(),
+          parentServiceName: z.string().nullable().optional().openapi({ description: "With groupBy parentServiceName: the asking service; null for a root run." }),
+          costName: z.string().optional(),
+          costSource: z.enum(["platform", "org"]).optional(),
+          ...TaskUnitsFiguresSchema,
+        }),
+      )
+      .openapi({ description: "SPARSE: one entry per group with at least one charged row, ordered by the groupBy keys (null last). [] without groupBy." }),
+    total: z.object(TaskUnitsFiguresSchema).openapi({ description: "The whole scope. runCount / costRowCount / quantity / money equal the sums of the groups; orgCount is distinct over the scope." }),
+  })
+  .openapi("TaskUnitsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/costs/task-units",
+  summary: "Charged runs, distinct orgs, units and cents of one service's tasks, fleet-wide since inception, by month / task / asking service / cost name (service-auth only)",
+  description:
+    "Fleet-wide (every org and org-less platform runs): for the runs of `serviceName` (optionally only `taskNames`), what they were CHARGED — 'actual' cost rows only — under the matching cost names: number of runs charged, distinct orgs, cost rows, summed quantity (tokens, credits…) and billed cents gross + net. Groupable by UTC month of the run's start, task, asking service (the parent run's service), cost name and cost source. Examples: typed judgments = serviceName=chat-service&taskNames=judgments,platform-judgments&costNamePrefix=typesafe-jev-&groupBy=month,taskName,parentServiceName; one Apollo reveal as billed = serviceName=apollo-service&taskNames=enrichment&costNames=apollo-credit&costSource=platform&since=2026-09-28 (billedCostInUsdCents / quantity = cents per credit). Served from a write-maintained rollup (migration 0049), O(groups). 503 until that rollup is built on the database. Service-auth only, no identity headers; no org, brand or person is named on the wire.",
+  security: [{ apiKey: [] }],
+  request: { query: TaskUnitsQuerySchema },
+  responses: {
+    200: { description: "Charged runs, orgs, units and cents", content: { "application/json": { schema: TaskUnitsResponseSchema } } },
+    400: { description: "Missing serviceName, or invalid taskNames, costNames, costNamePrefix, costSource, since or groupBy", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "The rollup is not built on this database yet", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});

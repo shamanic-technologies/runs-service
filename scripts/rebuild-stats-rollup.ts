@@ -11,6 +11,8 @@
 //   org_hour         (migration 0042) — GET /v1/stats/costs/timeseries.
 //   org_task         (migration 0043) — GET /v1/stats/costs grouped by
 //                                       serviceName/taskName/campaignId (org usage).
+//   task_units       (migration 0049) — GET /internal/stats/costs/task-units
+//                                       (fleet charged runs/orgs/units per task).
 //   campaign_entry   (migration 0040) — run_campaign_entries, for
 //                                       GET /v1/stats/run-outcomes (scope=entry).
 //                                       A lock-free windowed backfill, not the
@@ -19,7 +21,7 @@
 // Run manually AFTER the deploy that ships the migration (never on boot: it
 // aggregates the whole ledger). Safe to re-run at any time.
 //
-//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|campaign_entry]
+//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|task_units|campaign_entry]
 //
 // Writes QUEUE (never fail) for well under a second while it clears the rollup
 // and exports a snapshot under a SHARE ROW EXCLUSIVE lock; the aggregate then
@@ -31,6 +33,7 @@ import { rebuildCampaignDayRollup } from "../src/services/stats-rollup-campaign.
 import { rebuildCostDayRollup } from "../src/services/stats-rollup-cost-day.js";
 import { rebuildOrgHourRollup } from "../src/services/stats-rollup-org-hour.js";
 import { rebuildOrgTaskRollup } from "../src/services/stats-rollup-org-task.js";
+import { rebuildTaskUnitsRollup } from "../src/services/stats-rollup-task-units.js";
 import { backfillRunCampaignEntries } from "../src/services/run-campaign-entries.js";
 
 const url = process.env.RUNS_SERVICE_DATABASE_URL;
@@ -45,8 +48,8 @@ if (which === "campaign_entry") {
   process.exit(0);
 }
 
-const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup }[which];
-if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task or campaign_entry.`);
+const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup, task_units: rebuildTaskUnitsRollup }[which];
+if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task, task_units or campaign_entry.`);
 
 const t0 = Date.now();
 const result = await rebuild(url);
