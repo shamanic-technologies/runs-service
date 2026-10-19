@@ -1,7 +1,7 @@
 import { sql as defaultSql } from "../db/index.js";
 
 /**
- * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052).
+ * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052, 0053).
  *
  * A removed run (a delete, or a key move: transfer-brand, feature-slug correction, a
  * workflow re-tag) cannot shrink a group's min/max without a scan, so its trigger marks
@@ -83,6 +83,19 @@ const SPECS: RollupSpec[] = [
     memberMatch: {
       audience_id: `(EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id AND COALESCE(rc.audience_id, r.audience_id) IS NOT DISTINCT FROM {k})
         OR (r.audience_id IS NOT DISTINCT FROM {k} AND NOT EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id)))`,
+    },
+  },
+  {
+    table: "stats_rollup_cost_name_day",
+    keys: ["campaign_id", "organization_id", "brand_ids", "feature_slug", "workflow_slug", "cost_name"],
+    bucket: {
+      column: "day",
+      lower: `({b}::timestamp AT TIME ZONE 'UTC')`,
+      upper: `(({b} + 1)::timestamp AT TIME ZONE 'UTC')`,
+    },
+    // A run is in the cost-name group when one of its cost rows carries that name.
+    memberMatch: {
+      cost_name: `EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id AND rc.cost_name = {k})`,
     },
   },
 ];
