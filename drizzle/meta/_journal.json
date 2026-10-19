@@ -372,6 +372,13 @@
       "when": 1782691200000,
       "tag": "0052_stats_rollup_audience_day",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1782777600000,
+      "tag": "0053_stats_rollup_cost_name_day",
+      "breakpoints": true
     }
   ]
 }

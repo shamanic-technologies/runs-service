@@ -37,6 +37,8 @@ import {
   AUDIENCE_DAY_ROLLUP_NAME,
   AUDIENCE_ROLLUP_GROUP_BY,
   BRAND_ROLLUP_GROUP_BY,
+  COST_NAME_DAY_ROLLUP_NAME,
+  COST_NAME_ROLLUP_GROUP_BY,
   readBrandRollupGroups,
 } from "../services/stats-rollup-brand.js";
 import { ORG_TASK_GROUP_BY, ORG_TASK_ROLLUP_NAME, readOrgTaskGroups } from "../services/stats-rollup-org-task.js";
@@ -499,6 +501,21 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       !serviceName && !taskName &&
       (await isStatsRollupReady(AUDIENCE_DAY_ROLLUP_NAME));
 
+    // Rollup path (migration 0053): features-service's brand spend breakdown
+    // (groupBy=costName or costName,campaignId, org + brand + the offer's feature
+    // slugs, lifetime and startedAfter=<UTC midnight>). Live it INNER JOINed the
+    // brand's whole history to the ledger (Doc Dinners: 15.8 s quiet, past the
+    // 30 s statement timeout under load). Served when costName is grouped on and
+    // every other key and filter is one the (campaign, UTC day, …, cost name)
+    // rollup carries — same rows, same text, totalQuantity included.
+    const costNameRollupServes =
+      hasCostName &&
+      uniqueSqlGroupByKeys.every((k) => !!COST_NAME_ROLLUP_GROUP_BY[k]) &&
+      !goal && !brandProfileId && !audienceId && !workflowContext &&
+      (!attributionStatus || attributionStatus === "all") &&
+      !serviceName && !taskName &&
+      (await isStatsRollupReady(COST_NAME_DAY_ROLLUP_NAME));
+
     const rollupFilters = {
       orgId: req.orgId,
       brandId,
@@ -514,7 +531,18 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = audienceRollupServes
+    const result = costNameRollupServes
+      ? await readBrandRollupGroups({
+          rollup: "costName",
+          dims: uniqueSqlGroupByKeys.map((k) => COST_NAME_ROLLUP_GROUP_BY[k]),
+          outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
+          filters: rollupFilters,
+          startedAfter,
+          startedBefore,
+          minMax: true,
+          orderBy: "total_cost DESC",
+        })
+      : audienceRollupServes
       ? await readBrandRollupGroups({
           rollup: "audience",
           dims: uniqueSqlGroupByKeys.map((k) => AUDIENCE_ROLLUP_GROUP_BY[k]),

@@ -31,7 +31,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/task-outcomes.ts` — `GET /internal/stats/task-outcomes` (fleet-wide per-task outcome, duration, whole-subtree cost of ONE service; route in `run-outcomes.ts`). See "Task outcomes".
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
-- `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041). See "Brand-history cost reads".
+- `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/middleware/auth.ts` — API key authentication middleware
@@ -146,7 +146,7 @@ row lands. So it is maintained at WRITE time.
   `attributionStatus`, `costName`) can put one run in several groups, so
   `audienceId,workflowSlug` keeps the joined query (JIT-off only). The run-side
   brand-scoped reads are now O(groups) from the campaign-day rollup (migration
-  0041, "Brand-history cost reads"); the audience reads from their own rollup (0052).
+  0041, "Brand-history cost reads"); the audience reads from their own rollup (0052), the cost-name ones from 0053.
 ## Org actualized total — maintained on write, read in O(1) (migration 0035)
 
 billing-service reads an org's ACTUALIZED platform charges (net of the usage
@@ -357,6 +357,26 @@ f4d73dab (314k runs, 40 MB external sort), ~345 statement-timeout 500s in 30 h (
   LEFT JOIN). The min/max repair pass covers the table (membership-aware recount).
 - **Readiness** stamp `audience_day`; run `scripts/rebuild-stats-rollup.ts audience_day` after the deploy.
   TRUNCATE in global-setup. Parity guard: `tests/integration/stats-rollup-audience.test.ts`.
+
+## Brand spend by cost name — (campaign, UTC day, …, cost name) rollup (migration 0053)
+
+features-service's brand revenue body (`spend-client.ts`) reads `GET /v1/stats/costs?groupBy=costName` (or
+`costName,campaignId` for a family), org + brand + the offer's feature slugs, lifetime AND `startedAfter=<UTC midnight>`.
+Live it INNER JOINed the brand's history to the ledger: Doc Dinners (brand 75d7e3e8, 412k runs) = seq scan of all
+2.18M cost rows + 30 MB sort, 15.8 s quiet, past the 30 s statement timeout under load, every attempt 500 (2026-10-19).
+
+- **One table** `stats_rollup_cost_name_day`: the 0041 key + `cost_name`, run count + min/max/stale AND money per
+  status + `quantity` (Σ over every status = the live `totalQuantity`). A run counts once per distinct cost name of
+  its rows, never without a row (INNER JOIN). Run count = 0049's rule (upsert the key row first, check OTHER rows of
+  the run with that name in a later statement); a status/amount/quantity change never touches membership, so the
+  provisioned -> actual write never marks a group stale.
+- **Served** (`readBrandRollupGroups(rollup: "costName")`): costName in groupBy, other keys ⊆ {workflowSlug,
+  campaignId, featureSlug} (+ dynasty), filters ⊆ 0041's (brand, campaign(s), feature(s), workflow(s), bounds); no
+  goal/brandProfile/audience/workflowContext/attribution/service/task. Bounds and stale days follow 0041. The min/max
+  repair pass covers the table.
+- **Readiness** stamp `cost_name_day`; run `scripts/rebuild-stats-rollup.ts cost_name_day` after the deploy (prod:
+  inside the container against `dist/`). TRUNCATE in global-setup. Parity guard (red if the "other row" check is
+  dropped): `tests/integration/stats-rollup-cost-name.test.ts`.
 
 ## Org usage read — (org, service, task, campaign, UTC day) rollup (migration 0043)
 

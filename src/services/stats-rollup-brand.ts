@@ -37,6 +37,13 @@
 // counts once per distinct audience of its cost rows; live days count DISTINCT
 // runs over the LEFT JOIN like the live query. Parity guard:
 // tests/integration/stats-rollup-audience.test.ts.
+//
+// COST NAME (migration 0053, `rollup: "costName"`). Same reads with costName
+// grouped on, from one (… , cost name) table carrying run count, min/max and
+// money: features-service's brand spend breakdown. A run counts once per distinct
+// cost name of its cost rows and not at all without one (the live INNER JOIN);
+// `quantity` adds the live totalQuantity. Parity guard:
+// tests/integration/stats-rollup-cost-name.test.ts.
 
 import { sql, type SQL } from "drizzle-orm";
 import type postgres from "postgres";
@@ -80,9 +87,23 @@ export const AUDIENCE_ROLLUP_GROUP_BY: Record<string, BrandRollupDim> = {
   audienceId: { rollup: "audience_id", live: "COALESCE(rc.audience_id, r.audience_id)" },
 };
 
+export const COST_NAME_DAY_ROLLUP_NAME = "cost_name_day";
+
+/**
+ * Org-scoped GET /v1/stats/costs groupBy keys the COST NAME rollup (migration 0053)
+ * serves; `costName` must be one of them. A cost-row dimension: one run sits in one
+ * group per distinct cost name of its rows, none without a row (the live INNER JOIN).
+ */
+export const COST_NAME_ROLLUP_GROUP_BY: Record<string, BrandRollupDim> = {
+  ...BRAND_ROLLUP_GROUP_BY,
+  costName: { rollup: "cost_name", live: "rc.cost_name" },
+};
+
+// The cost-name rollup is ONE table: each row carries the run count + min/max AND the money.
 const ROLLUP_TABLES = {
   campaign: { runs: "stats_rollup_campaign_runs", costs: "stats_rollup_campaign_costs" },
   audience: { runs: "stats_rollup_audience_runs", costs: "stats_rollup_audience_costs" },
+  costName: { runs: "stats_rollup_cost_name_day", costs: "stats_rollup_cost_name_day" },
 } as const;
 
 function inList(col: string, values: string[]): SQL {
@@ -125,13 +146,17 @@ export async function readBrandRollupGroups(opts: {
   costSource?: string;
   minMax: boolean;
   orderBy: string;
-  /** "audience" = the 0052 tables, with the audience dimension (default "campaign"). */
+  /**
+   * "audience" = the 0052 tables, with the audience dimension; "costName" = the 0053
+   * table, with the cost name dimension and `total_quantity` (default "campaign").
+   */
   rollup?: keyof typeof ROLLUP_TABLES;
 }): Promise<any[]> {
   const { dims, filters, startedAfter: sa, startedBefore: sb } = opts;
   const audience = opts.rollup === "audience";
+  const costName = opts.rollup === "costName";
   const tables = ROLLUP_TABLES[opts.rollup ?? "campaign"];
-  if (audience && opts.costSource) throw new Error("the audience rollup carries no cost_source");
+  if ((audience || costName) && opts.costSource) throw new Error(`the ${opts.rollup} rollup carries no cost_source`);
   const dayA = sa ? sql`(${sa}::timestamptz AT TIME ZONE 'UTC')::date` : null;
   const dayB = sb ? sql`(${sb}::timestamptz AT TIME ZONE 'UTC')::date` : null;
 
@@ -197,9 +222,16 @@ export async function readBrandRollupGroups(opts: {
   const minMaxLive = opts.minMax ? sql`, MIN(x.started_at) AS mn, MAX(x.started_at) AS mx` : sql``;
   // Live run count: a run sits in one campaign-rollup group, but in one audience
   // group per distinct effective audience of its cost rows (the live query's
-  // LEFT JOIN + COUNT(DISTINCT r.id)).
-  const liveCount = audience ? sql`COUNT(DISTINCT x.run_id)` : sql`COUNT(*)`;
-  const liveCountJoin = audience ? sql`LEFT JOIN runs_costs rc ON rc.run_id = r.id` : sql``;
+  // LEFT JOIN + COUNT(DISTINCT r.id)); in one cost-name group per distinct cost
+  // name of its rows, none without a row (INNER JOIN).
+  const liveCount = audience || costName ? sql`COUNT(DISTINCT x.run_id)` : sql`COUNT(*)`;
+  const liveCountJoin = audience
+    ? sql`LEFT JOIN runs_costs rc ON rc.run_id = r.id`
+    : costName ? sql`INNER JOIN runs_costs rc ON rc.run_id = r.id` : sql``;
+  const quantityRolled = costName ? sql`, SUM(quantity) AS quantity` : sql``;
+  const quantityLive = costName ? sql`, COALESCE(SUM(x.quantity), 0) AS quantity` : sql``;
+  const quantitySum = costName ? sql`, SUM(quantity) AS total_quantity` : sql``;
+  const quantityOut = costName ? sql`, COALESCE(s.total_quantity, 0) AS total_quantity` : sql``;
   const minMaxCounts = opts.minMax ? sql`, MIN(mn) AS min_started_at, MAX(mx) AS max_started_at` : sql``;
   const minMaxOut = opts.minMax ? sql`, c.min_started_at, c.max_started_at` : sql``;
 
@@ -235,6 +267,7 @@ export async function readBrandRollupGroups(opts: {
         SUM(gross_actual) AS gross_actual, SUM(gross_provisioned) AS gross_provisioned,
         SUM(gross_cancelled) AS gross_cancelled, SUM(gross_refunded) AS gross_refunded,
         SUM(net_actual) AS net_actual, SUM(net_provisioned) AS net_provisioned, SUM(net_refunded) AS net_refunded
+        ${quantityRolled}
       FROM ${sql.raw(tables.costs)}
       WHERE ${rollupRows} ${costSourceRollup}
       GROUP BY ${groupRefs}
@@ -247,9 +280,10 @@ export async function readBrandRollupGroups(opts: {
         ${statusSum("gross", "cancelled")} AS gross_cancelled, ${statusSum("gross", "refunded")} AS gross_refunded,
         ${statusSum("net", "actual")} AS net_actual, ${statusSum("net", "provisioned")} AS net_provisioned,
         ${statusSum("net", "refunded")} AS net_refunded
+        ${quantityLive}
       ${liveRuns(
         sql`${liveDims}, rc.status, rc.total_cost_in_usd_cents AS gross,
-          COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net`,
+          COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents) AS net, rc.quantity::numeric AS quantity`,
         sql`INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceLive}`,
       )}
       GROUP BY ${groupRefs}
@@ -265,6 +299,7 @@ export async function readBrandRollupGroups(opts: {
         ${sql.raw(money("n_actual", "net_actual"))} AS net_actual_cost,
         ${sql.raw(money("n_provisioned", "net_provisioned"))} AS net_provisioned_cost,
         ${sql.raw(money("n_refunded", "net_refunded"))} AS net_refunded_cost
+        ${quantitySum}
       FROM (SELECT * FROM rolled_sums UNION ALL SELECT * FROM live_sums) u
       GROUP BY ${groupRefs}
       HAVING SUM(n_actual + n_provisioned + n_cancelled + n_refunded) > 0
@@ -279,7 +314,7 @@ export async function readBrandRollupGroups(opts: {
       COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
       COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
       COALESCE(s.net_refunded_cost, '0')     AS net_refunded_cost,
-      c.run_count ${minMaxOut}
+      c.run_count ${minMaxOut} ${quantityOut}
     FROM counts c
     LEFT JOIN sums s ON ${joinOn}
     ORDER BY ${sql.raw(opts.orderBy)}
@@ -371,6 +406,77 @@ export async function rebuildAudienceDayRollup(url: string): Promise<{ runGroups
       `);
       await tx`DROP TABLE rebuild_audience_runs, rebuild_audience_costs`;
       return { runGroups: runGroups.count, costGroups: costGroups.count };
+    },
+  });
+}
+
+const COST_NAME_KEY = "campaign_id, day, organization_id, brand_ids, feature_slug, workflow_slug, cost_name";
+
+/**
+ * Rebuild the cost_name_day rollup (migration 0053) from the ledger and stamp it
+ * ready (see rebuildRollup for the lock / snapshot protocol). A run counts once
+ * per distinct cost name of its cost rows, with exact min/max. A group a trigger
+ * marked stale meanwhile stays stale.
+ */
+export async function rebuildCostNameDayRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
+  return rebuildRollup(url, {
+    name: COST_NAME_DAY_ROLLUP_NAME,
+    tables: [ROLLUP_TABLES.costName.runs],
+    aggregate: async (b: postgres.Sql) => {
+      await b`
+        CREATE TEMP TABLE rebuild_cost_name_day ON COMMIT PRESERVE ROWS AS
+        SELECT r.campaign_id, (r.started_at AT TIME ZONE 'UTC')::date AS day, r.organization_id, r.brand_ids,
+          r.feature_slug, r.workflow_slug, rc.cost_name,
+          count(DISTINCT r.id) AS run_count, min(r.started_at) AS min_started_at, max(r.started_at) AS max_started_at,
+          count(*) FILTER (WHERE rc.status = 'actual')      AS n_actual,
+          count(*) FILTER (WHERE rc.status = 'provisioned') AS n_provisioned,
+          count(*) FILTER (WHERE rc.status = 'cancelled')   AS n_cancelled,
+          count(*) FILTER (WHERE rc.status = 'refunded')    AS n_refunded,
+          COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'actual'), 0)      AS gross_actual,
+          COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'provisioned'), 0) AS gross_provisioned,
+          COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'cancelled'), 0)   AS gross_cancelled,
+          COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.status = 'refunded'), 0)    AS gross_refunded,
+          COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'actual'), 0)      AS net_actual,
+          COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'provisioned'), 0) AS net_provisioned,
+          COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.status = 'refunded'), 0)    AS net_refunded,
+          SUM(rc.quantity) AS quantity
+        FROM runs_costs rc
+        JOIN runs r ON r.id = rc.run_id
+        GROUP BY 1, 2, 3, 4, 5, 6, 7
+      `;
+    },
+    merge: async (tx: postgres.Sql) => {
+      const groups = await tx.unsafe(`
+        INSERT INTO stats_rollup_cost_name_day (
+          ${COST_NAME_KEY}, run_count, min_started_at, max_started_at, minmax_stale,
+          n_actual, n_provisioned, n_cancelled, n_refunded,
+          gross_actual, gross_provisioned, gross_cancelled, gross_refunded,
+          net_actual, net_provisioned, net_refunded, quantity
+        )
+        SELECT ${COST_NAME_KEY}, run_count, min_started_at, max_started_at, false,
+          n_actual, n_provisioned, n_cancelled, n_refunded,
+          gross_actual, gross_provisioned, gross_cancelled, gross_refunded,
+          net_actual, net_provisioned, net_refunded, quantity
+        FROM rebuild_cost_name_day
+        ON CONFLICT ON CONSTRAINT stats_rollup_cost_name_day_key DO UPDATE SET
+          run_count         = stats_rollup_cost_name_day.run_count         + EXCLUDED.run_count,
+          min_started_at    = LEAST(stats_rollup_cost_name_day.min_started_at, EXCLUDED.min_started_at),
+          max_started_at    = GREATEST(stats_rollup_cost_name_day.max_started_at, EXCLUDED.max_started_at),
+          n_actual          = stats_rollup_cost_name_day.n_actual          + EXCLUDED.n_actual,
+          n_provisioned     = stats_rollup_cost_name_day.n_provisioned     + EXCLUDED.n_provisioned,
+          n_cancelled       = stats_rollup_cost_name_day.n_cancelled       + EXCLUDED.n_cancelled,
+          n_refunded        = stats_rollup_cost_name_day.n_refunded        + EXCLUDED.n_refunded,
+          gross_actual      = stats_rollup_cost_name_day.gross_actual      + EXCLUDED.gross_actual,
+          gross_provisioned = stats_rollup_cost_name_day.gross_provisioned + EXCLUDED.gross_provisioned,
+          gross_cancelled   = stats_rollup_cost_name_day.gross_cancelled   + EXCLUDED.gross_cancelled,
+          gross_refunded    = stats_rollup_cost_name_day.gross_refunded    + EXCLUDED.gross_refunded,
+          net_actual        = stats_rollup_cost_name_day.net_actual        + EXCLUDED.net_actual,
+          net_provisioned   = stats_rollup_cost_name_day.net_provisioned   + EXCLUDED.net_provisioned,
+          net_refunded      = stats_rollup_cost_name_day.net_refunded      + EXCLUDED.net_refunded,
+          quantity          = stats_rollup_cost_name_day.quantity          + EXCLUDED.quantity
+      `);
+      await tx`DROP TABLE rebuild_cost_name_day`;
+      return { runGroups: groups.count, costGroups: groups.count };
     },
   });
 }
