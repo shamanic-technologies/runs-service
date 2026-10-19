@@ -1897,7 +1897,7 @@ export const StatsCostsTimeseriesQuerySchema = z
   .object({
     interval: z.enum(["day", "week", "month"]).optional().openapi({ description: "Bucket granularity: DATE_TRUNC(interval, started_at AT TIME ZONE tz). Default day." }),
     tz: z.string().optional().openapi({ description: "IANA timezone the buckets are aligned to (e.g. Europe/Paris), so a day bucket is the caller's local day. Default UTC. An unknown name is a 400.", example: "Europe/Paris" }),
-    groupBy: z.enum(["campaignId"]).optional().openapi({ description: "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period." }),
+    groupBy: z.string().optional().openapi({ description: "Comma-separated, any of campaignId, serviceName, taskName (each at most once). campaignId splits every bucket per campaign; serviceName/taskName split it per task of the run (spend by ACTION) and add committedRunCount. One bucket per (period, keys...), ordered by period then the keys in this order: campaignId, serviceName, taskName. Summed over the split, a period's money fields and runCount equal the unsplit bucket. Omit for one bucket per period.", example: "serviceName,taskName" }),
     brandId: z.string().optional().openapi({ description: "Runs where this brand is in brandIds." }),
     campaignId: z.string().optional(),
     campaignIds: z.string().optional().openapi({ description: "Comma-separated campaign ids (at most 500): a campaign FAMILY in one request. ANDs with campaignId. Blank/duplicate ids dropped; empty or more than 500 is a 400." }),
@@ -1919,6 +1919,8 @@ export const StatsCostsTimeseriesResponseSchema = z
       z.object({
         period: z.string().openapi({ description: "Bucket start date YYYY-MM-DD, local to `timezone`. Buckets with no run are absent.", example: "2026-10-06" }),
         campaignId: z.string().nullable().optional().openapi({ description: "Present only with groupBy=campaignId (null for runs with no campaign)." }),
+        serviceName: z.string().optional().openapi({ description: "Present only when groupBy includes serviceName: the service the runs belong to." }),
+        taskName: z.string().optional().openapi({ description: "Present only when groupBy includes taskName: the task the runs ran.", example: "email-send-step-2" }),
         totalCostInUsdCents: z.string().openapi({ description: "Same field, same definition as GET /v1/stats/costs: cost rows of the bucket's runs, status IN ('actual','provisioned'). 10-decimal string." }),
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
@@ -1931,6 +1933,7 @@ export const StatsCostsTimeseriesResponseSchema = z
         runCount: z.number().openapi({ description: "Runs started in the bucket (each run lands in exactly one bucket)." }),
         minStartedAt: z.string().nullable(),
         maxStartedAt: z.string().nullable().openapi({ description: "Latest started_at in the bucket (ISO-8601)." }),
+        committedRunCount: z.number().optional().openapi({ description: "Present only when groupBy includes serviceName or taskName: runs of the bucket carrying at least one actual or provisioned cost row (the ACTIONS that cost something). A run whose cost rows are all cancelled, or with no cost row, is not counted (it still is in runCount)." }),
       })
     ),
   })
@@ -1941,7 +1944,7 @@ registry.registerPath({
   path: "/v1/stats/costs/timeseries",
   summary: "Org-scoped run counts and spend per dated bucket",
   description:
-    "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign (groupBy=campaignId). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
+    "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign and/or per task (groupBy=campaignId,serviceName,taskName; the task split adds committedRunCount). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
   security: [{ apiKey: [] }],
   request: { query: StatsCostsTimeseriesQuerySchema },
   responses: {
