@@ -176,7 +176,7 @@ row lands. So it is maintained at WRITE time.
   `attributionStatus`, `costName`) can put one run in several groups, so
   `audienceId,workflowSlug` keeps the joined query (JIT-off only). The run-side
   brand-scoped reads are now O(groups) from the campaign-day rollup (migration
-  0041, "Brand-history cost reads"); the audience reads are not (cost-row dimension).
+  0041, "Brand-history cost reads"); the audience reads from their own rollup (0052).
 ## Org actualized total — maintained on write, read in O(1) (migration 0035)
 
 billing-service reads an org's ACTUALIZED platform charges (net of the usage
@@ -360,8 +360,33 @@ tables, extended rather than duplicated (same grain).
 - **Parity guard**: `tests/integration/stats-rollup-brand.test.ts` (rollup vs live,
   raw bodies, through inserts, transitions, deletes, key moves, racing rebuilds;
   red if the boundary-day or stale-day logic is disabled).
-- **Not served**: `audienceId` groupings (cost-row dimension, a run can sit in
-  several audience groups). Next candidate if they dominate again.
+- **Audience groupings**: their own twin tables, see "Per-audience cost reads" (0052).
+
+## Per-audience cost reads — (campaign, UTC day, …, audience) rollup (migration 0052)
+
+features-service's per-audience x workflow spend (`GET /v1/stats/costs?groupBy=audienceId,workflowSlug`,
+org + brand + campaign family + 7 feature slugs, often `startedBefore`) LEFT JOINed the brand's whole
+history to the ledger and sorted every joined row for `COUNT(DISTINCT r.id)`: 21-29 s for brand
+f4d73dab (314k runs, 40 MB external sort), ~345 statement-timeout 500s in 30 h (2026-10-19).
+
+- **Tables** `stats_rollup_audience_runs` / `_costs`: the 0041 key + `audience_id` = the EFFECTIVE
+  audience `COALESCE(rc.audience_id, r.audience_id)`. A run sits in one group per distinct effective
+  audience of its cost rows (its own audience when it has none) — a separate table because adding
+  the audience to the campaign-day grain would double-count such runs in every other read.
+- **Membership triggers**: a cost write recomputes the run's audience set before (rows now − NEW + OLD)
+  and after, and applies the difference. A per-run `pg_advisory_xact_lock(52052, hashtext(run_id))` is
+  taken FIRST and the set read in a later statement (0035's lock-then-read): without it, two first cost
+  rows of one run each removed the run from its own audience (the concurrency test is red without it).
+  A multi-row statement writing several cost rows of ONE run with different audiences is not exact
+  (same accepted edge as 0049); no writer does that. Prod: every cost row's audience equals its run's
+  (2.17M / 2.17M, 2026-10-19), so membership never actually moves.
+- **Served** (`readBrandRollupGroups(rollup: "audience")`): audienceId in groupBy, the other keys ⊆
+  {workflowSlug, campaignId, featureSlug} (+ dynasty regroup), filters ⊆ 0041's (brand, campaign(s),
+  feature(s), workflow(s), bounds) — no goal/brandProfile/audience/workflowContext/attribution/service/
+  task filter, no costName. Bounds and stale days follow 0041 (live days count DISTINCT runs over the
+  LEFT JOIN). The min/max repair pass covers the table (membership-aware recount).
+- **Readiness** stamp `audience_day`; run `scripts/rebuild-stats-rollup.ts audience_day` after the deploy.
+  TRUNCATE in global-setup. Parity guard: `tests/integration/stats-rollup-audience.test.ts`.
 
 ## Org usage read — (org, service, task, campaign, UTC day) rollup (migration 0043)
 
