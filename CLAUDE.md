@@ -308,7 +308,11 @@ time, same pattern and same byte-identity rules as 0034.
 - **Served shape (public costs)**: a campaign filter (`campaignId` and/or
   `campaignIds`) and otherwise only orgId / brandId / featureSlug(s) /
   workflowDynastySlug / costSource; groupBy ∈ {campaignId, workflowSlug,
-  workflowDynastySlug, featureSlug}. A taskName keeps the live query. The
+  workflowDynastySlug, featureSlug}. **`groupBy=brandId` is served with or without a
+  campaign filter** (counts under each DISTINCT brand of the row's array, money under
+  each element, as the live `unnest`): the homepage ranked-by-brand read was 48 s live
+  over the cold-email feature (2026-10-19, statement timeouts), 0.13 s from here,
+  byte-equal in one snapshot. A taskName keeps the live query. The
   timeseries and org-scoped `GET /v1/stats/costs` reads: see "Brand-history cost reads".
 - **Readiness** stamp `campaign_day` in `stats_rollups`; on an existing database run
   `scripts/rebuild-stats-rollup.ts campaign_day` after the deploy (in prod: inside
