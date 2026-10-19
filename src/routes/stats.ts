@@ -33,7 +33,12 @@ import {
 } from "../services/stats-rollup-campaign.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { ORG_HOUR_ROLLUP_NAME, readOrgHourTimeseries } from "../services/stats-rollup-org-hour.js";
-import { BRAND_ROLLUP_GROUP_BY, readBrandRollupGroups } from "../services/stats-rollup-brand.js";
+import {
+  AUDIENCE_DAY_ROLLUP_NAME,
+  AUDIENCE_ROLLUP_GROUP_BY,
+  BRAND_ROLLUP_GROUP_BY,
+  readBrandRollupGroups,
+} from "../services/stats-rollup-brand.js";
 import { ORG_TASK_GROUP_BY, ORG_TASK_ROLLUP_NAME, readOrgTaskGroups } from "../services/stats-rollup-org-task.js";
 
 const router = Router();
@@ -479,9 +484,48 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       !featureSlug && !featureSlugsParam && !startedAfter && !startedBefore &&
       (await isStatsRollupReady(ORG_TASK_ROLLUP_NAME));
 
+    // Rollup path (migration 0052): features-service's per-audience spend
+    // (groupBy=audienceId,workflowSlug, org + brand + campaign family + feature
+    // slugs, optionally startedBefore). Live it joined the brand's whole history
+    // to the cost ledger, past the 30 s statement timeout for the busiest brand.
+    // Served when audienceId is grouped on and every other key and filter is one
+    // the (campaign, UTC day, …, audience) rollup carries — same rows, same text.
+    const audienceRollupServes =
+      !hasCostName && !orgTaskRollupServes && !brandRollupServes &&
+      uniqueSqlGroupByKeys.includes("audienceId") &&
+      uniqueSqlGroupByKeys.every((k) => !!AUDIENCE_ROLLUP_GROUP_BY[k]) &&
+      !goal && !brandProfileId && !audienceId && !workflowContext &&
+      (!attributionStatus || attributionStatus === "all") &&
+      !serviceName && !taskName &&
+      (await isStatsRollupReady(AUDIENCE_DAY_ROLLUP_NAME));
+
+    const rollupFilters = {
+      orgId: req.orgId,
+      brandId,
+      campaignId,
+      campaignIds: parsedCampaignIds.ids,
+      featureSlugs: dynastyFilters.featureSlugs && dynastyFilters.featureSlugs.length > 0
+        ? dynastyFilters.featureSlugs
+        : featureSlug ? [featureSlug] : undefined,
+      workflowSlugs: dynastyFilters.workflowSlugs && dynastyFilters.workflowSlugs.length > 0
+        ? dynastyFilters.workflowSlugs
+        : workflowSlug ? [workflowSlug] : undefined,
+    };
+
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = orgTaskRollupServes
+    const result = audienceRollupServes
+      ? await readBrandRollupGroups({
+          rollup: "audience",
+          dims: uniqueSqlGroupByKeys.map((k) => AUDIENCE_ROLLUP_GROUP_BY[k]),
+          outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
+          filters: rollupFilters,
+          startedAfter,
+          startedBefore,
+          minMax: true,
+          orderBy: "total_cost DESC",
+        })
+      : orgTaskRollupServes
       ? await readOrgTaskGroups({
           groupBy: uniqueSqlGroupByKeys,
           filters: {
@@ -496,18 +540,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       ? await readBrandRollupGroups({
           dims: uniqueSqlGroupByKeys.map((k) => BRAND_ROLLUP_GROUP_BY[k]),
           outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
-          filters: {
-            orgId: req.orgId,
-            brandId,
-            campaignId,
-            campaignIds: parsedCampaignIds.ids,
-            featureSlugs: dynastyFilters.featureSlugs && dynastyFilters.featureSlugs.length > 0
-              ? dynastyFilters.featureSlugs
-              : featureSlug ? [featureSlug] : undefined,
-            workflowSlugs: dynastyFilters.workflowSlugs && dynastyFilters.workflowSlugs.length > 0
-              ? dynastyFilters.workflowSlugs
-              : workflowSlug ? [workflowSlug] : undefined,
-          },
+          filters: rollupFilters,
           startedAfter,
           startedBefore,
           minMax: true,
