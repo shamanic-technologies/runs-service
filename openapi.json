@@ -2650,6 +2650,15 @@
                   "nullable": true,
                   "description": "Present only with groupBy=campaignId (null for runs with no campaign)."
                 },
+                "serviceName": {
+                  "type": "string",
+                  "description": "Present only when groupBy includes serviceName: the service the runs belong to."
+                },
+                "taskName": {
+                  "type": "string",
+                  "description": "Present only when groupBy includes taskName: the task the runs ran.",
+                  "example": "email-send-step-2"
+                },
                 "totalCostInUsdCents": {
                   "type": "string",
                   "description": "Same field, same definition as GET /v1/stats/costs: cost rows of the bucket's runs, status IN ('actual','provisioned'). 10-decimal string."
@@ -2690,6 +2699,10 @@
                   "type": "string",
                   "nullable": true,
                   "description": "Latest started_at in the bucket (ISO-8601)."
+                },
+                "committedRunCount": {
+                  "type": "number",
+                  "description": "Present only when groupBy includes serviceName or taskName: runs of the bucket carrying at least one actual or provisioned cost row (the ACTIONS that cost something). A run whose cost rows are all cancelled, or with no cost row, is not counted (it still is in runCount)."
                 }
               },
               "required": [
@@ -6430,7 +6443,7 @@
     "/v1/stats/costs/timeseries": {
       "get": {
         "summary": "Org-scoped run counts and spend per dated bucket",
-        "description": "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign (groupBy=campaignId). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
+        "description": "The org's runs (x-org-id) split into dated buckets by started_at in the caller's timezone (interval=day|week|month, tz), optionally per campaign and/or per task (groupBy=campaignId,serviceName,taskName; the task split adds committedRunCount). One read for a week of daily figures instead of one GET /v1/stats/costs call per day: a bucket's figures equal GET /v1/stats/costs?groupBy=campaignId with startedAfter/startedBefore at that bucket's local bounds. Run-side filters only. Same money fields as GET /v1/stats/costs.",
         "security": [
           {
             "apiKey": []
@@ -6466,13 +6479,11 @@
           {
             "schema": {
               "type": "string",
-              "enum": [
-                "campaignId"
-              ],
-              "description": "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period."
+              "description": "Comma-separated, any of campaignId, serviceName, taskName (each at most once). campaignId splits every bucket per campaign; serviceName/taskName split it per task of the run (spend by ACTION) and add committedRunCount. One bucket per (period, keys...), ordered by period then the keys in this order: campaignId, serviceName, taskName. Summed over the split, a period's money fields and runCount equal the unsplit bucket. Omit for one bucket per period.",
+              "example": "serviceName,taskName"
             },
             "required": false,
-            "description": "Split every bucket per campaign: one bucket per (period, campaignId), ordered by period then campaignId. Omit for one bucket per period.",
+            "description": "Comma-separated, any of campaignId, serviceName, taskName (each at most once). campaignId splits every bucket per campaign; serviceName/taskName split it per task of the run (spend by ACTION) and add committedRunCount. One bucket per (period, keys...), ordered by period then the keys in this order: campaignId, serviceName, taskName. Summed over the split, a period's money fields and runCount equal the unsplit bucket. Omit for one bucket per period.",
             "name": "groupBy",
             "in": "query"
           },
