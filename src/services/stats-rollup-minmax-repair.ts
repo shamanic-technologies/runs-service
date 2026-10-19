@@ -1,7 +1,7 @@
 import { sql as defaultSql } from "../db/index.js";
 
 /**
- * Repair of STALE min/max in the three run-grain rollups (migrations 0041, 0042, 0043).
+ * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052).
  *
  * A removed run (a delete, or a key move: transfer-brand, feature-slug correction, a
  * workflow re-tag) cannot shrink a group's min/max without a scan, so its trigger marks
@@ -39,6 +39,11 @@ interface RollupSpec {
   keys: string[];
   /** The bucket column and its bounds as SQL over `{b}` (the bucket value). */
   bucket: { column: "day" | "hour"; lower: string; upper: string };
+  /**
+   * Keys that are NOT a plain `runs` column: run membership as SQL over `{k}` (the key
+   * value). The audience (0052) is the cost rows' effective audience.
+   */
+  memberMatch?: Record<string, string>;
 }
 
 const SPECS: RollupSpec[] = [
@@ -64,6 +69,21 @@ const SPECS: RollupSpec[] = [
     table: "stats_rollup_org_hour",
     keys: ["organization_id", "brand_ids", "campaign_id"],
     bucket: { column: "hour", lower: `{b}`, upper: `({b} + interval '1 hour')` },
+  },
+  {
+    table: "stats_rollup_audience_runs",
+    keys: ["campaign_id", "organization_id", "brand_ids", "feature_slug", "workflow_slug", "audience_id"],
+    bucket: {
+      column: "day",
+      lower: `({b}::timestamp AT TIME ZONE 'UTC')`,
+      upper: `(({b} + 1)::timestamp AT TIME ZONE 'UTC')`,
+    },
+    // A run is in the audience group when one of its cost rows carries that
+    // effective audience, or when it has no cost row and is itself of it.
+    memberMatch: {
+      audience_id: `(EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id AND COALESCE(rc.audience_id, r.audience_id) IS NOT DISTINCT FROM {k})
+        OR (r.audience_id IS NOT DISTINCT FROM {k} AND NOT EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id)))`,
+    },
   },
 ];
 
@@ -105,7 +125,9 @@ async function repairTable(sql: Sql, spec: RollupSpec, limit: number): Promise<M
     const b = param(spec.bucket.column, cols.length - 1);
     const lower = spec.bucket.lower.replaceAll("{b}", b);
     const upper = spec.bucket.upper.replaceAll("{b}", b);
-    const runMatch = spec.keys.map((c, i) => `r.${c} IS NOT DISTINCT FROM ${param(c, i)}`).join(" AND ");
+    const runMatch = spec.keys
+      .map((c, i) => spec.memberMatch?.[c]?.replaceAll("{k}", param(c, i)) ?? `r.${c} IS NOT DISTINCT FROM ${param(c, i)}`)
+      .join(" AND ");
     try {
       await sql.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL lock_timeout = '2s'`);
@@ -152,7 +174,7 @@ async function repairTable(sql: Sql, spec: RollupSpec, limit: number): Promise<M
   return result;
 }
 
-/** One repair pass over the three rollups. Throws on an unexpected database error. */
+/** One repair pass over the rollups. Throws on an unexpected database error. */
 export async function repairStaleMinMax(sql: Sql = defaultSql, limitPerTable = 200): Promise<MinMaxRepairResult[]> {
   const out: MinMaxRepairResult[] = [];
   for (const spec of SPECS) out.push(await repairTable(sql, spec, limitPerTable));
