@@ -1280,7 +1280,7 @@ function handlePublicCosts(req: any, res: any) {
       const campaignRollupServes =
         !rollupServes &&
         !!CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[actualGroupBy] &&
-        (!!campaignId || !!campaignIds) && !taskName &&
+        (!!campaignId || !!campaignIds || actualGroupBy === "brandId") && !taskName &&
         (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME));
 
       const filterSql = buildPublicFilterSql({ orgId, brandId, campaignId, campaignIds, featureSlug, featureSlugs, workflowSlugs, taskName });
