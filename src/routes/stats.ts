@@ -616,6 +616,10 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 // Empty buckets are absent. Money as in GET /v1/stats/costs (10-decimal strings,
 // gross + frozen net).
 const ORG_TIMESERIES_INTERVALS = new Set(["day", "week", "month"]);
+// groupBy=serviceName,taskName splits each bucket per task (spend by ACTION):
+// summed over tasks, a bucket's money and runCount equal the unsplit bucket.
+// Always the live query (the hour rollup carries no service/task).
+const ORG_TIMESERIES_GROUP_BY = new Set(["campaignId", "serviceName", "taskName"]);
 
 router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
   try {
@@ -647,11 +651,17 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
       res.status(400).json({ error: `Invalid tz value: ${timezone}` });
       return;
     }
-    if (groupBy !== undefined && groupBy !== "campaignId") {
-      res.status(400).json({ error: "Invalid groupBy value. Allowed: campaignId" });
+    const groupKeys = groupBy === undefined ? [] : groupBy.split(",").map((k) => k.trim());
+    if (groupKeys.some((k) => !ORG_TIMESERIES_GROUP_BY.has(k)) || new Set(groupKeys).size !== groupKeys.length) {
+      res.status(400).json({ error: `Invalid groupBy value. Allowed (comma-separated): ${Array.from(ORG_TIMESERIES_GROUP_BY).join(", ")}` });
       return;
     }
-    const byCampaign = groupBy === "campaignId";
+    const byCampaign = groupKeys.includes("campaignId");
+    const byService = groupKeys.includes("serviceName");
+    const byTask = groupKeys.includes("taskName");
+    // Per-task split: each bucket also counts the runs carrying committed cost
+    // (an action that cost something). Absent from every other shape.
+    const byAction = byService || byTask;
     for (const [name, value] of [["startedAfter", startedAfter], ["startedBefore", startedBefore]] as const) {
       if (value !== undefined && Number.isNaN(Date.parse(value))) {
         res.status(400).json({ error: `${name} must be an ISO 8601 date-time` });
@@ -679,17 +689,28 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
 
     // interval is whitelisted, tz validated; both are bound parameters.
     const period = sql`to_char(DATE_TRUNC(${interval}, r.started_at AT TIME ZONE ${timezone}), 'YYYY-MM-DD')`;
-    const dims = byCampaign ? sql`${period} AS period, r.campaign_id AS campaign_id` : sql`${period} AS period`;
-    const groupCols = byCampaign ? sql`1, 2` : sql`1`;
-    const joinOn = byCampaign
-      ? sql`s.period = c.period AND s.campaign_id IS NOT DISTINCT FROM c.campaign_id`
-      : sql`s.period = c.period`;
+    const dimCols = [
+      ...(byCampaign ? [{ expr: sql`r.campaign_id`, alias: "campaign_id" }] : []),
+      ...(byService ? [{ expr: sql`r.service_name`, alias: "service_name" }] : []),
+      ...(byTask ? [{ expr: sql`r.task_name`, alias: "task_name" }] : []),
+    ];
+    const dims = sql.join(
+      [sql`${period} AS period`, ...dimCols.map((d) => sql`${d.expr} AS ${sql.raw(d.alias)}`)],
+      sql`, `,
+    );
+    const groupCols = sql.raw(Array.from({ length: dimCols.length + 1 }, (_, i) => String(i + 1)).join(", "));
+    const joinOn = sql.join(
+      [sql`s.period = c.period`, ...dimCols.map((d) => sql.raw(`s.${d.alias} IS NOT DISTINCT FROM c.${d.alias}`))],
+      sql` AND `,
+    );
+    const outDims = sql.join(dimCols.map((d) => sql.raw(`c.${d.alias},`)), sql` `);
+    const orderBy = sql.raw(["c.period", ...dimCols.map((d) => `c.${d.alias}`)].join(", "));
 
     // Hour rollup (migration 0042): org + brand / campaign filters only, and a
     // timezone whose local hours start on UTC hours (readOrgHourTimeseries returns
     // null otherwise). Anything else keeps the live query below.
     const hourRollupServes =
-      !featureSlug && !featureSlugsParam && !workflowSlug && !serviceName && !taskName &&
+      !byAction && !featureSlug && !featureSlugsParam && !workflowSlug && !serviceName && !taskName &&
       (await isStatsRollupReady(ORG_HOUR_ROLLUP_NAME));
     const fromRollup = hourRollupServes
       ? await readOrgHourTimeseries({
@@ -718,13 +739,15 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
         SELECT ${dims},
           ${costAggregateSelectSql("rc")},
           ${costAggregateNetSelectSql("rc")}
+          ${byAction ? sql`, COUNT(DISTINCT r.id) FILTER (WHERE rc.status IN ('actual','provisioned')) AS committed_run_count` : sql``}
         FROM runs r
         INNER JOIN runs_costs rc ON rc.run_id = r.id
         WHERE ${whereSql}
         GROUP BY ${groupCols}
       )
       SELECT c.period,
-        ${byCampaign ? sql`c.campaign_id,` : sql``}
+        ${outDims}
+        ${byAction ? sql`COALESCE(s.committed_run_count, 0) AS committed_run_count,` : sql``}
         COALESCE(s.total_cost, '0')            AS total_cost,
         COALESCE(s.actual_cost, '0')           AS actual_cost,
         COALESCE(s.provisioned_cost, '0')      AS provisioned_cost,
@@ -739,12 +762,14 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
         c.max_started_at
       FROM counts c
       LEFT JOIN sums s ON ${joinOn}
-      ORDER BY c.period${byCampaign ? sql`, c.campaign_id` : sql``}
+      ORDER BY ${orderBy}
     `)) as any[]);
 
     const buckets = rows.map((row) => ({
       period: row.period as string,
       ...(byCampaign ? { campaignId: (row.campaign_id as string | null) ?? null } : {}),
+      ...(byService ? { serviceName: row.service_name as string } : {}),
+      ...(byTask ? { taskName: row.task_name as string } : {}),
       totalCostInUsdCents: new Decimal(row.total_cost).toFixed(10),
       actualCostInUsdCents: new Decimal(row.actual_cost).toFixed(10),
       provisionedCostInUsdCents: new Decimal(row.provisioned_cost).toFixed(10),
@@ -757,6 +782,7 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
       runCount: Number(row.run_count),
       minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
       maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
+      ...(byAction ? { committedRunCount: Number(row.committed_run_count) } : {}),
     }));
 
     res.json({ interval, timezone, buckets });
