@@ -6,7 +6,11 @@
 // | workflowDynastySlug | featureSlug) when the request carries a campaign filter
 // (`campaignId` and/or `campaignIds`) and otherwise only filters the rollup
 // carries exactly: orgId, brandId, featureSlug(s), workflowSlugs (incl. a
-// resolved dynasty), costSource. A taskName keeps the live query. The other
+// resolved dynasty), costSource. `groupBy=brandId` is served with or without a
+// campaign filter (every run is rolled up since 0041): live it unnested the brand
+// array of every run of the feature, 48 s in prod (2026-10-19, past the 30 s
+// statement timeout) for the homepage's ranked-by-brand read. A taskName keeps
+// the live query. The other
 // reads of these tables (org-scoped GET /v1/stats/costs, the public timeseries)
 // live in stats-rollup-brand.ts.
 //
@@ -26,6 +30,7 @@ export const CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS: Record<string, string> = {
   campaignId: "campaign_id",
   workflowSlug: "workflow_slug",
   featureSlug: "feature_slug",
+  brandId: "brand_ids",
 };
 
 export interface CampaignRollupFilters {
@@ -95,22 +100,36 @@ export async function readCampaignCostsFromRollup(opts: {
   filters: CampaignRollupFilters;
   costSource?: string;
 }): Promise<any[]> {
-  const col = sql.raw(CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[opts.groupBy]);
   const parts = whereParts(opts.filters);
   const costParts = [...parts];
   if (opts.costSource) costParts.push(sql`cost_source = ${opts.costSource}`);
 
+  // brandId mirrors the live `unnest(r.brand_ids)` exactly: every run of a rollup
+  // row carries the same brand array, so the run count is the row's run_count
+  // under each DISTINCT brand (live counts DISTINCT (run, brand) pairs), and the
+  // money is summed under each array ELEMENT, a repeated brand included (live
+  // joins every unnested element to the run's cost rows). A run with no brand
+  // unnests to nothing on both paths.
+  const isBrand = opts.groupBy === "brandId";
+  const runsFrom = isBrand
+    ? sql`stats_rollup_campaign_runs CROSS JOIN LATERAL (SELECT DISTINCT b FROM unnest(brand_ids) b) u(dim)`
+    : sql`stats_rollup_campaign_runs`;
+  const costsFrom = isBrand
+    ? sql`stats_rollup_campaign_costs CROSS JOIN LATERAL unnest(brand_ids) u(dim)`
+    : sql`stats_rollup_campaign_costs`;
+  const col = isBrand ? sql`u.dim` : sql.raw(CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[opts.groupBy]);
+
   const result = await db.execute(sql`
     WITH counts AS (
       SELECT ${col} AS dim, SUM(run_count)::int AS run_count
-      FROM stats_rollup_campaign_runs
+      FROM ${runsFrom}
       ${whereSql(parts)}
       GROUP BY 1
       HAVING SUM(run_count) > 0
     ),
     sums AS (
       SELECT ${col} AS dim, ${MONEY_COLUMNS}
-      FROM stats_rollup_campaign_costs
+      FROM ${costsFrom}
       ${whereSql(costParts)}
       GROUP BY 1
       ${ANY_COST_ROW}

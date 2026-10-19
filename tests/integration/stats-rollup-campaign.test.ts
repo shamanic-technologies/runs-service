@@ -25,6 +25,7 @@ const CLEANUP = [ORG_ID, OTHER_ORG_ID];
 const SUFFIX = randomUUID().slice(0, 8);
 const FEAT = `camp-rollup-${SUFFIX}`;
 const FEAT_OTHER = `camp-rollup-other-${SUFFIX}`;
+const FEAT_BRANDS = `camp-rollup-brands-${SUFFIX}`; // campaign-less runs for the groupBy=brandId read
 const BRAND = randomUUID();
 const BRAND_OTHER = randomUUID();
 const C1 = randomUUID();
@@ -107,6 +108,13 @@ async function allComparisons() {
     { campaignIds: family, groupBy: "campaignId", costSource: "platform" },
     { campaignIds: family, groupBy: "workflowSlug", featureSlugs: `${FEAT},${FEAT_OTHER}` },
     { campaignId: C2, groupBy: "workflowSlug" },
+    // groupBy=brandId is served with or without a campaign filter (the homepage's
+    // ranked-by-brand read, 48 s live in prod): repeated, co-branded and brandless runs.
+    { featureSlugs: `${FEAT},${FEAT_BRANDS}`, groupBy: "brandId" },
+    { featureSlug: FEAT_BRANDS, groupBy: "brandId" },
+    { featureSlug: FEAT_BRANDS, groupBy: "brandId", costSource: "platform" },
+    { featureSlug: FEAT_BRANDS, groupBy: "brandId", orgId: ORG_ID, brandId: BRAND },
+    { campaignIds: family, groupBy: "brandId" },
   ]) {
     await expectPublicCostsEqual(q);
   }
@@ -163,6 +171,15 @@ describe("campaign-day rollup — campaign-family cost reads", () => {
     await cost("k9", r8, "actual", "1000");
     await cost("k10", r9, "actual", "2000");
     await cost("k11", r4, "actual", "0"); // a matched row summing to zero
+
+    const b1 = await run("b1", { at: "2026-09-09T10:00:00Z", feature: FEAT_BRANDS, brands: [BRAND, BRAND] }); // repeated brand
+    const b2 = await run("b2", { at: "2026-09-10T10:00:00Z", feature: FEAT_BRANDS, brands: [BRAND, BRAND_OTHER] }); // co-branded
+    const b3 = await run("b3", { at: "2026-09-10T11:00:00Z", feature: FEAT_BRANDS, brands: [] }); // no brand
+    await run("b4", { at: "2026-09-11T11:00:00Z", feature: FEAT_BRANDS, brands: [BRAND_OTHER] }); // no cost
+    await cost("kb1", b1, "actual", "1.5");
+    await cost("kb2", b1, "refunded", "0.75");
+    await cost("kb3", b2, "provisioned", "2.25", { costSource: "org" });
+    await cost("kb4", b3, "actual", "50");
   });
 
   it("matches the live query after inserts", async () => {
