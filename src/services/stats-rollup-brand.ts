@@ -198,6 +198,12 @@ export async function readBrandRollupGroups(opts: {
     : sql`SELECT NULL::date AS d WHERE FALSE`;
 
   const rollupRows = and([...rollupWhere, ...dayRange, sql`day NOT IN (SELECT d FROM live_days)`]);
+  // `OFFSET 0` keeps the LATERAL a per-day subquery (an optimisation fence). Without
+  // it Postgres pulls the subquery up, turns the day bounds into a join filter, and
+  // builds the brand's WHOLE bounded history joined to runs_costs before looking at
+  // live_days, which is almost always EMPTY: 17.6 s for brand f4d73dab with 25
+  // feature slugs and startedBefore (statement timeouts, 2026-10-21). Fenced, each
+  // live day is an index range scan on started_at, and no live day = no scan.
   const liveRuns = (select: SQL, join: SQL) => sql`
     FROM live_days ld CROSS JOIN LATERAL (
       SELECT ${select}
@@ -205,6 +211,7 @@ export async function readBrandRollupGroups(opts: {
       WHERE ${and(liveWhere)}
         AND r.started_at >= ${UTC_DAY_START(sql`ld.d`)}
         AND r.started_at < ${UTC_DAY_START(sql`ld.d + 1`)}
+      OFFSET 0
     ) x`;
 
   const n = dims.length;
