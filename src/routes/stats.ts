@@ -26,6 +26,7 @@ import {
   isStatsRollupReady,
   readPublicCostsFromRollup,
 } from "../services/stats-rollup.js";
+import { RUN_DAY_ROLLUP_NAME } from "../services/stats-rollup-run-day.js";
 import {
   CAMPAIGN_DAY_ROLLUP_NAME,
   CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS,
@@ -1725,10 +1726,35 @@ router.get("/v1/stats/public/costs/timeseries", handlePublicCostsTimeseries);
 //
 // Verified against production in one REPEATABLE READ snapshot: identical md5
 // digests for both series, identical byStatus, identical total, at 1.7s vs ~28s.
-router.get("/public/stats/runs", async (_req, res) => {
-  try {
-    const result = await db.execute(sql`
-      WITH run_daily AS (
+//
+// 2026-10-22: the ledger outgrew it (6M runs): 53 s live under load, past the
+// 30 s statement_timeout. The same two daily series are now kept at write time
+// (migration 0054: stats_rollup_run_day per UTC start day x status, every
+// status; stats_rollup_platform_cost_day per run's UTC start day) and read here
+// once `run_day` is stamped; the live query stays the fallback. A day holding
+// runs of any status (run_count > 0) or platform-projected rows (n_rows > 0)
+// keeps its bucket exactly as the live GROUP BY did; zeroed rows left by deletes
+// are skipped. Replayed on prod in one snapshot: md5-equal series.
+function publicRunsDailySql(fromRollup: boolean) {
+  if (fromRollup) {
+    return sql`
+      run_daily AS (
+        SELECT day AS d,
+          COALESCE(SUM(run_count) FILTER (WHERE status = 'completed'), 0) AS completed,
+          COALESCE(SUM(run_count) FILTER (WHERE status = 'failed'), 0)    AS failed,
+          COALESCE(SUM(run_count) FILTER (WHERE status = 'running'), 0)   AS running
+        FROM stats_rollup_run_day
+        GROUP BY day
+        HAVING SUM(run_count) > 0
+      ),
+      cost_daily AS (
+        SELECT day AS d, gross AS total_cost
+        FROM stats_rollup_platform_cost_day
+        WHERE n_rows > 0
+      )`;
+  }
+  return sql`
+      run_daily AS (
         SELECT (r.started_at AT TIME ZONE 'UTC')::date AS d,
           COUNT(*) FILTER (WHERE r.status = 'completed') AS completed,
           COUNT(*) FILTER (WHERE r.status = 'failed')    AS failed,
@@ -1742,7 +1768,14 @@ router.get("/public/stats/runs", async (_req, res) => {
         FROM runs_costs rc
         WHERE rc.is_platform_projected
         GROUP BY 1
-      ),
+      )`;
+}
+
+router.get("/public/stats/runs", async (_req, res) => {
+  try {
+    const fromRollup = await isStatsRollupReady(RUN_DAY_ROLLUP_NAME);
+    const result = await db.execute(sql`
+      WITH ${publicRunsDailySql(fromRollup)},
       daily AS (
         SELECT COALESCE(rd.d, cd.d) AS d,
           COALESCE(rd.completed, 0) AS completed,
