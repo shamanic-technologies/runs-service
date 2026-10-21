@@ -379,6 +379,13 @@
       "when": 1782777600000,
       "tag": "0053_stats_rollup_cost_name_day",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1782864000000,
+      "tag": "0054_task_outcomes_and_public_runs_rollups",
+      "breakpoints": true
     }
   ]
 }

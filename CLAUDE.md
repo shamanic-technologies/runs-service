@@ -89,6 +89,7 @@ Org-level platform-spend reads (`GET /internal/org-usage-total`, billing's per-a
 - **Verified byte-equal against production**, old vs new in one `REPEATABLE READ` snapshot: identical md5 digests for the monthly and weekly series, identical `byStatus` (2761944 / 138128 / 35107), identical `1012624.4922729618` total — at **1.72s instead of ~28s**.
 - **Index-only depends on the visibility map.** Both new reads are index-only *because* `runs` / `runs_costs` are vacuumed; if autovacuum falls behind (it had not run on `runs` for a week when this shipped, which was suppressing the plan) heap fetches climb and the scans slow down. Check `pg_stat_user_tables.last_autovacuum` before blaming the query.
 - **Residual, not fixed here:** the per-brand read still scans the filtered feature's runs (3.8s → ~1.9s). Taking it to O(result) needs a brand-grain rollup — its own PR.
+- **2026-10-22, migration 0054: the read is a rollup now.** At 6M runs the "index-only" plan lost to a seq scan (53 s, index-only 66 s under load, 30 s timeouts). `stats_rollup_run_day` (UTC start day x status, every status) + `stats_rollup_platform_cost_day` (run's UTC start day, NULL day kept so the read still fails loud) feed the same month/week SQL once `run_day` is stamped (`scripts/rebuild-stats-rollup.ts run_day`); a day counts while run_count > 0 / n_rows > 0. Guard: `tests/integration/task-outcomes-rollups.test.ts`.
 
 ## Write-maintained rollup for the cross-org per-workflow read (migration 0034)
 
@@ -439,13 +440,25 @@ builds a workflow. Service-auth, no org header: every org AND org-less platform 
 - **Cost** = each sampled run's WHOLE subtree, `status = 'actual'` rows only, every
   cost source, gross billed; a run with no cost counts 0. `sum*` fields are there
   so a consumer can merge groups exactly.
-- **Speed (prod 2026-10-10)**: apollo-service 3-32 s, api-service 27-59 s, 80-121 s on a saturated box (load 23). The
-  api-service bulk is 200 `POST /v1/campaigns` roots whose subtrees are whole
-  campaign trees (~2.2M of the 2.25M walked runs). Three plan rules, each measured:
-  the sample is `MATERIALIZED`; the child fetch is a LATERAL with `OFFSET 0` (else a
-  merge join index-scans all of `runs` per recursion level); cost is a plain hash
-  join to `runs_costs`, not a per-run LATERAL (2.25M probes = ~25 s). Raising
-  `work_mem` to 128MB made api-service 111 s: do not.
+- **Rollup paths (migration 0054, 2026-10-22)**: live it took 37-225 s (seq scan of all `runs` for
+  the window + walks of 2.38M runs for api-service, 596k for campaign-service; 290 s timeouts at
+  load 30-50). Two rollups, each used only while stamped (checked in the read's transaction):
+  - **Sample from `org_task` (0043)**: per normalized task, total = SUM(run_count); D = newest UTC
+    day from which it holds >= `sample` runs; each (campaign, raw task) key with a day >= D is read
+    newest-first off `idx_runs_campaign_task_started` with `LIMIT sample` (split NULL / non-NULL
+    campaign). Same rows as the window (prod md5-equal, api-service 54,979, campaign-service 282).
+  - **Top-level subtree cost from `stats_rollup_root_cost` (0054)**: a sampled run with NO parent
+    reads its whole-subtree actual cost by PK; only the others are walked (fenced LATERAL children,
+    fenced per-run cost LATERAL). Triggers: a cost row walks `parent_run_id` up to its top-level
+    run (PK lookups); a run delete (BEFORE, still visible) subtracts its visible subtree, a broken
+    chain (ancestor deleted earlier in the statement) skips: exact in any row order; a reparent
+    moves the subtree. Rebuild `root_cost` is bottom-up per level, GROUPED (a top-down carry would
+    hold ~76M rows for the dead 13,741-deep scheduler-resume chain of 2026-04-01).
+  Guards: `tests/unit/task-outcomes-fence.test.ts`, `tests/integration/task-outcomes-rollups.test.ts`
+  (every stamp combination == live).
+- Live-path plan rules (kept for the fallback): the sample is `MATERIALIZED`; the child fetch is a
+  LATERAL with `OFFSET 0`; cost is a plain hash join to `runs_costs` (2.25M probes = ~25 s).
+  Raising `work_mem` to 128MB made api-service 111 s: do not.
 - **Runs past the 30 s analytics `statement_timeout`**: the read sets
   `SET LOCAL statement_timeout = '290s'` in its own transaction, holds at most 2 of
   the 8 analytics connections (in-process queue), and coalesces identical requests.
