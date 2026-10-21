@@ -352,7 +352,10 @@ tables, extended rather than duplicated (same grain).
   rollup when the excluded part of it holds no run matching the filters (always,
   for midnight bounds), else it is read LIVE with the exact bound. Days holding a
   stale group (min/max reads only) are read live too. Rollup days and live days
-  are disjoint, one statement, one snapshot.
+  are disjoint, one statement, one snapshot. The live-day LATERAL keeps `OFFSET 0`
+  (fence): without it the planner joined the brand's whole bounded history to
+  runs_costs before seeing live_days empty (11-21 s, f4d73dab, 2026-10-21; fenced
+  0.05-0.2 s). Guard `tests/unit/stats-rollup-brand-fence.test.ts`.
 - **Readiness**: same `campaign_day` stamp. The 0041 migration un-stamps an existing
   database (NULL-campaign history and min/max missing) → run
   `rebuild-stats-rollup.ts campaign_day` right after the deploy. Un-stamping is also
