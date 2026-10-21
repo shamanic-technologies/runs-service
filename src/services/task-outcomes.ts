@@ -61,32 +61,119 @@ interface Row {
   last_run_at: string | Date;
 }
 
-async function queryTaskOutcomes(serviceName: string, sample: number): Promise<TaskOutcome[]> {
-  // Plan notes (prod EXPLAIN ANALYZE, 2026-10-10):
-  // - The sample is MATERIALIZED, so the subtree walk is anchored on it alone.
-  // - The walk fetches children through a LATERAL with OFFSET 0: without the fence
-  //   Postgres flattens it into a merge join that index-scans ALL of runs per
-  //   recursion level (apollo 10.5 s -> 3.2 s with the fence).
-  // - Cost is a plain hash join to runs_costs (one scan of the `actual` rows), not
-  //   a per-run LATERAL: 2.25M index probes cost api-service ~25 s alone.
-  // Statuses are enumerated, never negated.
-  const rows = (await statsDb.transaction(async (tx) => {
-    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`));
-    return tx.execute(sql`
-      WITH RECURSIVE ranked AS (
-        SELECT r.id, r.status, r.started_at, r.completed_at, n.task,
+/** Stamp of the top-level-run subtree cost rollup (migration 0054). */
+export const ROOT_COST_ROLLUP_NAME = "root_cost";
+/** Stamp of the (org, service, task, campaign, day) run rollup (migration 0043). */
+const ORG_TASK_ROLLUP = "org_task";
+
+const normalizedTask = (col: string) =>
+  sql.raw(`regexp_replace(${col}, '${UUID_PATTERN}', '${TASK_ID_PLACEHOLDER}', 'gi')`);
+
+/**
+ * The sampled runs: each normalized task's newest `sample` runs plus its all-time
+ * run count. Columns: id, status, started_at, completed_at, parent_run_id, task,
+ * total_run_count.
+ *
+ * LIVE: a window over every run of the service — a seq scan of all of `runs`
+ * (no index leads on service_name): 5-47 s in prod, 2026-10-22.
+ *
+ * ROLLUP (org_task stamped): the per-(org, service, task, campaign, UTC day) run
+ * counts of stats_rollup_org_task give each task's all-time count AND the newest
+ * UTC day D from which it holds >= `sample` runs (every day when it holds fewer).
+ * Every one of its newest `sample` runs therefore started on or after D, under a
+ * (campaign, raw task name) key the rollup lists for a day >= D. Each such key is
+ * read newest-first off idx_runs_campaign_task_started (campaign_id, task_name,
+ * started_at DESC, id DESC) with LIMIT `sample` (a key never holds more than
+ * `sample` of the task's newest runs): only candidate rows touch the heap. The
+ * final row_number picks exactly the live window's rows (replayed on prod in one
+ * snapshot: api-service 54,979 and campaign-service 282 sampled runs, md5-equal).
+ * The two LATERALs are fenced (OFFSET 0 under the LIMIT) and split on NULL
+ * campaign so each is an index range scan.
+ */
+function sampledSql(serviceName: string, sample: number, useOrgTask: boolean) {
+  if (!useOrgTask) {
+    return sql`
+      ranked AS (
+        SELECT r.id, r.status, r.started_at, r.completed_at, r.parent_run_id, n.task,
           row_number() OVER (PARTITION BY n.task ORDER BY r.started_at DESC, r.id DESC) AS rn,
           count(*) OVER (PARTITION BY n.task) AS total_run_count
         FROM runs r
-        CROSS JOIN LATERAL (
-          SELECT regexp_replace(r.task_name, ${sql.raw(`'${UUID_PATTERN}'`)}, ${sql.raw(`'${TASK_ID_PLACEHOLDER}'`)}, 'gi') AS task
-        ) n
+        CROSS JOIN LATERAL (SELECT ${normalizedTask("r.task_name")} AS task) n
         WHERE r.service_name = ${serviceName}
       ),
       sampled AS MATERIALIZED (
-        SELECT id, status, started_at, completed_at, task, total_run_count
+        SELECT id, status, started_at, completed_at, parent_run_id, task, total_run_count
         FROM ranked WHERE rn <= ${sample}
+      )`;
+  }
+  return sql`
+      keys AS MATERIALIZED (
+        SELECT k.task_name, k.campaign_id, k.day, k.run_count, ${normalizedTask("k.task_name")} AS task
+        FROM stats_rollup_org_task k
+        WHERE k.service_name = ${serviceName} AND k.run_count > 0
       ),
+      task_day AS (
+        SELECT task, day, SUM(run_count) AS n FROM keys GROUP BY task, day
+      ),
+      cutoff AS MATERIALIZED (
+        SELECT task, MAX(total) AS total_run_count,
+          COALESCE(MAX(day) FILTER (WHERE cum >= ${sample}), MIN(day)) AS from_day
+        FROM (
+          SELECT task, day,
+            SUM(n) OVER (PARTITION BY task ORDER BY day DESC) AS cum,
+            SUM(n) OVER (PARTITION BY task) AS total
+          FROM task_day
+        ) x
+        GROUP BY task
+      ),
+      cand_keys AS MATERIALIZED (
+        SELECT DISTINCT k.campaign_id, k.task_name, k.task, (c.from_day::timestamp AT TIME ZONE 'UTC') AS from_ts
+        FROM keys k JOIN cutoff c ON c.task = k.task
+        WHERE k.day >= c.from_day
+      ),
+      cand AS (
+        SELECT k.task, r.* FROM cand_keys k
+        CROSS JOIN LATERAL (
+          SELECT r.id, r.status, r.started_at, r.completed_at, r.parent_run_id FROM runs r
+          WHERE k.campaign_id IS NOT NULL AND r.campaign_id = k.campaign_id AND r.task_name = k.task_name
+            AND r.started_at >= k.from_ts AND r.service_name = ${serviceName}
+          ORDER BY r.started_at DESC, r.id DESC LIMIT ${sample}
+        ) r
+        UNION ALL
+        SELECT k.task, r.* FROM cand_keys k
+        CROSS JOIN LATERAL (
+          SELECT r.id, r.status, r.started_at, r.completed_at, r.parent_run_id FROM runs r
+          WHERE k.campaign_id IS NULL AND r.campaign_id IS NULL AND r.task_name = k.task_name
+            AND r.started_at >= k.from_ts AND r.service_name = ${serviceName}
+          ORDER BY r.started_at DESC, r.id DESC LIMIT ${sample}
+        ) r
+      ),
+      ranked AS (
+        SELECT c.*, row_number() OVER (PARTITION BY c.task ORDER BY c.started_at DESC, c.id DESC) AS rn
+        FROM cand c
+      ),
+      sampled AS MATERIALIZED (
+        SELECT r.id, r.status, r.started_at, r.completed_at, r.parent_run_id, r.task, cu.total_run_count
+        FROM ranked r JOIN cutoff cu ON cu.task = r.task
+        WHERE r.rn <= ${sample}
+      )`;
+}
+
+/**
+ * Whole-subtree actual cost per sampled run (root_id, cost).
+ *
+ * LIVE: walk every sampled run's subtree, then a plain hash join to the actual
+ * cost rows. api-service walked 2.38M runs, campaign-service 596k.
+ *
+ * ROLLUP (root_cost stamped): a sampled run with NO parent is a top-level run,
+ * and its subtree is exactly the runs under it as top-level ancestor, whose
+ * actual cost stats_rollup_root_cost keeps at write time: one PK probe. Only the
+ * other sampled runs are walked (small subtrees), their cost rows read through a
+ * fenced per-run LATERAL on idx_runs_costs_run_agg.
+ */
+function rootCostSql(useRootCost: boolean) {
+  if (!useRootCost) {
+    return sql`
       descendants AS (
         SELECT id, id AS root_id FROM sampled
         UNION ALL
@@ -98,7 +185,51 @@ async function queryTaskOutcomes(serviceName: string, sample: number): Promise<T
         FROM descendants d
         JOIN runs_costs rc ON rc.run_id = d.id AND rc.status = 'actual'
         GROUP BY d.root_id
-      )
+      )`;
+  }
+  return sql`
+      descendants AS (
+        SELECT id, id AS root_id FROM sampled WHERE parent_run_id IS NOT NULL
+        UNION ALL
+        SELECT ch.id, d.root_id FROM descendants d
+        CROSS JOIN LATERAL (SELECT c.id FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
+      ),
+      root_cost AS (
+        SELECT d.root_id, SUM(rc.total_cost_in_usd_cents) AS cost
+        FROM descendants d
+        CROSS JOIN LATERAL (
+          SELECT x.total_cost_in_usd_cents FROM runs_costs x
+          WHERE x.run_id = d.id AND x.status = 'actual' OFFSET 0
+        ) rc
+        GROUP BY d.root_id
+        UNION ALL
+        SELECT s.id AS root_id, t.gross_actual AS cost
+        FROM sampled s JOIN stats_rollup_root_cost t ON t.root_run_id = s.id
+        WHERE s.parent_run_id IS NULL
+      )`;
+}
+
+async function queryTaskOutcomes(serviceName: string, sample: number): Promise<TaskOutcome[]> {
+  // Plan notes (prod EXPLAIN ANALYZE, 2026-10-10, live path):
+  // - The sample is MATERIALIZED, so the subtree walk is anchored on it alone.
+  // - The walk fetches children through a LATERAL with OFFSET 0: without the fence
+  //   Postgres flattens it into a merge join that index-scans ALL of runs per
+  //   recursion level (apollo 10.5 s -> 3.2 s with the fence).
+  // - Cost is a plain hash join to runs_costs (one scan of the `actual` rows), not
+  //   a per-run LATERAL: 2.25M index probes cost api-service ~25 s alone.
+  // The rollup paths (migration 0043 org_task, 0054 root_cost) replace the
+  // service-wide window and the top-level walks; see sampledSql / rootCostSql.
+  // Statuses are enumerated, never negated.
+  const rows = (await statsDb.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`));
+    const ready = (await tx.execute(sql`
+      SELECT name FROM stats_rollups WHERE name IN (${ORG_TASK_ROLLUP}, ${ROOT_COST_ROLLUP_NAME})
+    `)) as unknown as Array<{ name: string }>;
+    const useOrgTask = ready.some((r) => r.name === ORG_TASK_ROLLUP);
+    const useRootCost = ready.some((r) => r.name === ROOT_COST_ROLLUP_NAME);
+    return tx.execute(sql`
+      WITH RECURSIVE ${sampledSql(serviceName, sample, useOrgTask)},
+      ${rootCostSql(useRootCost)}
       SELECT s.task AS task_name,
         MAX(s.total_run_count) AS total_run_count,
         COUNT(*) AS sample_size,
