@@ -283,7 +283,12 @@ time, same pattern and same byte-identity rules as 0034.
   campaign filter** (counts under each DISTINCT brand of the row's array, money under
   each element, as the live `unnest`): the homepage ranked-by-brand read was 48 s live
   over the cold-email feature (2026-10-19, statement timeouts), 0.13 s from here,
-  byte-equal in one snapshot. A taskName keeps the live query. The
+  byte-equal in one snapshot. A taskName keeps the live query. Every path states each
+  group's `minStartedAt` / `maxStartedAt` (first / last run start, = the org-scoped
+  read's; were null until 2026-10-22, the staff Research "Last run" column): from this
+  rollup's clean rows, a `minmax_stale` row re-read live by its key + day (fenced
+  LATERAL); the 0034 feature_workflow path takes them from this table too (live MIN/MAX
+  while `campaign_day` is un-stamped). The
   timeseries and org-scoped `GET /v1/stats/costs` reads: see "Brand-history cost reads".
 - **Readiness** stamp `campaign_day` in `stats_rollups`; on an existing database run
   `scripts/rebuild-stats-rollup.ts campaign_day` after the deploy (in prod: inside
