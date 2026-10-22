@@ -245,13 +245,15 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
         .where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
     });
 
+    const newRowsById = new Map<string, any>(newRows.map((r: any) => [r.id, r]));
     const inserted: any[] = [];
     let createdIdx = 0;
     for (const item of items) {
       if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) {
         inserted.push(existingByKey.get(item.idempotencyKey));
       } else {
-        inserted.push(newRows[createdIdx]);
+        // Rows come back from `id IN (...)` in no guaranteed order: pair them by id.
+        inserted.push(newRowsById.get(itemsToCreate[createdIdx].costId));
         createdIdx++;
       }
     }

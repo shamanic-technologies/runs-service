@@ -789,13 +789,15 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     });
 
     // Restore 1-to-1 mapping for response: items that idempotency-collided return the existing row.
+    const newRowsById = new Map<string, any>(newRows.map((r: any) => [r.id, r]));
     const inserted: any[] = [];
     let createdIdx = 0;
     for (const item of items) {
       if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) {
         inserted.push(existingByKey.get(item.idempotencyKey));
       } else {
-        inserted.push(newRows[createdIdx]);
+        // Rows come back from `id IN (...)` in no guaranteed order: pair them by id.
+        inserted.push(newRowsById.get(itemsToCreate[createdIdx].costId));
         createdIdx++;
       }
     }
