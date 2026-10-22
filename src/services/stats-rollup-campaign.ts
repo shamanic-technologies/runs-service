@@ -89,9 +89,54 @@ const MONEY_OUT = sql.raw(`
 
 const ANY_COST_ROW = sql.raw(`HAVING SUM(n_actual + n_provisioned + n_cancelled + n_refunded) > 0`);
 
+// First / last run start of a group, from `stats_rollup_campaign_runs` aliased `b`.
+// A clean row's min/max are exact (a trigger only widens them, on an added run). A
+// `minmax_stale` row (a run removed or moved away; the repair pass clears it within
+// minutes) is re-read from the ledger for its own key and UTC day (fenced LATERAL,
+// the same recount as stats-rollup-minmax-repair.ts), so the answer equals a live
+// MIN/MAX(started_at) over the group's runs.
+const STALE_ROW_LIVE_MINMAX = sql.raw(`
+  LEFT JOIN LATERAL (
+    SELECT min(r.started_at) AS mn, max(r.started_at) AS mx
+    FROM runs r
+    WHERE b.minmax_stale
+      AND r.started_at >= (b.day::timestamp AT TIME ZONE 'UTC')
+      AND r.started_at < ((b.day + 1)::timestamp AT TIME ZONE 'UTC')
+      AND r.organization_id IS NOT DISTINCT FROM b.organization_id
+      AND r.campaign_id IS NOT DISTINCT FROM b.campaign_id
+      AND r.brand_ids IS NOT DISTINCT FROM b.brand_ids
+      AND r.feature_slug IS NOT DISTINCT FROM b.feature_slug
+      AND r.workflow_slug IS NOT DISTINCT FROM b.workflow_slug
+    OFFSET 0
+  ) l ON true`);
+
+const MINMAX_COLUMNS = sql.raw(`
+  MIN(CASE WHEN b.minmax_stale THEN l.mn ELSE b.min_started_at END) FILTER (WHERE b.run_count > 0) AS min_started_at,
+  MAX(CASE WHEN b.minmax_stale THEN l.mx ELSE b.max_started_at END) FILTER (WHERE b.run_count > 0) AS max_started_at`);
+
+/**
+ * First / last run start per group of the campaign-day rollup, for a read whose
+ * counts and money come from elsewhere (the 0034 feature_workflow rollup carries no
+ * run time). `groupBy` ∈ workflowSlug | featureSlug. Rows: `dim`, `min_started_at`,
+ * `max_started_at`. Only valid while the campaign_day stamp is present.
+ */
+export async function readCampaignRunsMinMax(opts: { groupBy: string; filters: CampaignRollupFilters }): Promise<any[]> {
+  const col = sql.raw(`b.${CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[opts.groupBy]}`);
+  const parts = whereParts(opts.filters);
+  const result = await db.execute(sql`
+    SELECT ${col} AS dim, ${MINMAX_COLUMNS}
+    FROM stats_rollup_campaign_runs b
+    ${STALE_ROW_LIVE_MINMAX}
+    ${whereSql(parts)}
+    GROUP BY 1
+  `);
+  return result as unknown as any[];
+}
+
 /**
  * Untimed groups, same row shape as the live public-costs query: the dimension
- * under `resultCol`, the nine money columns as TEXT and `run_count`, ordered by
+ * under `resultCol`, the nine money columns as TEXT, `run_count` and the group's
+ * first / last run start (`min_started_at`, `max_started_at`), ordered by
  * `total_cost` (text) DESC.
  */
 export async function readCampaignCostsFromRollup(opts: {
@@ -112,20 +157,21 @@ export async function readCampaignCostsFromRollup(opts: {
   // unnests to nothing on both paths.
   const isBrand = opts.groupBy === "brandId";
   const runsFrom = isBrand
-    ? sql`stats_rollup_campaign_runs CROSS JOIN LATERAL (SELECT DISTINCT b FROM unnest(brand_ids) b) u(dim)`
-    : sql`stats_rollup_campaign_runs`;
+    ? sql`stats_rollup_campaign_runs b CROSS JOIN LATERAL (SELECT DISTINCT x FROM unnest(b.brand_ids) x) u(dim) ${STALE_ROW_LIVE_MINMAX}`
+    : sql`stats_rollup_campaign_runs b ${STALE_ROW_LIVE_MINMAX}`;
   const costsFrom = isBrand
     ? sql`stats_rollup_campaign_costs CROSS JOIN LATERAL unnest(brand_ids) u(dim)`
     : sql`stats_rollup_campaign_costs`;
   const col = isBrand ? sql`u.dim` : sql.raw(CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[opts.groupBy]);
+  const runsCol = isBrand ? sql`u.dim` : sql.raw(`b.${CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS[opts.groupBy]}`);
 
   const result = await db.execute(sql`
     WITH counts AS (
-      SELECT ${col} AS dim, SUM(run_count)::int AS run_count
+      SELECT ${runsCol} AS dim, SUM(b.run_count)::int AS run_count, ${MINMAX_COLUMNS}
       FROM ${runsFrom}
       ${whereSql(parts)}
       GROUP BY 1
-      HAVING SUM(run_count) > 0
+      HAVING SUM(b.run_count) > 0
     ),
     sums AS (
       SELECT ${col} AS dim, ${MONEY_COLUMNS}
@@ -134,7 +180,7 @@ export async function readCampaignCostsFromRollup(opts: {
       GROUP BY 1
       ${ANY_COST_ROW}
     )
-    SELECT c.dim AS ${sql.raw(opts.resultCol)}, ${MONEY_OUT}, c.run_count
+    SELECT c.dim AS ${sql.raw(opts.resultCol)}, ${MONEY_OUT}, c.run_count, c.min_started_at, c.max_started_at
     FROM counts c
     LEFT JOIN sums s ON s.dim IS NOT DISTINCT FROM c.dim
     ORDER BY total_cost DESC

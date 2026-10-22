@@ -191,6 +191,75 @@ describe("campaign-day rollup — campaign-family cost reads", () => {
     expect(c1Sep8.cancelledCostInUsdCents).toBe("7.5000000000");
   });
 
+  it("states each group's first / last run start, equal to the org-scoped read (stale rows re-read live)", async () => {
+    const fleet = async (q: Record<string, string>) => (await get("/v1/stats/public/costs", q)).groups as any[];
+    const by = (groups: any[], slug: string | null) => groups.find((g) => g.dimensions.workflowSlug === slug);
+
+    const groups = await fleet({ campaignIds: family, groupBy: "workflowSlug" });
+    expect(groups.length).toBeGreaterThan(0);
+    for (const g of groups) {
+      expect(g.runCount).toBeGreaterThan(0);
+      expect(g.minStartedAt).not.toBeNull();
+      expect(g.maxStartedAt).not.toBeNull();
+    }
+    // wf-a: r1 (Sep 7 23:59:59) .. r3 (Sep 8 10:00), every org of the family.
+    expect([by(groups, "wf-a").minStartedAt, by(groups, "wf-a").maxStartedAt]).toEqual(["2026-09-07T23:59:59.000Z", "2026-09-08T10:00:00.000Z"]);
+    // wf-b: r4 (C2, Sep 8 12:00) .. r6 (C3, Oct 2), the other org's r7 (Sep 8 13:00) in between.
+    expect([by(groups, "wf-b").minStartedAt, by(groups, "wf-b").maxStartedAt]).toEqual(["2026-09-08T12:00:00.000Z", "2026-10-02T08:00:00.000Z"]);
+
+    // Same scope, org-scoped: the same run times for every workflow this org ran.
+    const orgScoped = (await get("/v1/stats/costs", { campaignIds: family, groupBy: "workflowSlug" })).groups as any[];
+    expect(orgScoped.length).toBeGreaterThan(0);
+    for (const o of orgScoped) {
+      const f = by(groups, o.dimensions.workflowSlug);
+      expect([f.minStartedAt, f.maxStartedAt]).toEqual([o.minStartedAt, o.maxStartedAt]);
+    }
+
+    // A stale rollup row (a run removed, repair pending) whose min/max are wrong is
+    // re-read from the ledger: the answer stays exact.
+    await sql`UPDATE stats_rollup_campaign_runs SET min_started_at = '2020-01-01T00:00:00Z', max_started_at = '2030-01-01T00:00:00Z', minmax_stale = true
+              WHERE campaign_id = ${C1} AND day = '2026-09-08'`;
+    try {
+      const stale = await fleet({ campaignIds: family, groupBy: "workflowSlug" });
+      expect([by(stale, "wf-a").minStartedAt, by(stale, "wf-a").maxStartedAt]).toEqual(["2026-09-07T23:59:59.000Z", "2026-09-08T10:00:00.000Z"]);
+    } finally {
+      await sql`UPDATE stats_rollup_campaign_runs SET min_started_at = '2026-09-08T00:00:01Z', max_started_at = '2026-09-08T10:00:00Z', minmax_stale = false
+                WHERE campaign_id = ${C1} AND day = '2026-09-08'`;
+    }
+
+    // The campaign-less fleet read (feature_workflow rollup, which carries no run
+    // time) and the live paths (serviceName, costName) state them too, equal to live.
+    for (const q of [
+      { featureSlugs: `${FEAT},${FEAT_OTHER}`, groupBy: "workflowSlug" },
+      { featureSlug: FEAT, groupBy: "featureSlug" },
+    ]) {
+      const rolled = await fleet(q);
+      await sql`DELETE FROM stats_rollups WHERE name = 'feature_workflow'`;
+      let live: any[];
+      try {
+        live = await fleet(q);
+      } finally {
+        await sql`INSERT INTO stats_rollups (name, ready_at) VALUES ('feature_workflow', now()) ON CONFLICT (name) DO NOTHING`;
+      }
+      const k = (g: any) => JSON.stringify(g.dimensions);
+      expect([...rolled].sort((a, b) => k(a).localeCompare(k(b)))).toEqual([...live].sort((a, b) => k(a).localeCompare(k(b))));
+      for (const g of rolled) expect(g.maxStartedAt).not.toBeNull();
+      // campaign_day un-stamped (a rebuild in progress): read live, same answer.
+      await readyStamp(false);
+      try {
+        expect(await fleet(q)).toEqual(rolled);
+      } finally {
+        await readyStamp(true);
+      }
+    }
+    for (const groupBy of ["serviceName", "costName"]) {
+      for (const g of await fleet({ campaignIds: family, groupBy })) {
+        expect(g.minStartedAt).not.toBeNull();
+        expect(g.maxStartedAt).not.toBeNull();
+      }
+    }
+  });
+
   it("one family request equals the sum of the per-row requests it replaces", async () => {
     const perRow = await Promise.all(FAMILY.map((c) => get("/v1/stats/public/costs/timeseries", { campaignId: c })));
     const summed = new Map<string, { total: Decimal; net: Decimal; runs: number }>();
