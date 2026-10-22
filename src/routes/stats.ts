@@ -31,6 +31,7 @@ import {
   CAMPAIGN_DAY_ROLLUP_NAME,
   CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS,
   readCampaignCostsFromRollup,
+  readCampaignRunsMinMax,
 } from "../services/stats-rollup-campaign.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { ORG_HOUR_ROLLUP_NAME, readOrgHourTimeseries } from "../services/stats-rollup-org-hour.js";
@@ -1421,7 +1422,9 @@ function handlePublicCosts(req: any, res: any) {
             SELECT ${sql.raw(col)},
               ${costAggregateSelectSql("rc")},
               ${costAggregateNetSelectSql("rc")},
-              COUNT(DISTINCT r.id) as run_count
+              COUNT(DISTINCT r.id) as run_count,
+              MIN(r.started_at) AS min_started_at,
+              MAX(r.started_at) AS max_started_at
               ${quantitySelect}
             FROM runs r
             ${joinType} runs_costs rc ON rc.run_id = r.id ${costSourceJoin}
@@ -1431,8 +1434,10 @@ function handlePublicCosts(req: any, res: any) {
           `)
         : await db.execute(sql`
             WITH counts AS (
-              SELECT dim, COUNT(*)::int AS run_count
-              FROM (SELECT DISTINCT r.id, ${sql.raw(col)} AS dim FROM runs r ${whereSql}) pairs
+              SELECT dim, COUNT(*)::int AS run_count,
+                MIN(started_at) AS min_started_at,
+                MAX(started_at) AS max_started_at
+              FROM (SELECT DISTINCT r.id, r.started_at, ${sql.raw(col)} AS dim FROM runs r ${whereSql}) pairs
               GROUP BY dim
             ),
             sums AS (
@@ -1454,7 +1459,9 @@ function handlePublicCosts(req: any, res: any) {
               COALESCE(s.net_actual_cost, '0')       AS net_actual_cost,
               COALESCE(s.net_provisioned_cost, '0')  AS net_provisioned_cost,
               COALESCE(s.net_refunded_cost, '0')     AS net_refunded_cost,
-              c.run_count
+              c.run_count,
+              c.min_started_at,
+              c.max_started_at
             FROM counts c
             LEFT JOIN sums s ON s.dim IS NOT DISTINCT FROM c.dim
             ORDER BY total_cost DESC
@@ -1462,6 +1469,28 @@ function handlePublicCosts(req: any, res: any) {
 
       const rows = result as any[];
       const resultCol = PUBLIC_RESULT_COL_NAMES[actualGroupBy] ?? col.replace(/^r\.|^rc\./, "");
+
+      // The 0034 feature_workflow rollup carries no run time: each group's first /
+      // last run start comes from the campaign-day rollup (every run since 0041,
+      // same feature / workflow columns, ~24k rows fleet-wide). While a rebuild
+      // has it un-stamped, the same MIN/MAX is read live from the runs.
+      if (rollupServes) {
+        const mmFilters = { featureSlugs: effectiveFeatureSlugs, workflowSlugs };
+        const mmRows = (await isStatsRollupReady(CAMPAIGN_DAY_ROLLUP_NAME))
+          ? await readCampaignRunsMinMax({ groupBy: actualGroupBy, filters: mmFilters })
+          : ((await db.execute(sql`
+              SELECT ${sql.raw(col)} AS dim, MIN(r.started_at) AS min_started_at, MAX(r.started_at) AS max_started_at
+              FROM runs r
+              ${whereSql}
+              GROUP BY 1
+            `)) as unknown as any[]);
+        const byDim = new Map<string | null, any>(mmRows.map((m) => [m.dim ?? null, m]));
+        for (const row of rows) {
+          const m = byDim.get(row[resultCol] ?? null);
+          row.min_started_at = m?.min_started_at ?? null;
+          row.max_started_at = m?.max_started_at ?? null;
+        }
+      }
 
       let groups: AggRow[] = rows.map((row) => {
         const group: AggRow = {
@@ -1479,8 +1508,8 @@ function handlePublicCosts(req: any, res: any) {
           netProvisionedCostInUsdCents: new Decimal(row.net_provisioned_cost).toFixed(10),
           netRefundedCostInUsdCents: new Decimal(row.net_refunded_cost).toFixed(10),
           runCount: Number(row.run_count),
-          minStartedAt: null,
-          maxStartedAt: null,
+          minStartedAt: row.min_started_at ? new Date(row.min_started_at).toISOString() : null,
+          maxStartedAt: row.max_started_at ? new Date(row.max_started_at).toISOString() : null,
         };
         if (hasCostName) {
           group.totalQuantity = new Decimal(row.total_quantity).toFixed(6);
