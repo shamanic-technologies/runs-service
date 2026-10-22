@@ -27,6 +27,7 @@ import {
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
 } from "../schemas.js";
+import { pgErrorCode } from "../db/pg-error.js";
 
 const router = Router();
 
@@ -114,7 +115,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       });
       res.status(201).json(created);
     } catch (err: any) {
-      if (err?.code === "23505" && idempotencyKey) {
+      if (pgErrorCode(err) === "23505" && idempotencyKey) {
         const [raceWinner] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
         if (raceWinner) {
           if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {

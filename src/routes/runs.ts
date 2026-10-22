@@ -48,6 +48,7 @@ import {
   costAggregateOwnSelectSql,
   costAggregateOwnPlatformSelectSql,
 } from "../services/cost-aggregator.js";
+import { pgErrorCode } from "../db/pg-error.js";
 
 const router = Router();
 
@@ -270,7 +271,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     } catch (err: any) {
       // Race-condition handling on idempotency_key — concurrent retry inserted
       // the silver row between pre-check and the trigger's insert. Re-fetch.
-      if (err?.code === "23505" && idempotencyKey) {
+      if (pgErrorCode(err) === "23505" && idempotencyKey) {
         const [raceWinner] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
         if (raceWinner) {
           if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
