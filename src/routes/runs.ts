@@ -48,6 +48,7 @@ import {
   costAggregateOwnSelectSql,
   costAggregateOwnPlatformSelectSql,
 } from "../services/cost-aggregator.js";
+import { pgErrorCode } from "../db/pg-error.js";
 
 const router = Router();
 
@@ -270,7 +271,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     } catch (err: any) {
       // Race-condition handling on idempotency_key — concurrent retry inserted
       // the silver row between pre-check and the trigger's insert. Re-fetch.
-      if (err?.code === "23505" && idempotencyKey) {
+      if (pgErrorCode(err) === "23505" && idempotencyKey) {
         const [raceWinner] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
         if (raceWinner) {
           if (raceWinner.serviceName !== serviceName || raceWinner.taskName !== taskName) {
@@ -788,13 +789,15 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     });
 
     // Restore 1-to-1 mapping for response: items that idempotency-collided return the existing row.
+    const newRowsById = new Map<string, any>(newRows.map((r: any) => [r.id, r]));
     const inserted: any[] = [];
     let createdIdx = 0;
     for (const item of items) {
       if (item.idempotencyKey && existingByKey.has(item.idempotencyKey)) {
         inserted.push(existingByKey.get(item.idempotencyKey));
       } else {
-        inserted.push(newRows[createdIdx]);
+        // Rows come back from `id IN (...)` in no guaranteed order: pair them by id.
+        inserted.push(newRowsById.get(itemsToCreate[createdIdx].costId));
         createdIdx++;
       }
     }
