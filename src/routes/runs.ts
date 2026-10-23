@@ -2,6 +2,7 @@ import { Router } from "express";
 import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, readDb } from "../db/index.js";
+import { uuidArray } from "../db/uuid-array.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
@@ -442,7 +443,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     const allCostRunIds = [...foundIds, ...descendantIds];
     const allCosts = allCostRunIds.length === 0
       ? []
-      : await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, allCostRunIds));
+      : await readDb.select().from(runsCosts).where(sql`${runsCosts.runId} = ANY(${uuidArray(allCostRunIds)})`);
     const costsByRunId = new Map<string, any[]>();
     for (const cost of allCosts) {
       const list = costsByRunId.get(cost.runId) || [];
@@ -456,7 +457,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
-      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      WHERE run_id = ANY(${uuidArray(descendantIds)})
       GROUP BY run_id
     `);
     const ownAggByRunId = new Map<string, any>(
@@ -600,7 +601,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
 
     let allDescendantCosts: any[] = [];
     if (descendantIds.length > 0) {
-      allDescendantCosts = await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
+      allDescendantCosts = await readDb.select().from(runsCosts).where(sql`${runsCosts.runId} = ANY(${uuidArray(descendantIds)})`);
     }
 
     // Per-descendant own-cost via SQL aggregation. Atomic literals via cost-aggregator.
@@ -609,7 +610,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
-      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      WHERE run_id = ANY(${uuidArray(descendantIds)})
       GROUP BY run_id
     `);
     const ownByRunId = new Map<string, any>(
