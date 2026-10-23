@@ -16,9 +16,11 @@ import vendorCostRoutes from "./routes/vendor-costs.js";
 import eventsRoutes from "./routes/events.js";
 import noCampaignSpendRoutes from "./routes/no-campaign-spend.js";
 import taskUnitsRoutes from "./routes/task-units.js";
+import outcomeOccurrenceRoutes from "./routes/outcome-occurrences.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
 import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
+import { startCostLedgerRefresh } from "./services/outcome-ledger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -54,6 +56,7 @@ app.use(vendorCostRoutes);
 app.use(eventsRoutes);
 app.use(noCampaignSpendRoutes);
 app.use(taskUnitsRoutes);
+app.use(outcomeOccurrenceRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
@@ -72,6 +75,9 @@ if (process.env.NODE_ENV !== "test") {
         // Clears the rollups' stale min/max so brand-history reads stay on the rollup
         // (services/stats-rollup-minmax-repair.ts). Also after listen().
         startStaleMinMaxRepair();
+        // The stored per-day production-cost ledger check + coverage series
+        // (services/outcome-ledger.ts): first tick ~60 s after boot, then every 15 min.
+        startCostLedgerRefresh();
       });
     })
     .catch((err) => {

@@ -32,6 +32,16 @@ describe("OpenAPI", () => {
     ]);
   });
 
+  it("documents the outcome-occurrence declaration and the production-cost reads (COST-ACCOUNTING-1023)", async () => {
+    const res = await request(app).get("/openapi.json");
+    expect(res.body.paths["/v1/runs/{id}/outcomes"]?.post).toBeDefined();
+    expect(res.body.paths["/v1/platform-runs/{id}/outcomes"]?.post).toBeDefined();
+    expect(res.body.paths["/internal/outcome-occurrences"]?.get).toBeDefined();
+    expect(res.body.paths["/internal/outcome-costs/ledger-check"]?.get).toBeDefined();
+    expect(res.body.paths["/internal/stats/outcome-coverage"]?.get).toBeDefined();
+    expect(Object.keys(res.body.components.schemas.OutcomeOccurrenceInput.properties).sort()).toEqual(["outcomeKey", "quantity", "subjectId", "subjectService"]);
+  });
+
   it("GET /openapi.json does not require authentication", async () => {
     const res = await request(app).get("/openapi.json");
     expect(res.status).toBe(200);

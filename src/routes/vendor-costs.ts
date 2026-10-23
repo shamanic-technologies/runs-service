@@ -29,7 +29,7 @@ const INTERVALS = new Set(["day", "week", "month"]);
  * lands on the same billed figure with a different vendor cost) opens a new
  * window, so each row matches at most ONE version and no cost is counted twice.
  */
-function versionWindowsSql(versions: VendorCostVersion[]) {
+export function versionWindowsSql(versions: VendorCostVersion[]) {
   const rows = versions
     .filter((v) => v.billedUnitCostInUsdCents !== null)
     .map((v) => ({

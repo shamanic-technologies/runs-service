@@ -173,6 +173,8 @@ describe("Silver table naming (migration 0031)", () => {
       // Migration 0040: the entry-run projection cascades with its run.
       { conname: "run_campaign_entries_run_id_fkey", tbl: "run_campaign_entries", ref: "runs" },
       { conname: "run_events_run_id_runs_id_fk", tbl: "run_events", ref: "runs" },
+      // Migration 0057: a declared outcome occurrence cascades with its run.
+      { conname: "run_outcomes_run_id_fkey", tbl: "run_outcomes", ref: "runs" },
       { conname: "runs_costs_run_id_runs_id_fk", tbl: "runs_costs", ref: "runs" },
       { conname: "runs_parent_run_id_runs_id_fk", tbl: "runs", ref: "runs" },
     ]);
