@@ -4115,9 +4115,10 @@
             "type": "string",
             "enum": [
               "recorded",
+              "redated",
               "already_recorded"
             ],
-            "description": "recorded = written by this call; already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
+            "description": "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
           }
         },
         "required": [
@@ -4365,6 +4366,9 @@
           "alreadyRecordedCount": {
             "type": "integer"
           },
+          "redatedCount": {
+            "type": "integer"
+          },
           "runs": {
             "type": "array",
             "items": {
@@ -4385,13 +4389,17 @@
                   "items": {
                     "$ref": "#/components/schemas/DeclaredOutcomeOccurrence"
                   }
+                },
+                "redatedCount": {
+                  "type": "integer"
                 }
               },
               "required": [
                 "runId",
                 "recordedCount",
                 "alreadyRecordedCount",
-                "occurrences"
+                "occurrences",
+                "redatedCount"
               ]
             }
           }
@@ -4400,6 +4408,7 @@
           "allocationVersion",
           "recordedCount",
           "alreadyRecordedCount",
+          "redatedCount",
           "runs"
         ]
       },
@@ -4429,7 +4438,8 @@
                         "run_not_found",
                         "run_org_mismatch",
                         "run_outcomes_voided",
-                        "invalid_occurred_at"
+                        "invalid_occurred_at",
+                        "not_run_owner"
                       ]
                     },
                     "message": {
@@ -4521,6 +4531,10 @@
                   ],
                   "description": "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (<= 8 days per 15-min tick, recent days first; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call).",
                   "example": "run_started_at"
+                },
+                "redate": {
+                  "type": "boolean",
+                  "description": "RE-DATE (requires occurredAt; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY recorded with a LATER effective time (declared through today's door before occurredAt existed) moves EARLIER to occurredAt (status `redated`). Never later: an occurrence already at or before occurredAt stays `already_recorded`. Occurrences not yet recorded are recorded at occurredAt as usual. Same quantity rule (another quantity = 409). One bronze `outcomes.redated` event per run keeps the previous time; the refresher recomputes every stored day the move touches. Idempotent: a replay finds nothing to move."
                 }
               },
               "required": [
@@ -10200,7 +10214,7 @@
     "/v1/platform-runs/outcomes/batch": {
       "post": {
         "summary": "Declare the outcome occurrences of many runs in one call (the backfill door)",
-        "description": "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
+        "description": "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. An occurrence declared earlier through today's door (stamped with that day) is moved back to its real time with `redate: true` on its run (owner service only, earlier only). Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
         "security": [
           {
             "apiKey": []
@@ -10227,7 +10241,7 @@
             }
           },
           "201": {
-            "description": "At least one occurrence recorded",
+            "description": "At least one occurrence recorded or re-dated",
             "content": {
               "application/json": {
                 "schema": {
@@ -10237,7 +10251,7 @@
             }
           },
           "400": {
-            "description": "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice) or `unknown_outcome_key`",
+            "description": "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice, redate without occurredAt) or `unknown_outcome_key`",
             "content": {
               "application/json": {
                 "schema": {

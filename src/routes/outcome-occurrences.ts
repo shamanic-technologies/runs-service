@@ -166,9 +166,10 @@ async function handleDeclareBatch(req: Request, res: Response) {
       if (!run) return invalid.push({ runId: e.runId, reason: "run_not_found" }), null;
       if (headerOrg && run.organization_id !== headerOrg) return invalid.push({ runId: e.runId, reason: "run_org_mismatch" }), null;
       if (run.voided) return invalid.push({ runId: e.runId, reason: "run_outcomes_voided" }), null;
+      if (e.redate && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `run belongs to ${run.service_name}` }), null;
       const effective = effectiveDeclaredAt(e.occurredAt, run);
       if ("error" in effective) return invalid.push({ runId: e.runId, reason: "invalid_occurred_at", message: effective.error }), null;
-      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, declaredAt: effective.at };
+      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, declaredAt: effective.at, redate: e.redate === true };
     });
     if (invalid.length > 0) {
       res.status(422).json({ error: "invalid_runs", details: { invalid } });
@@ -176,14 +177,15 @@ async function handleDeclareBatch(req: Request, res: Response) {
     }
     const results = await declareOutcomesBatch(declarations.filter((d) => d !== null));
     const out = entries.map((e, i) => {
-      const recordedCount = results[i].filter((o) => o.status === "recorded").length;
-      return { runId: e.runId, recordedCount, alreadyRecordedCount: results[i].length - recordedCount, occurrences: results[i] };
+      const count = (st: string) => results[i].filter((o) => o.status === st).length;
+      return { runId: e.runId, recordedCount: count("recorded"), redatedCount: count("redated"), alreadyRecordedCount: count("already_recorded"), occurrences: results[i] };
     });
-    const recordedCount = out.reduce((n, r) => n + r.recordedCount, 0);
-    res.status(recordedCount > 0 ? 201 : 200).json({
+    const sum = (k: "recordedCount" | "redatedCount" | "alreadyRecordedCount") => out.reduce((n, r) => n + r[k], 0);
+    res.status(sum("recordedCount") + sum("redatedCount") > 0 ? 201 : 200).json({
       allocationVersion: ALLOCATION_VERSION,
-      recordedCount,
-      alreadyRecordedCount: out.reduce((n, r) => n + r.alreadyRecordedCount, 0),
+      recordedCount: sum("recordedCount"),
+      redatedCount: sum("redatedCount"),
+      alreadyRecordedCount: sum("alreadyRecordedCount"),
       runs: out,
     });
   } catch (err) {

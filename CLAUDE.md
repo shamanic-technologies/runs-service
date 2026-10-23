@@ -932,6 +932,11 @@ resolution keys on declaration time.
 - **Allocation rule unchanged (v1)**: a backfill adds FACTS. The refresher recomputes every stored day ≥ LEAST(effective declaration,
   run start) day of an occurrence recorded after the day's `computed_at` (one grouped read); the same declarations recompute byte for
   byte (tested). Idempotent: a replay is `already_recorded`, nothing written; a recorded occurrence keeps its stored time.
+- **Re-date (migration 0061)**: batch entry `redate: true` + `occurredAt` moves occurrences of that run ALREADY recorded with a
+  LATER effective time EARLIER to `occurredAt` (status `redated`; never later). Owner only (x-service-name = run's service, else 422
+  `not_run_owner`). One bronze `outcomes.redated` event per run (id, new + previous time); the projection updates `declared_at` and sets
+  `recorded_at` to the re-date instant so the refresher recomputes the moved days. First user: instantly-service's 79k sends of
+  2026-05-17..10-22 declared through today's door on 2026-10-23 before `occurredAt` existed.
 - Guard: `tests/integration/outcome-backfill.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
