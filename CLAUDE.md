@@ -894,9 +894,10 @@ concept, a value-based joint-cost split.
   standard - reuseGain + producedNone == ledger on every basis), `GET /internal/stats/outcome-coverage` (stored daily
   series, fleet / service / task: the dashboard v2 Monitoring chart reads it).
 - **Stored days** (`cost_ledger_days`, `outcome_coverage_days`, `cost_ledger_computed_days`): in-process refresher
-  (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), <= 8 days a tick: the last 3
-  days always, then missing days back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an empty db) newest first,
-  and any day a declaration RECORDED after it moved (see "Backfill"). `computed_at` = the read transaction's now(). A day is
+  (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), days one by one within a 10-min budget
+  per tick: the last 3 days always, then days NEVER computed back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an
+  empty db), then days a declaration RECORDED after them moved (see "Backfill"), each newest first. Missing before stale: during
+  backfills the newest days are stale every tick, and a date-only order starved the history (8 of 265 days stored, 2026-10-23). `computed_at` = the read transaction's now(). A day is
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
