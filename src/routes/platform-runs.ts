@@ -23,7 +23,7 @@ import {
   UsageDiscountError,
 } from "../services/usage-discount.js";
 import {
-  CreateRunRequestSchema,
+  CreatePlatformRunRequestSchema,
   UpdateRunRequestSchema,
   AddCostsRequestSchema,
 } from "../schemas.js";
@@ -34,7 +34,7 @@ const router = Router();
 // Phase 2+5 — POST /v1/platform-runs. App writes only to bronze; trigger projects silver.
 router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
   try {
-    const parsed = CreateRunRequestSchema.safeParse(req.body);
+    const parsed = CreatePlatformRunRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
@@ -53,6 +53,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       taskName,
       idempotencyKey,
     } = parsed.data;
+    const parentRunId = parsed.data.parentRunId ?? null;
 
     if (idempotencyKey) {
       const [existing] = await db.select().from(runs).where(eq(runs.idempotencyKey, idempotencyKey)).limit(1);
@@ -65,6 +66,27 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
           return;
         }
         res.status(200).json(existing);
+        return;
+      }
+    }
+
+    // A named parent must exist (never silently a root) and must not sit in
+    // another org than the one this request states. Nothing is inherited.
+    if (parentRunId) {
+      const [parent] = await db
+        .select({ organizationId: runs.organizationId })
+        .from(runs)
+        .where(eq(runs.id, parentRunId))
+        .limit(1);
+      if (!parent) {
+        res.status(422).json({ error: "parent_run_not_found", parentRunId });
+        return;
+      }
+      if (req.orgId && parent.organizationId && req.orgId !== parent.organizationId) {
+        res.status(409).json({
+          error: "parent_org_mismatch",
+          conflicts: [`orgId: request="${req.orgId}" vs parent="${parent.organizationId}"`],
+        });
         return;
       }
     }
@@ -87,7 +109,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
     };
     const payload = {
       runId: id,
-      parentRunId: null,
+      parentRunId,
       organizationId: req.orgId ?? null,
       userId: req.userId ?? null,
       brandIds: req.headerBrandIds ?? brandIds ?? null,

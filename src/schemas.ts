@@ -88,6 +88,22 @@ export const CreateRunRequestSchema = z
 
 export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;
 
+// A platform run may be opened ON BEHALF of a caller's run (chat-service serving
+// another service's LLM call): it becomes that run's child, so its spend lands in
+// the caller's subtree and rolls into the caller's nearest declaring ancestor
+// (outcome ledger v1). The parent is named in the BODY, not x-run-id: several
+// callers already forward x-run-id to /v1/platform-runs and it has always been
+// ignored there; binding it would silently re-parent their runs.
+// Nothing is inherited from the parent (no org, user, brand, campaign, workflow,
+// attribution): the child stays exactly what its own headers/body say, so a
+// platform child of an ORG run is never charged to that org.
+export const CreatePlatformRunRequestSchema = CreateRunRequestSchema.extend({
+  parentRunId: z.string().uuid().optional().openapi({
+    description:
+      "Optional: the caller's run this platform run is made on behalf of (an org run or a platform run). The new run is created as its child (parentRunId), so its cost counts in that run's subtree. NOTHING is inherited from the parent: the child keeps only the org/user/brand/campaign/workflow its own request states (absent = org-less, platform-billed, never charged to the parent's org). Unknown parent = 422 parent_run_not_found. A stated x-org-id differing from the parent's org = 409 parent_org_mismatch. Absent = a root run, as before.",
+  }),
+}).openapi("CreatePlatformRunRequest");
+
 export const UpdateRunRequestSchema = z
   .object({
     status: z.enum(["completed", "failed"]),
@@ -2280,12 +2296,12 @@ registry.registerPath({
   path: "/v1/platform-runs",
   summary: "Create a platform-level run",
   description:
-    "Creates a run originating from a system-level caller (cron job, webhook handler, internal worker). Requires x-service-name. Accepts optional x-org-id and x-user-id headers — when provided, the values are stored on the row so the run can be attributed to an organization (e.g. a Stripe webhook charging a specific org's account). Both default to null when absent. Idempotency: pass body.idempotencyKey for safe retries (Stripe webhook redelivery, queue replay, etc.). Repeated calls return the original run with HTTP 200. The key is globally unique across the runs table — callers MUST self-namespace (e.g. `stripe:<txn_id>`). A mismatched (serviceName, taskName) on the same key returns 409.",
+    "Creates a run originating from a system-level caller (cron job, webhook handler, internal worker). Optional body.parentRunId opens it as the CHILD of a caller's run (its cost then counts in that run's subtree), inheriting nothing from it. Requires x-service-name. Accepts optional x-org-id and x-user-id headers — when provided, the values are stored on the row so the run can be attributed to an organization (e.g. a Stripe webhook charging a specific org's account). Both default to null when absent. Idempotency: pass body.idempotencyKey for safe retries (Stripe webhook redelivery, queue replay, etc.). Repeated calls return the original run with HTTP 200. The key is globally unique across the runs table — callers MUST self-namespace (e.g. `stripe:<txn_id>`). A mismatched (serviceName, taskName) on the same key returns 409.",
   security: [{ apiKey: [] }],
   request: {
     headers: WorkflowTrackingHeadersSchema,
     body: {
-      content: { "application/json": { schema: CreateRunRequestSchema } },
+      content: { "application/json": { schema: CreatePlatformRunRequestSchema } },
     },
   },
   responses: {
@@ -2303,7 +2319,11 @@ registry.registerPath({
     },
     401: { description: "Unauthorized" },
     409: {
-      description: "idempotencyKey collides with a run of different (serviceName, taskName)",
+      description: "idempotencyKey collides with a run of different (serviceName, taskName), or `parent_org_mismatch`: x-org-id names another org than the parent run's",
+      content: { "application/json": { schema: ValidationErrorSchema } },
+    },
+    422: {
+      description: "`parent_run_not_found`: body.parentRunId names no existing run (never created as a root instead)",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
   },
