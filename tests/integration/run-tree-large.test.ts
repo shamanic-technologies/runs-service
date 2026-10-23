@@ -17,7 +17,6 @@ describe("Run tree reads on a very large tree", () => {
   let rootId: string;
 
   beforeAll(async () => {
-    await cleanTestData([ORG]);
     const root = await insertTestRun({ organizationId: ORG, serviceName: "content-generation-service", taskName: "generate", status: "completed" });
     rootId = root.id;
     await db.execute(sql`
@@ -28,6 +27,13 @@ describe("Run tree reads on a very large tree", () => {
   }, 300_000);
 
   afterAll(async () => {
+    // Chunked: one 30k-row delete takes a lock per run in the rollup triggers.
+    for (;;) {
+      const gone = (await db.execute(sql`
+        DELETE FROM runs WHERE id IN (SELECT id FROM runs WHERE organization_id = ${ORG}::uuid AND parent_run_id IS NOT NULL LIMIT 2000) RETURNING id
+      `)) as any[];
+      if (gone.length === 0) break;
+    }
     await cleanTestData([ORG]);
     await closeDb();
   });
