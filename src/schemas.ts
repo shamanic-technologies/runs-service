@@ -2635,13 +2635,23 @@ export const OUTCOMES_BATCH_MAX_RUNS = 500;
 export const DeclareOutcomesBatchRequestSchema = z
   .object({
     runs: z
-      .array(z.object({ runId: z.string().regex(UUID_STRING_RE).openapi({ description: "The run (production order) these occurrences are declared on; each run at most once per call." }), ...declareRunOutcomesShape }))
+      .array(
+        z.object({
+          runId: z.string().regex(UUID_STRING_RE).openapi({ description: "The run (production order) these occurrences are declared on; each run at most once per call." }),
+          ...declareRunOutcomesShape,
+          redate: z.boolean().optional().openapi({
+            description:
+              "RE-DATE (requires occurredAt; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY recorded with a LATER effective time (declared through today's door before occurredAt existed) moves EARLIER to occurredAt (status `redated`). Never later: an occurrence already at or before occurredAt stays `already_recorded`. Occurrences not yet recorded are recorded at occurredAt as usual. Same quantity rule (another quantity = 409). One bronze `outcomes.redated` event per run keeps the previous time; the refresher recomputes every stored day the move touches. Idempotent: a replay finds nothing to move.",
+          }),
+        }),
+      )
       .min(1)
       .max(OUTCOMES_BATCH_MAX_RUNS),
   })
   .refine((b) => b.runs.every((r) => occurrenceCount(r) >= 1), { message: "each run states at least one produced or consumed occurrence" })
   .refine((b) => b.runs.reduce((n, r) => n + occurrenceCount(r), 0) <= 1000, { message: "at most 1000 occurrences per call" })
   .refine((b) => new Set(b.runs.map((r) => r.runId.toLowerCase())).size === b.runs.length, { message: "a run stated twice in the batch" })
+  .refine((b) => b.runs.every((r) => !r.redate || r.occurredAt !== undefined), { message: "redate needs occurredAt" })
   .openapi("DeclareOutcomesBatchRequest");
 
 export const OutcomeDirectionEnum = z.enum(["produced", "consumed"]).openapi("OutcomeDirection");
@@ -2656,7 +2666,7 @@ export const DeclaredOutcomeOccurrenceSchema = z
     quantity: z.string().openapi({ description: "6-decimal string." }),
     declaredAt: z.string().datetime().openapi({ description: "Effective declaration time: what every rule keys on (= recordedAt on time; the stated past instant for a backfill)." }),
     recordedAt: z.string().datetime().openapi({ description: "When runs-service recorded it." }),
-    status: z.enum(["recorded", "already_recorded"]).openapi({ description: "recorded = written by this call; already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
+    status: z.enum(["recorded", "redated", "already_recorded"]).openapi({ description: "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
   })
   .openapi("DeclaredOutcomeOccurrence");
 
@@ -2778,7 +2788,8 @@ export const DeclareOutcomesBatchResponseSchema = z
     allocationVersion: z.number().int(),
     recordedCount: z.number().int(),
     alreadyRecordedCount: z.number().int(),
-    runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true })),
+    redatedCount: z.number().int(),
+    runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true }).extend({ redatedCount: z.number().int() })),
   })
   .openapi("DeclareOutcomesBatchResponse");
 
@@ -2789,7 +2800,7 @@ export const OutcomesBatchInvalidResponseSchema = z
       invalid: z.array(
         z.object({
           runId: z.string(),
-          reason: z.enum(["run_not_found", "run_org_mismatch", "run_outcomes_voided", "invalid_occurred_at"]),
+          reason: z.enum(["run_not_found", "run_org_mismatch", "run_outcomes_voided", "invalid_occurred_at", "not_run_owner"]),
           message: z.string().optional(),
         }),
       ),
@@ -2802,13 +2813,13 @@ registry.registerPath({
   path: "/v1/platform-runs/outcomes/batch",
   summary: "Declare the outcome occurrences of many runs in one call (the backfill door)",
   description:
-    "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
+    "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. An occurrence declared earlier through today's door (stamped with that day) is moved back to its real time with `redate: true` on its run (owner service only, earlier only). Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: DeclareOutcomesBatchRequestSchema } } } },
   responses: {
-    201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareOutcomesBatchResponseSchema } } },
+    201: { description: "At least one occurrence recorded or re-dated", content: { "application/json": { schema: DeclareOutcomesBatchResponseSchema } } },
     200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareOutcomesBatchResponseSchema } } },
-    400: { description: "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice) or `unknown_outcome_key`", content: { "application/json": { schema: ValidationErrorSchema } } },
+    400: { description: "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice, redate without occurredAt) or `unknown_outcome_key`", content: { "application/json": { schema: ValidationErrorSchema } } },
     401: { description: "Unauthorized" },
     409: { description: "An occurrence already recorded with another quantity (conflicts[].runId), or a run voided while the call ran (run_outcomes_voided). Nothing written.", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
     422: { description: "invalid_runs: per-run reasons; nothing written", content: { "application/json": { schema: OutcomesBatchInvalidResponseSchema } } },

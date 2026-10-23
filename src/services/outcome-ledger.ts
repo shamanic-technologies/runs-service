@@ -86,7 +86,8 @@ export interface DeclaredOccurrence {
   declaredAt: string;
   /** When runs-service recorded it. */
   recordedAt: string;
-  status: "recorded" | "already_recorded";
+  /** recorded = written now; redated = was recorded later than the stated time, moved earlier to it; already_recorded = nothing written. */
+  status: "recorded" | "redated" | "already_recorded";
 }
 
 export class OutcomeDeclarationConflictError extends Error {
@@ -136,6 +137,12 @@ export interface DeclarationEntry {
   sourceService: string | null;
   /** Effective declaration time (backfill); null = on time. */
   declaredAt: Date | null;
+  /**
+   * RE-DATE: an occurrence of this run already recorded with a LATER effective
+   * time (declared through today's door before occurredAt existed) moves EARLIER
+   * to `declaredAt`. Never later. The caller checks it owns the run.
+   */
+  redate?: boolean;
 }
 
 /**
@@ -199,6 +206,25 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
   let existing = await readExisting();
   assertNoConflict(existing);
   const freshKeys = new Set<string>();
+  const redatedKeys = new Set<string>();
+  const redates = entries.flatMap((e, i) => {
+    if (!e.redate || !e.declaredAt) return [];
+    const at = e.declaredAt;
+    const moved = statedPerEntry[i]
+      .map((o) => ({ key: `${e.runId}|${occurrenceKeyOf(o.direction, o)}`, row: existing.get(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`) }))
+      .filter(({ row }) => row && new Date(row.declared_at) > at);
+    if (moved.length === 0) return [];
+    for (const m of moved) redatedKeys.add(m.key);
+    return [{
+      runId: e.runId,
+      eventType: "outcomes.redated",
+      sourceService: e.sourceService,
+      payload: {
+        allocationVersion: ALLOCATION_VERSION,
+        items: moved.map(({ row }) => ({ id: row.id, declared_at: at.toISOString(), previous_declared_at: new Date(row.declared_at).toISOString() })),
+      },
+    }];
+  });
   const events = entries.flatMap((e, i) => {
     const fresh = statedPerEntry[i].filter((o) => !existing.has(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`));
     if (fresh.length === 0) return [];
@@ -223,8 +249,8 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
     }];
   });
 
-  if (events.length > 0) {
-    await db.insert(outcomeDeclarationEvents).values(events);
+  if (events.length + redates.length > 0) {
+    await db.insert(outcomeDeclarationEvents).values([...events, ...redates]);
     existing = await readExisting();
     // A concurrent call may have recorded the same occurrence with another quantity.
     assertNoConflict(existing);
@@ -243,7 +269,7 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
         quantity: new Decimal(row.quantity).toFixed(6),
         declaredAt: new Date(row.declared_at).toISOString(),
         recordedAt: new Date(row.recorded_at).toISOString(),
-        status: freshKeys.has(key) ? "recorded" : "already_recorded",
+        status: freshKeys.has(key) ? "recorded" : redatedKeys.has(key) ? "redated" : "already_recorded",
       };
     }),
   );
