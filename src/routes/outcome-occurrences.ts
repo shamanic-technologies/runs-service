@@ -16,6 +16,7 @@ import {
   DuplicateOccurrenceInBodyError,
   OutcomeDeclarationConflictError,
   addDays,
+  normalizeOutcomeKey,
   checkLedgerRow,
   ledgerCheckInputOf,
   declareRunOutcomes,
@@ -25,6 +26,7 @@ import {
   type Money,
 } from "../services/outcome-ledger.js";
 import { VendorCostCatalogError } from "../services/vendor-costs.js";
+import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
 
 const router = Router();
 
@@ -45,6 +47,16 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
     const parsed = DeclareRunOutcomesRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    // Every key must be a catalogue step (legacy aliases normalized first).
+    const stated = [...(parsed.data.produced ?? []), ...(parsed.data.consumed ?? [])].map((o) => normalizeOutcomeKey(o.outcomeKey));
+    const unknown = await unknownOutcomeKeys(stated);
+    if (unknown.length > 0) {
+      res.status(400).json({
+        error: "unknown_outcome_key",
+        details: { unknownKeys: unknown, catalogue: "features-service GET /public/catalogue/steps (rows[].key)" },
+      });
       return;
     }
     const [run] = (await db.execute(sql`
@@ -71,6 +83,11 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
   } catch (err) {
     if (err instanceof DuplicateOccurrenceInBodyError) {
       res.status(400).json({ error: "Invalid request", details: err.message });
+      return;
+    }
+    if (err instanceof OutcomeCatalogueError) {
+      console.error("[Runs Service] outcome catalogue unreadable, declaration refused:", err.message);
+      res.status(502).json({ error: `outcome_catalogue_unavailable: ${err.message}` });
       return;
     }
     if (err instanceof OutcomeDeclarationConflictError) {

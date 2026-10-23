@@ -20,6 +20,14 @@ vi.mock("../../src/services/vendor-costs.js", async (importOriginal) => {
   return { ...actual, fetchVendorCostCatalog: catalog.fn };
 });
 
+// features-service's step catalogue (the keys a run may declare).
+const CATALOGUE = new Set(["email_checked", "email_found", "lead_found", "message_written", "message_sent", "post_published", "conversation"]);
+const stepCatalogue = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/outcome-catalogue.js")>();
+  return { ...actual, unknownOutcomeKeys: stepCatalogue.fn };
+});
+
 // billed 5 / vendor 1 per unit; "mystery" has no vendor price (unpriced).
 const VERSIONS = [
   { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
@@ -81,6 +89,7 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     await cleanTestData([ORG, ORG_B, null]);
     await clearLedgerDays();
     catalog.fn.mockResolvedValue(VERSIONS);
+    stepCatalogue.fn.mockImplementation(async (keys: string[]) => keys.filter((k) => !CATALOGUE.has(k)));
   });
 
   afterAll(async () => {
@@ -306,6 +315,18 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     expect((await declare(r.id, {})).status).toBe(400);
     expect((await declare(r.id, { produced: [{ outcomeKey: "Email Found", subjectService: "lead-service", subjectId: "x" }] })).status).toBe(400);
     expect((await declare(r.id, { produced: leads(1001) })).status).toBe(400);
+
+    const unknown = await declare(r.id, { produced: [{ outcomeKey: "positive_reply", subjectService: "lead-service", subjectId: "x" }] });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error).toBe("unknown_outcome_key");
+    expect(unknown.body.details.unknownKeys).toEqual(["positive_reply"]);
+
+    const { OutcomeCatalogueError } = await import("../../src/services/outcome-catalogue.js");
+    stepCatalogue.fn.mockRejectedValueOnce(new OutcomeCatalogueError("features-service step catalogue returned 503"));
+    const down = await declare(r.id, { produced: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: "y" }] });
+    expect(down.status).toBe(502);
+    const [{ n }] = (await db.execute(sql`SELECT count(*)::int AS n FROM run_outcomes WHERE run_id = ${r.id}::uuid`)) as any[];
+    expect(n).toBe(1); // nothing written while the catalogue was unreadable
 
     const other = await declare(r.id, body, getAuthHeaders({ orgId: ORG_B }));
     expect(other.status).toBe(409);

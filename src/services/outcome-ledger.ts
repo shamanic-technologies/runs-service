@@ -2,7 +2,7 @@
 //
 // A run is a PRODUCTION ORDER: it may state the outcome occurrences it PRODUCED
 // and the ones it CONSUMED. An occurrence = one catalogue outcome (features-service
-// `/public/catalogue/steps` key: `email_found`, `message_sent`, `positive_reply`…)
+// `/public/catalogue/steps` key: `email_found`, `message_sent`, `conversation` = Positive reply…)
 // reached by one subject, named by the service that owns it (lead-service lead id,
 // social-service post id…). Nothing else carries a cost.
 //

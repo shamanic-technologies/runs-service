@@ -2555,7 +2555,7 @@ export const OutcomeOccurrenceInputSchema = z
   .object({
     outcomeKey: z.string().regex(OUTCOME_KEY_RE).openapi({
       description:
-        "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, positive_reply, meeting_booked… Legacy `email_sent` is accepted and stored as `message_sent`.",
+        "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
       example: "email_checked",
     }),
     subjectService: z.string().regex(SUBJECT_SERVICE_RE).openapi({
@@ -2658,10 +2658,11 @@ for (const [path, auth] of [
     responses: {
       201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
       200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
-      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body) or run id", content: { "application/json": { schema: ValidationErrorSchema } } },
+      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
       401: { description: "Unauthorized" },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
       409: { description: "run_org_mismatch, or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
+      502: { description: "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
     },
   });
 }

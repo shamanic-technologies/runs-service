@@ -833,8 +833,9 @@ concept, a value-based joint-cost split.
 - **Declare**: `POST /v1/runs/:id/outcomes` (x-org-id = the run's org, else 409 `run_org_mismatch`) and
   `POST /v1/platform-runs/:id/outcomes`, body `{produced?: [{outcomeKey, subjectService, subjectId, quantity?}],
   consumed?: [{outcomeKey, subjectService, subjectId}]}`, <= 1000 per call. Keys = features-service catalogue steps
-  (format checked, not looked up: the write path never depends on another service); `email_sent` stored as
-  `message_sent`. Idempotent per (run, direction, key, subject); same occurrence with another quantity = 409; immutable.
+  (`GET /public/catalogue/steps` rows[].key, Positive reply = `conversation`), checked on every call
+  (`services/outcome-catalogue.ts`, 5 min cache, one re-read on a miss): unknown = 400 `unknown_outcome_key`,
+  catalogue unreadable = 502, never accepted blindly; `email_sent` stored as `message_sent`. Idempotent per (run, direction, key, subject); same occurrence with another quantity = 409; immutable.
   Bronze `outcome_declaration_events` -> trigger -> silver `run_outcomes`, as every lifecycle. Optional: a run that
   states nothing reads byte for byte as before.
 - **Allocation v1** (`ALLOCATION_VERSION`, served on every read; a change = v2, never an edit): each actual +
