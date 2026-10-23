@@ -218,7 +218,7 @@ function shareSql(col: string): SQL {
 /** Produced occurrences of the anchors in `anchorsCte`, with their cumulative quantity (v1 order: id). */
 function occurrencesOfAnchorsSql(anchorsCte: string): SQL {
   return sql`
-    SELECT o.id, o.run_id AS anchor_id, o.quantity,
+    SELECT o.id, o.run_id AS anchor_id, o.outcome_key, o.quantity,
            SUM(o.quantity) OVER (PARTITION BY o.run_id ORDER BY o.id) AS cum_q,
            SUM(o.quantity) OVER (PARTITION BY o.run_id) AS q_total
     FROM run_outcomes o
@@ -264,6 +264,7 @@ export interface CoverageDayRow {
 export interface LedgerDay {
   day: string;
   orgs: LedgerDayOrgRow[];
+  outcomeCosts: OutcomeCostRow[];
   coverage: CoverageDayRow[];
   unplacedRuns: number;
 }
@@ -306,16 +307,19 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     -- ONE run lookup per distinct run (org/service/task for the rows, parent for
     -- the walk): the PK probes are the cost of this statement on a cold cache.
     day_runs AS MATERIALIZED (
-      SELECT d.run_id, r.organization_id, r.service_name, r.task_name, r.parent_run_id
+      SELECT d.run_id, r.organization_id, r.service_name, r.task_name, r.parent_run_id,
+             r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug
       FROM (SELECT DISTINCT run_id FROM b) d
       CROSS JOIN LATERAL (
-        SELECT organization_id, service_name, task_name, parent_run_id FROM runs WHERE id = d.run_id OFFSET 0
+        SELECT organization_id, service_name, task_name, parent_run_id, brand_ids, campaign_id, workflow_slug, feature_slug
+        FROM runs WHERE id = d.run_id OFFSET 0
       ) r
     ),
     costed AS MATERIALIZED (
       SELECT b.run_id, COALESCE(b.rc_org, dr.organization_id) AS org_id,
              COALESCE(b.rc_org, dr.organization_id)::text AS org_key,
              dr.service_name, dr.task_name, b.gross, b.net,
+             dr.organization_id AS run_org, dr.brand_ids, dr.campaign_id, dr.workflow_slug, dr.feature_slug,
              ${vj.vendor} AS vendor, ${vj.unpriced} AS unpriced
       FROM b
       JOIN day_runs dr ON dr.run_id = b.run_id
@@ -341,8 +345,8 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     ),
     anchors AS MATERIALIZED (SELECT DISTINCT anchor_id FROM g),
     o AS MATERIALIZED (${occurrencesOfAnchorsSql("anchors")}),
-    shares AS (
-      SELECT g.org_key, o.id AS occurrence_id,
+    shares AS MATERIALIZED (
+      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key,
              ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
       FROM g JOIN o ON o.anchor_id = g.anchor_id
@@ -360,6 +364,29 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     alloc AS (
       SELECT s.org_key, COUNT(DISTINCT s.occurrence_id) AS occurrences, ${sums("s", "allocated")}
       FROM shares s GROUP BY s.org_key
+    ),
+    -- Totals per outcome and production tags (the declaring run's), for
+    -- GET /internal/stats/outcome-costs: the shares, and the spend that produced
+    -- none under the tags of the run that spent.
+    anchor_runs AS MATERIALIZED (
+      SELECT a.anchor_id, r.organization_id, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug
+      FROM anchors a
+      CROSS JOIN LATERAL (
+        SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug FROM runs WHERE id = a.anchor_id OFFSET 0
+      ) r
+    ),
+    produced_cost AS (
+      SELECT s.outcome_key, ar.organization_id::text AS org, s.org_key AS cost_org, ar.brand_ids, ar.campaign_id,
+             ar.workflow_slug, ar.feature_slug, ${sums("s", "m")}
+      FROM shares s JOIN anchor_runs ar ON ar.anchor_id = s.anchor_id
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    ),
+    none_cost AS (
+      SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
+             ${sums("c", "m")}
+      FROM costed c
+      WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
+      GROUP BY 1, 2, 3, 4, 5, 6
     ),
     cov AS (
       SELECT c.service_name, c.task_name,
@@ -386,6 +413,14 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
         LEFT JOIN unanchored n ON n.org_key IS NOT DISTINCT FROM l.org_key
       ), '[]'::json) AS orgs,
       COALESCE((SELECT json_agg(row_to_json(cov) ORDER BY cov.service_name, cov.task_name) FROM cov), '[]'::json) AS coverage,
+      COALESCE((SELECT json_agg(json_build_object(
+        'outcome_key', p.outcome_key, 'org', p.org, 'cost_org', p.cost_org, 'brand_ids', p.brand_ids, 'campaign_id', p.campaign_id,
+        'workflow_slug', p.workflow_slug, 'feature_slug', p.feature_slug,
+        'gross', p.m_gross::text, 'net', p.m_net::text, 'vendor', p.m_vendor::text, 'unpriced', p.m_unpriced::text)) FROM produced_cost p), '[]'::json) AS produced_cost,
+      COALESCE((SELECT json_agg(json_build_object(
+        'org', n.org, 'cost_org', n.cost_org, 'brand_ids', n.brand_ids, 'campaign_id', n.campaign_id,
+        'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug,
+        'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       (SELECT COUNT(*) FROM walked WHERE NOT found AND parent_id IS NOT NULL AND depth >= ${MAX_WALK_DEPTH}) AS unplaced_runs
   `;
 }
@@ -432,29 +467,52 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
       SELECT res.*, ROW_NUMBER() OVER (PARTITION BY res.producer_id ORDER BY res.declared_at, res.id) AS rn
       FROM res
     )
-    SELECT r.id, r.producer_id, r.producer_run_id, (r.producer_id IS NOT NULL AND r.rn > 1) AS reuse,
-           cr.organization_id AS org_id
+    SELECT r.id, r.run_id, r.outcome_key, r.producer_id, r.producer_run_id, (r.producer_id IS NOT NULL AND r.rn > 1) AS reuse,
+           cr.organization_id AS org_id, cr.brand_ids, cr.campaign_id, cr.workflow_slug, cr.feature_slug
     FROM ranked r
-    CROSS JOIN LATERAL (SELECT organization_id FROM runs WHERE id = r.run_id OFFSET 0) cr
+    CROSS JOIN LATERAL (
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug FROM runs WHERE id = r.run_id OFFSET 0
+    ) cr
     WHERE r.id IN (SELECT id FROM t)`;
 }
 
 interface ResolvedConsumption {
   id: string;
+  runId: string;
+  outcomeKey: string;
   producerId: string | null;
   producerRunId: string | null;
   reuse: boolean;
   orgId: string | null;
+  tags: RunTags;
 }
+
+/** The tags a production order carries (org apart). */
+export interface RunTags {
+  brandIds: string[] | null;
+  campaignId: string | null;
+  workflowSlug: string | null;
+  featureSlug: string | null;
+}
+
+const tagsOf = (r: any): RunTags => ({
+  brandIds: r.brand_ids ?? null,
+  campaignId: r.campaign_id ?? null,
+  workflowSlug: r.workflow_slug ?? null,
+  featureSlug: r.feature_slug ?? null,
+});
 
 async function resolveConsumptions(targetSql: SQL): Promise<ResolvedConsumption[]> {
   const rows = (await statsDb.execute(resolvedConsumptionsSql(targetSql))) as any[];
   return rows.map((r) => ({
     id: r.id,
+    runId: r.run_id,
+    outcomeKey: r.outcome_key,
     producerId: r.producer_id ?? null,
     producerRunId: r.producer_run_id ?? null,
     reuse: r.reuse === true,
     orgId: r.org_id ?? null,
+    tags: tagsOf(r),
   }));
 }
 
@@ -471,6 +529,97 @@ const plus = (a: Money, b: Money): Money => ({
   vendor: new Decimal(a.vendor).plus(b.vendor).toFixed(10),
   unpricedGross: new Decimal(a.unpricedGross).plus(b.unpricedGross).toFixed(10),
 });
+
+/** Wide precision for the split (the default 20 significant digits could drop decimals of a large total). */
+const D = Decimal.clone({ precision: 80, rounding: Decimal.ROUND_HALF_UP });
+const round10 = (x: Decimal.Value) => new D(x).toDecimalPlaces(10, Decimal.ROUND_HALF_UP);
+
+/**
+ * The produced outcome keys of each run's ANCHOR (itself or its nearest ancestor
+ * declaring a produced occurrence, rule 1), with the Σ quantity per key. A run
+ * without an anchor maps to []. Keys ordered by key.
+ */
+export async function anchorKeysOf(runIds: string[]): Promise<Map<string, Array<{ outcomeKey: string; quantity: string }>>> {
+  const out = new Map<string, Array<{ outcomeKey: string; quantity: string }>>();
+  if (runIds.length === 0) return out;
+  const ids = [...new Set(runIds)];
+  for (const id of ids) out.set(id, []);
+  const rows = (await statsDb.execute(sql`
+    WITH RECURSIVE
+    walk(run_id, cur_id, parent_id, depth, found) AS (
+      SELECT r.id, r.id, r.parent_run_id, 0, ${hasProducedSql(sql`r.id`)}
+      FROM unnest(${`{${ids.join(",")}}`}::uuid[]) AS i(id)
+      CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = i.id OFFSET 0) r
+      UNION ALL
+      SELECT w.run_id, p.id, p.parent_run_id, w.depth + 1, ${hasProducedSql(sql`p.id`)}
+      FROM walk w
+      CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = w.parent_id OFFSET 0) p
+      WHERE NOT w.found AND w.parent_id IS NOT NULL AND w.depth < ${MAX_WALK_DEPTH}
+    )
+    SELECT w.run_id, o.outcome_key, SUM(o.quantity)::text AS quantity
+    FROM walk w JOIN run_outcomes o ON o.run_id = w.cur_id AND o.direction = 'produced'
+    WHERE w.found
+    GROUP BY w.run_id, o.outcome_key
+    ORDER BY w.run_id, o.outcome_key
+  `)) as any[];
+  for (const r of rows) out.get(r.run_id)!.push({ outcomeKey: r.outcome_key, quantity: r.quantity });
+  return out;
+}
+
+export interface ConsumptionPart {
+  /** The outcome the consuming production order makes (its anchor's produced key). Null = its run produced nothing. */
+  outcomeKey: string | null;
+  /** Share of this consumption going to that outcome: 1 for a single-outcome order, quantity-weighted otherwise. */
+  weight: string;
+  standardCost: Money | null;
+}
+
+/**
+ * Splits one consumption over the outcomes its production order makes, in
+ * proportion to the quantities, by the v1 cumulative rounding at 10 decimals:
+ * the weights sum to exactly 1 and the standard costs to exactly the consumption's.
+ */
+export function splitConsumption(keys: Array<{ outcomeKey: string; quantity: string }>, standard: Money | null): ConsumptionPart[] {
+  if (keys.length === 0) return [{ outcomeKey: null, weight: "1.0000000000", standardCost: standard }];
+  const total = keys.reduce((s, k) => s.plus(k.quantity), new D(0));
+  let cum = new D(0);
+  return keys.map((k) => {
+    const prev = cum;
+    cum = cum.plus(k.quantity);
+    const share = (x: string) => round10(new D(x).times(cum).div(total)).minus(round10(new D(x).times(prev).div(total))).toFixed(10);
+    return {
+      outcomeKey: k.outcomeKey,
+      weight: share("1"),
+      standardCost: standard
+        ? { gross: share(standard.gross), net: share(standard.net), vendor: share(standard.vendor), unpricedGross: share(standard.unpricedGross) }
+        : null,
+    };
+  });
+}
+
+/**
+ * One stored row of the outcome totals (outcome_cost_days). Grain per kind:
+ *  - produced_count: occurrences DECLARED that UTC day, per outcome x declaring run's tags (cost org = its org).
+ *  - produced_cost: the v1 shares of the day's spend (UTC day of the cost row, org of the cost row),
+ *    per outcome x the declaring run's tags.
+ *  - consumed: consumptions DECLARED that UTC day, per (consuming outcome, consumed outcome) x the
+ *    consuming run's tags (cost org = its org): weights, reuses, unknown provenance, standard cost, reuse gain.
+ *  - none: the day's spend no declaring run carries, per the spending run's tags x cost org.
+ */
+export interface OutcomeCostRow {
+  kind: "produced_count" | "produced_cost" | "consumed" | "none";
+  outcomeKey: string | null;
+  consumedOutcomeKey: string | null;
+  organizationId: string | null;
+  costOrganizationId: string | null;
+  tags: RunTags;
+  n: string;
+  quantity: string;
+  reuses: string;
+  unknown: string;
+  money: Money;
+  reuseMoney: Money;
+}
 
 export async function computeLedgerDay(day: string, versions: VendorCostVersion[]): Promise<LedgerDay> {
   // Background work, one statement per day: a read-only transaction on the stats
@@ -501,8 +650,7 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
     WHERE direction = 'consumed'
       AND declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`);
-  const reused = consumptions.filter((c) => c.reuse);
-  const standard = reused.length > 0 ? await standardCostsOf(reused, versions) : new Map<string, Money>();
+  const standard = consumptions.some((c) => c.producerId) ? await standardCostsOf(consumptions, versions) : new Map<string, Money>();
   for (const c of consumptions) {
     if (c.producerId && !c.reuse) continue;
     const key = c.orgId ?? "";
@@ -520,8 +668,65 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
     o.reuse = plus(o.reuse, standard.get(c.producerId) ?? ZERO());
     o.reuseCount += 1;
   }
+  const outcomeCosts: OutcomeCostRow[] = [];
+  const blank = (kind: OutcomeCostRow["kind"], r: any): OutcomeCostRow => ({
+    kind,
+    outcomeKey: r.outcome_key ?? null,
+    consumedOutcomeKey: null,
+    organizationId: r.org ?? null,
+    costOrganizationId: r.cost_org ?? null,
+    tags: tagsOf(r),
+    n: fx(0),
+    quantity: fx(0),
+    reuses: fx(0),
+    unknown: fx(0),
+    money: { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) },
+    reuseMoney: ZERO(),
+  });
+  for (const r of row.produced_cost as any[]) outcomeCosts.push(blank("produced_cost", r));
+  for (const r of row.none_cost as any[]) outcomeCosts.push(blank("none", r));
+  const declared = (await statsDb.execute(sql`
+    SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
+           COUNT(*)::text AS n, SUM(o.quantity)::text AS quantity
+    FROM run_outcomes o
+    CROSS JOIN LATERAL (
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug FROM runs WHERE id = o.run_id OFFSET 0
+    ) r
+    WHERE o.direction = 'produced'
+      AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3, 4, 5, 6
+  `)) as any[];
+  for (const r of declared) {
+    outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
+  }
+  const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId));
+  const consumed = new Map<string, OutcomeCostRow>();
+  for (const c of consumptions) {
+    const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
+    for (const part of splitConsumption(consumingKeys.get(c.runId) ?? [], std)) {
+      const k = JSON.stringify([part.outcomeKey, c.outcomeKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug]);
+      if (!consumed.has(k)) {
+        consumed.set(k, {
+          ...blank("consumed", { outcome_key: part.outcomeKey, org: c.orgId, cost_org: c.orgId, ...{ brand_ids: c.tags.brandIds, campaign_id: c.tags.campaignId, workflow_slug: c.tags.workflowSlug, feature_slug: c.tags.featureSlug } }),
+          consumedOutcomeKey: c.outcomeKey,
+          money: ZERO(),
+        });
+      }
+      const g = consumed.get(k)!;
+      g.n = new Decimal(g.n).plus(part.weight).toFixed(10);
+      if (c.reuse) g.reuses = new Decimal(g.reuses).plus(part.weight).toFixed(10);
+      if (!c.producerId) g.unknown = new Decimal(g.unknown).plus(part.weight).toFixed(10);
+      if (part.standardCost) {
+        g.money = plus(g.money, part.standardCost);
+        if (c.reuse) g.reuseMoney = plus(g.reuseMoney, part.standardCost);
+      }
+    }
+  }
+  outcomeCosts.push(...consumed.values());
   return {
     day,
+    outcomeCosts,
     orgs: [...orgs.values()].sort((a, b) => (a.organizationId ?? "").localeCompare(b.organizationId ?? "")),
     coverage: (row.coverage as any[]).map((r) => ({
       serviceName: r.service_name,
@@ -541,6 +746,29 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cost_ledger_day'), hashtext(${d.day}))`);
     await tx.execute(sql`DELETE FROM cost_ledger_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     await tx.execute(sql`DELETE FROM outcome_coverage_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    await tx.execute(sql`DELETE FROM outcome_cost_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    if (d.outcomeCosts.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO outcome_cost_days (
+          day, allocation_version, kind, outcome_key, consumed_outcome_key, organization_id, cost_organization_id,
+          brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
+          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross
+        )
+        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
+               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup
+        FROM jsonb_to_recordset(${JSON.stringify(
+          d.outcomeCosts.map((o) => ({
+            kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
+            brands: o.tags.brandIds, cmp: o.tags.campaignId, wf: o.tags.workflowSlug, ft: o.tags.featureSlug,
+            n: o.n, q: o.quantity, ru: o.reuses, up: o.unknown,
+            g: o.money.gross, ne: o.money.net, v: o.money.vendor, u: o.money.unpricedGross,
+            rg: o.reuseMoney.gross, rn: o.reuseMoney.net, rv: o.reuseMoney.vendor, rup: o.reuseMoney.unpricedGross,
+          })),
+        )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
+                        n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
+                        rg numeric, rn numeric, rv numeric, rup numeric)
+      `);
+    }
     if (d.orgs.length > 0) {
       await tx.execute(sql`
         INSERT INTO cost_ledger_days (
@@ -579,9 +807,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, now())
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, now(), true)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true
     `);
   });
 }
@@ -643,6 +871,7 @@ export async function daysToCompute(now = new Date()): Promise<string[]> {
   const rows = (await db.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
+      AND outcome_costs -- a day stored before the outcome totals (0058) is recomputed
   `)) as any[];
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();
@@ -765,6 +994,8 @@ export interface OccurrenceWithCost {
   };
   /** PRODUCED: its production (= standard) cost. CONSUMED: null. */
   cost: Money | null;
+  /** PRODUCED: `cost` per (UTC day, org) of the spend it carries (sums exactly to cost). CONSUMED: null. */
+  costSlices: CostSlice[] | null;
   /** CONSUMED: the producing occurrence it resolved to and the standard cost charged. PRODUCED: null. */
   consumption: {
     sourceOccurrenceId: string | null;
@@ -772,6 +1003,8 @@ export interface OccurrenceWithCost {
     reuse: boolean;
     provenance: "known" | "unknown";
     standardCost: Money | null;
+    /** The outcome(s) the consuming production order makes, and this consumption's share of each (weights sum to 1). */
+    consumingOutcomes: ConsumptionPart[];
   } | null;
 }
 
@@ -782,6 +1015,20 @@ export interface OccurrenceWithCost {
  * groups the stored days split, so Σ occurrences of a day = that day's allocated.
  */
 export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[]): Promise<Map<string, Money>> {
+  const slices = await occurrenceCostSlices(anchorIds, versions);
+  return new Map([...slices].map(([id, c]) => [id, c.total]));
+}
+
+export interface CostSlice {
+  /** UTC day of the cost rows. */
+  day: string;
+  /** Org of the cost rows (the ledger check's org: null for platform-billed spend). */
+  costOrganizationId: string | null;
+  cost: Money;
+}
+
+/** Per produced occurrence: its cost and the (UTC day, cost org) slices it sums, day then org order. */
+export async function occurrenceCostSlices(anchorIds: string[], versions: VendorCostVersion[]): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
   if (anchorIds.length === 0) return new Map();
   const vj = vendorJoinSql("b");
   const rows = (await statsDb.execute(sql`
@@ -814,27 +1061,40 @@ export async function occurrenceCosts(anchorIds: string[], versions: VendorCostV
       GROUP BY 1, 2, 3
     ),
     o AS MATERIALIZED (${occurrencesOfAnchorsSql("anchors")})
-    SELECT o.id,
-      COALESCE(SUM(${shareSql("gross")}), 0)::text AS gross,
-      COALESCE(SUM(${shareSql("net")}), 0)::text AS net,
-      COALESCE(SUM(${shareSql("vendor")}), 0)::text AS vendor,
-      COALESCE(SUM(${shareSql("unpriced")}), 0)::text AS unpriced
+    SELECT o.id, to_char(g.day, 'YYYY-MM-DD') AS day, g.org_key,
+      ${shareSql("gross")}::text AS gross, ${shareSql("net")}::text AS net,
+      ${shareSql("vendor")}::text AS vendor, ${shareSql("unpriced")}::text AS unpriced
     FROM o LEFT JOIN g ON g.anchor_id = o.anchor_id
-    GROUP BY o.id
+    ORDER BY o.id, g.day, g.org_key NULLS FIRST
   `)) as any[];
-  return new Map(rows.map((r) => [r.id as string, { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) }]));
+  const out = new Map<string, { total: Money; slices: CostSlice[] }>();
+  for (const r of rows) {
+    if (!out.has(r.id)) out.set(r.id, { total: ZERO(), slices: [] });
+    if (r.day === null) continue; // no spend under this occurrence's run
+    const c = out.get(r.id)!;
+    const cost = { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) };
+    c.slices.push({ day: r.day, costOrganizationId: r.org_key ?? null, cost });
+    c.total = plus(c.total, cost);
+  }
+  return out;
 }
 
-function consumptionOf(c: ResolvedConsumption | undefined, costs: Map<string, Money>): OccurrenceWithCost["consumption"] {
+function consumptionOf(
+  c: ResolvedConsumption | undefined,
+  costs: Map<string, Money>,
+  keys: Array<{ outcomeKey: string; quantity: string }>,
+): OccurrenceWithCost["consumption"] {
   if (!c || !c.producerId) {
-    return { sourceOccurrenceId: null, sourceRunId: null, reuse: false, provenance: "unknown", standardCost: null };
+    return { sourceOccurrenceId: null, sourceRunId: null, reuse: false, provenance: "unknown", standardCost: null, consumingOutcomes: splitConsumption(keys, null) };
   }
+  const standardCost = costs.get(c.producerId) ?? null;
   return {
     sourceOccurrenceId: c.producerId,
     sourceRunId: c.producerRunId,
     reuse: c.reuse,
     provenance: "known",
-    standardCost: costs.get(c.producerId) ?? null,
+    standardCost,
+    consumingOutcomes: splitConsumption(keys, standardCost),
   };
 }
 
@@ -871,7 +1131,9 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
       ...resolved.filter((c) => c.producerRunId).map((c) => c.producerRunId!),
     ]),
   ];
-  const costs = anchors.length > 0 ? await occurrenceCosts(anchors, await fetchVendorCostCatalog()) : new Map<string, Money>();
+  const sliced = anchors.length > 0 ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog()) : new Map<string, { total: Money; slices: CostSlice[] }>();
+  const costs = new Map([...sliced].map(([id, c]) => [id, c.total]));
+  const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string));
   return {
     occurrences: page.map((r) => ({
       id: r.id,
@@ -893,7 +1155,8 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
         audienceId: r.audience_id ?? null,
       },
       cost: r.direction === "produced" ? costs.get(r.id) ?? null : null,
-      consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs) : null,
+      costSlices: r.direction === "produced" ? sliced.get(r.id)?.slices ?? null : null,
+      consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs, consumingKeys.get(r.run_id) ?? []) : null,
     })),
     nextCursor: rows.length > f.limit ? page[page.length - 1].id : null,
   };
