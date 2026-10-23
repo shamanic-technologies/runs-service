@@ -870,6 +870,18 @@ concept, a value-based joint-cost split.
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
 
+## A platform run made on behalf of a caller's run (`body.parentRunId`, COST-ACCOUNTING-1023-P1)
+
+chat-service serves platform LLM calls / judgments to other services (instantly's reply classifier...). `POST /v1/platform-runs`
+takes an optional **body** `parentRunId` (an org run or a platform run): the new run is that run's CHILD, so its cost counts in the
+parent's subtree and rolls into the nearest declaring ancestor (ledger v1). **Nothing is inherited** (org, user, brands, campaign,
+workflow, attribution): the child keeps only what its own request states, so a platform child of an ORG run stays org-less and
+platform-billed (`runs_costs.organization_id` NULL, outside org-usage-total / org-actual-total / no-campaign totals). The outcome
+ledger groups by the COST ROW's org, so that spend sits in the NULL-org slice of the anchor's occurrences and every per-(day, org)
+check still balances. Body, not `x-run-id`: several callers (cloudflare-service, ahref...) already forward `x-run-id` to platform-runs
+and it has always been ignored; binding it would re-parent them. Unknown parent = 422 `parent_run_not_found` (never a root);
+stated `x-org-id` != parent's org = 409 `parent_org_mismatch`; absent = root, as before. Guard: `tests/integration/platform-run-parent.test.ts`.
+
 ## `/health` answers about the pool, and never queues behind it
 
 `/health` runs `SELECT 1` through the same postgres.js pool as the cost
