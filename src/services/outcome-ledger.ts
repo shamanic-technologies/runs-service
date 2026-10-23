@@ -33,6 +33,9 @@
 //      the same standard cost with no new spend, the "reuse gain" line, booked on
 //      the consuming run's org and the consumption's UTC day. No producer =
 //      unknown provenance (counted, never $0, never charged).
+//   "Declared" everywhere = run_outcomes.declared_at, the EFFECTIVE declaration
+//   time: the recording instant, or the past instant a BACKFILL stated
+//   (`occurredAt`, migration 0060). A backfill adds facts, not a rule: v1 holds.
 //   Check, per (UTC day, org), exact on every basis:
 //      standard (spread + reuse charges) - reuse gain + produced none = ledger.
 
@@ -46,7 +49,7 @@ import { versionWindowsSql } from "../routes/vendor-costs.js";
 
 export const ALLOCATION_VERSION = 1;
 export const ALLOCATION_RULE =
-  "v1: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day.";
+  "v1: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording).";
 
 /** Legacy keys accepted on input and stored under their successor (never emitted). */
 export const LEGACY_OUTCOME_KEYS: Readonly<Record<string, string>> = { email_sent: "message_sent" };
@@ -79,12 +82,15 @@ export interface DeclaredOccurrence {
   subjectService: string;
   subjectId: string;
   quantity: string;
+  /** EFFECTIVE declaration time: what every rule and day series keys on (= recordedAt for an on-time declaration). */
   declaredAt: string;
+  /** When runs-service recorded it. */
+  recordedAt: string;
   status: "recorded" | "already_recorded";
 }
 
 export class OutcomeDeclarationConflictError extends Error {
-  constructor(public readonly conflicts: Array<{ direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; storedQuantity: string; statedQuantity: string }>) {
+  constructor(public readonly conflicts: Array<{ runId: string; direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; storedQuantity: string; statedQuantity: string }>) {
     super("outcome occurrence already recorded with another quantity");
   }
 }
@@ -98,69 +104,112 @@ export class DuplicateOccurrenceInBodyError extends Error {
 const occurrenceKeyOf = (d: Direction, o: { outcomeKey: string; subjectService: string; subjectId: string }) =>
   `${d}|${o.outcomeKey}|${o.subjectService}|${o.subjectId}`;
 
+/** `occurredAt` value meaning "the run's own start". */
+export const OCCURRED_AT_RUN_START = "run_started_at";
+
 /**
- * Records the occurrences a run states. Idempotent per (run, direction, outcome,
- * subject): a replayed item is `already_recorded` (no bronze written for it), a
- * replay with ANOTHER quantity is a conflict (409), never a silent rewrite.
+ * BACKFILL (COST-BACKFILL-1023-RUNS): the effective declaration time of a
+ * declaration stating `occurredAt`. Absent = on time (null: the recording
+ * instant). `run_started_at` = the run's start. An ISO instant must sit between
+ * the run's start and now: an outcome never precedes its production order, and
+ * a declaration never lands in the future. Returns the instant, or the reason it
+ * is refused.
  */
-export async function declareRunOutcomes(
-  runId: string,
-  body: { produced?: OccurrenceInput[]; consumed?: OccurrenceInput[] },
-  sourceService: string | null,
-): Promise<DeclaredOccurrence[]> {
-  const stated: Array<{ direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; quantity: string }> = [];
-  const seen = new Set<string>();
-  for (const direction of ["produced", "consumed"] as const) {
-    for (const item of body[direction] ?? []) {
-      const o = {
-        direction,
-        outcomeKey: normalizeOutcomeKey(item.outcomeKey),
-        subjectService: item.subjectService,
-        subjectId: item.subjectId,
-        quantity: new Decimal(item.quantity ?? 1).toFixed(6),
-      };
-      const k = occurrenceKeyOf(direction, o);
-      if (seen.has(k)) throw new DuplicateOccurrenceInBodyError(k);
-      seen.add(k);
-      stated.push(o);
+export function effectiveDeclaredAt(
+  occurredAt: string | undefined,
+  run: { started_at: Date | string },
+  now = new Date(),
+): { at: Date | null } | { error: string } {
+  if (occurredAt === undefined) return { at: null };
+  const started = new Date(run.started_at);
+  if (occurredAt === OCCURRED_AT_RUN_START) return { at: started };
+  const at = new Date(occurredAt);
+  if (Number.isNaN(at.getTime())) return { error: "occurredAt must be an ISO instant or run_started_at" };
+  if (at < started) return { error: `occurredAt ${at.toISOString()} is before the run started (${started.toISOString()})` };
+  if (at > now) return { error: `occurredAt ${at.toISOString()} is in the future` };
+  return { at };
+}
+
+export interface DeclarationEntry {
+  runId: string;
+  body: { produced?: OccurrenceInput[]; consumed?: OccurrenceInput[] };
+  sourceService: string | null;
+  /** Effective declaration time (backfill); null = on time. */
+  declaredAt: Date | null;
+}
+
+/**
+ * Records the occurrences each run states, in one bronze write (one event per
+ * run with something new). Idempotent per (run, direction, outcome, subject): a
+ * replayed item is `already_recorded` (no bronze written for it, whatever time it
+ * states: the stored effective time stays), a replay with ANOTHER quantity is a
+ * conflict (409), never a silent rewrite.
+ */
+export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise<DeclaredOccurrence[][]> {
+  const statedPerEntry = entries.map((e) => {
+    const stated: Array<{ direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; quantity: string }> = [];
+    const seen = new Set<string>();
+    for (const direction of ["produced", "consumed"] as const) {
+      for (const item of e.body[direction] ?? []) {
+        const o = {
+          direction,
+          outcomeKey: normalizeOutcomeKey(item.outcomeKey),
+          subjectService: item.subjectService,
+          subjectId: item.subjectId,
+          quantity: new Decimal(item.quantity ?? 1).toFixed(6),
+        };
+        const k = occurrenceKeyOf(direction, o);
+        if (seen.has(k)) throw new DuplicateOccurrenceInBodyError(`${e.runId}|${k}`);
+        seen.add(k);
+        stated.push(o);
+      }
     }
-  }
+    return stated;
+  });
+  const runIds = entries.map((e) => e.runId);
+  if (new Set(runIds).size !== runIds.length) throw new DuplicateOccurrenceInBodyError("a run stated twice in the batch");
 
   const readExisting = async () => {
     const rows = (await db.execute(sql`
-      SELECT id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity, declared_at
-      FROM run_outcomes WHERE run_id = ${runId}::uuid
+      SELECT id, run_id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity,
+             declared_at, COALESCE(recorded_at, declared_at) AS recorded_at
+      FROM run_outcomes WHERE run_id = ANY(${`{${runIds.join(",")}}`}::uuid[])
     `)) as any[];
-    return new Map(rows.map((r) => [occurrenceKeyOf(r.direction, { outcomeKey: r.outcome_key, subjectService: r.subject_service, subjectId: r.subject_id }), r]));
+    return new Map(rows.map((r) => [`${r.run_id}|${occurrenceKeyOf(r.direction, { outcomeKey: r.outcome_key, subjectService: r.subject_service, subjectId: r.subject_id })}`, r]));
   };
 
   const assertNoConflict = (existing: Map<string, any>) => {
-    const conflicts = stated
-      .map((o) => ({ o, row: existing.get(occurrenceKeyOf(o.direction, o)) }))
-      .filter(({ o, row }) => row && !new Decimal(row.quantity).eq(o.quantity))
-      .map(({ o, row }) => ({
-        direction: o.direction,
-        outcomeKey: o.outcomeKey,
-        subjectService: o.subjectService,
-        subjectId: o.subjectId,
-        storedQuantity: new Decimal(row.quantity).toFixed(6),
-        statedQuantity: o.quantity,
-      }));
+    const conflicts = entries.flatMap((e, i) =>
+      statedPerEntry[i]
+        .map((o) => ({ o, row: existing.get(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`) }))
+        .filter(({ o, row }) => row && !new Decimal(row.quantity).eq(o.quantity))
+        .map(({ o, row }) => ({
+          runId: e.runId,
+          direction: o.direction,
+          outcomeKey: o.outcomeKey,
+          subjectService: o.subjectService,
+          subjectId: o.subjectId,
+          storedQuantity: new Decimal(row.quantity).toFixed(6),
+          statedQuantity: o.quantity,
+        })),
+    );
     if (conflicts.length > 0) throw new OutcomeDeclarationConflictError(conflicts);
   };
 
   let existing = await readExisting();
   assertNoConflict(existing);
-  const fresh = stated.filter((o) => !existing.has(occurrenceKeyOf(o.direction, o)));
-  const freshKeys = new Set(fresh.map((o) => occurrenceKeyOf(o.direction, o)));
-
-  if (fresh.length > 0) {
-    await db.insert(outcomeDeclarationEvents).values({
-      runId,
+  const freshKeys = new Set<string>();
+  const events = entries.flatMap((e, i) => {
+    const fresh = statedPerEntry[i].filter((o) => !existing.has(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`));
+    if (fresh.length === 0) return [];
+    for (const o of fresh) freshKeys.add(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`);
+    return [{
+      runId: e.runId,
       eventType: "outcomes.declared",
-      sourceService,
+      sourceService: e.sourceService,
       payload: {
         allocationVersion: ALLOCATION_VERSION,
+        ...(e.declaredAt && { backfill: true }),
         items: fresh.map((o) => ({
           id: randomUUID(),
           direction: o.direction,
@@ -168,27 +217,47 @@ export async function declareRunOutcomes(
           subject_service: o.subjectService,
           subject_id: o.subjectId,
           quantity: o.quantity,
+          ...(e.declaredAt && { declared_at: e.declaredAt.toISOString() }),
         })),
       },
-    });
+    }];
+  });
+
+  if (events.length > 0) {
+    await db.insert(outcomeDeclarationEvents).values(events);
     existing = await readExisting();
     // A concurrent call may have recorded the same occurrence with another quantity.
     assertNoConflict(existing);
   }
 
-  return stated.map((o) => {
-    const row = existing.get(occurrenceKeyOf(o.direction, o));
-    return {
-      id: row.id,
-      direction: o.direction,
-      outcomeKey: o.outcomeKey,
-      subjectService: o.subjectService,
-      subjectId: o.subjectId,
-      quantity: new Decimal(row.quantity).toFixed(6),
-      declaredAt: new Date(row.declared_at).toISOString(),
-      status: freshKeys.has(occurrenceKeyOf(o.direction, o)) ? "recorded" : "already_recorded",
-    };
-  });
+  return entries.map((e, i) =>
+    statedPerEntry[i].map((o) => {
+      const key = `${e.runId}|${occurrenceKeyOf(o.direction, o)}`;
+      const row = existing.get(key);
+      return {
+        id: row.id,
+        direction: o.direction,
+        outcomeKey: o.outcomeKey,
+        subjectService: o.subjectService,
+        subjectId: o.subjectId,
+        quantity: new Decimal(row.quantity).toFixed(6),
+        declaredAt: new Date(row.declared_at).toISOString(),
+        recordedAt: new Date(row.recorded_at).toISOString(),
+        status: freshKeys.has(key) ? "recorded" : "already_recorded",
+      };
+    }),
+  );
+}
+
+/** One run's declaration (see declareOutcomesBatch). */
+export async function declareRunOutcomes(
+  runId: string,
+  body: { produced?: OccurrenceInput[]; consumed?: OccurrenceInput[] },
+  sourceService: string | null,
+  declaredAt: Date | null = null,
+): Promise<DeclaredOccurrence[]> {
+  const [out] = await declareOutcomesBatch([{ runId, body, sourceService, declaredAt }]);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +407,12 @@ export interface CoverageDayRow {
 
 export interface LedgerDay {
   day: string;
+  /**
+   * Start of the day's read transaction (its now()), stored as computed_at: a
+   * declaration recorded later (recorded_at = its own transaction's now()) reads
+   * as newer than the day, so the refresher recomputes the day it moves.
+   */
+  computedAt: Date;
   orgs: LedgerDayOrgRow[];
   outcomeCosts: OutcomeCostRow[];
   coverage: CoverageDayRow[];
@@ -700,9 +775,12 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
   // Background work, one statement per day: a read-only transaction on the stats
   // pool with its own timeout (the pool's 30 s is for request reads; on a cold,
   // loaded box a day's ~25k run lookups took minutes, 2026-10-23).
+  let computedAt = new Date();
   const [row] = (await statsDb.transaction(async (tx) => {
     await tx.execute(sql`SET TRANSACTION READ ONLY`);
     await tx.execute(sql`SET LOCAL statement_timeout = '900s'`);
+    const [t] = (await tx.execute(sql`SELECT now() AS at`)) as any[];
+    computedAt = new Date(t.at);
     return tx.execute(ledgerDaySql(day, versions));
   })) as any[];
   const orgs = new Map<string, LedgerDayOrgRow>();
@@ -801,6 +879,7 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
   outcomeCosts.push(...consumed.values());
   return {
     day,
+    computedAt,
     outcomeCosts,
     orgs: [...orgs.values()].sort((a, b) => (a.organizationId ?? "").localeCompare(b.organizationId ?? "")),
     coverage: (row.coverage as any[]).map((r) => ({
@@ -883,7 +962,7 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
     }
     await tx.execute(sql`
       INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, now(), true)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true)
       ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true
     `);
   });
@@ -930,6 +1009,7 @@ export function ledgerCheckInputOf(r: Pick<LedgerDayOrgRow, "ledger" | "allocate
 // Refresher: the stored daily series
 // ---------------------------------------------------------------------------
 
+/** Days always kept stored back from today, even on a database with no older spend. */
 export const LEDGER_BACKFILL_DAYS = 60;
 /** Recent days are always recomputed: costs keep landing (holds turn actual, late writes). */
 const RECOMPUTE_RECENT_DAYS = 3;
@@ -939,10 +1019,23 @@ const FIRST_TICK_MS = 60_000;
 export const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 export const addDays = (day: string, n: number) => utcDay(new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000));
 
-/** Days the next tick must (re)compute, oldest first. */
-export async function daysToCompute(now = new Date()): Promise<string[]> {
+/**
+ * First UTC day the refresher keeps stored: the first day of spend in the ledger
+ * (2026-02-02 in prod), so a backfill on any past run lands in a stored day and
+ * the check covers 100 % of spend, or LEDGER_BACKFILL_DAYS back, whichever is first.
+ */
+export async function firstLedgerDay(today: string): Promise<string> {
+  const [row] = (await db.execute(sql`
+    SELECT to_char(MIN(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day FROM runs_costs
+  `)) as any[];
+  const floor = addDays(today, -(LEDGER_BACKFILL_DAYS - 1));
+  return row?.day && row.day < floor ? row.day : floor;
+}
+
+/** Days the next tick must (re)compute: recent days, then missing or stale days newest first. */
+export async function daysToCompute(now = new Date(), firstDay?: string): Promise<string[]> {
   const today = utcDay(now);
-  const first = addDays(today, -(LEDGER_BACKFILL_DAYS - 1));
+  const first = firstDay ?? (await firstLedgerDay(today));
   const rows = (await db.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
@@ -950,31 +1043,25 @@ export async function daysToCompute(now = new Date()): Promise<string[]> {
   `)) as any[];
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();
-  for (let i = 0; i < LEDGER_BACKFILL_DAYS; i++) {
-    const day = addDays(first, i);
-    if (!computed.has(day)) out.add(day);
-  }
+  for (let day = first; day <= today; day = addDays(day, 1)) if (!computed.has(day)) out.add(day);
   for (let i = 0; i < RECOMPUTE_RECENT_DAYS; i++) out.add(addDays(today, -i));
-  // A declaration recorded after a day was computed can move that day: the
-  // anchor's (and its descendants') cost rows land on or after its start.
+  // A declaration RECORDED after a day was computed (on time or a backfill) can
+  // move that day when the day is on or after its run's start or its effective
+  // declaration day: a produced one re-anchors the run's (and its descendants')
+  // cost rows, which land from the run's start; a consumption counts on its
+  // effective day and ranks the later reuses of its producer. One grouped read:
+  // per earliest affected day, the newest recording instant.
   if (computed.size > 0) {
     const oldest = new Date(Math.min(...[...computed.values()].map((d) => d.getTime())));
-    const [late] = (await db.execute(sql`
-      SELECT to_char(MIN(r.started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day
+    const late = (await db.execute(sql`
+      SELECT to_char(LEAST(o.declared_at, r.started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+             MAX(COALESCE(o.recorded_at, o.declared_at)) AS last_recorded
       FROM run_outcomes o JOIN runs r ON r.id = o.run_id
-      WHERE o.direction = 'produced' AND o.declared_at > ${oldest.toISOString()}::timestamptz
+      WHERE COALESCE(o.recorded_at, o.declared_at) > ${oldest.toISOString()}::timestamptz
+      GROUP BY 1
     `)) as any[];
-    if (late?.day) {
-      for (const [day, at] of computed) {
-        if (day < late.day) continue;
-        const [stale] = (await db.execute(sql`
-          SELECT 1 AS x FROM run_outcomes o JOIN runs r ON r.id = o.run_id
-          WHERE o.direction = 'produced' AND o.declared_at > ${at.toISOString()}::timestamptz
-            AND r.started_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-          LIMIT 1
-        `)) as any[];
-        if (stale) out.add(day);
-      }
+    for (const [day, at] of computed) {
+      if (late.some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
     }
   }
   // A declaration taken back after a day was computed moves every day from the
@@ -998,9 +1085,9 @@ export async function daysToCompute(now = new Date()): Promise<string[]> {
 /** Days per tick: the backfill spreads over ticks instead of loading the box at once. */
 export const MAX_DAYS_PER_TICK = 8;
 
-export async function refreshLedgerDays(now = new Date(), maxDays = MAX_DAYS_PER_TICK): Promise<{ computed: string[]; failed: string[] }> {
+export async function refreshLedgerDays(now = new Date(), maxDays = MAX_DAYS_PER_TICK, firstDay?: string): Promise<{ computed: string[]; failed: string[] }> {
   const versions = await fetchVendorCostCatalog();
-  const days = (await daysToCompute(now)).slice(0, maxDays);
+  const days = (await daysToCompute(now, firstDay)).slice(0, maxDays);
   const computed: string[] = [];
   const failed: string[] = [];
   for (const day of days) {
@@ -1071,7 +1158,10 @@ export interface OccurrenceWithCost {
   subjectService: string;
   subjectId: string;
   quantity: string;
+  /** Effective declaration time (what every rule keys on); a backfill states it in the past. */
   declaredAt: string;
+  /** When runs-service recorded it (= declaredAt for an on-time declaration). */
+  recordedAt: string;
   /** The declaring run's tags (production tags for a produced occurrence): any customer scope is an exact sum. */
   tags: {
     brandIds: string[];
@@ -1201,7 +1291,7 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
   const rows = (await statsDb.execute(sql`
     SELECT o.id, o.run_id, r.organization_id, r.service_name, r.task_name, o.direction, o.outcome_key,
            o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at,
-           r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id
+           COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id
     FROM run_outcomes o JOIN runs r ON r.id = o.run_id
     ${whereSql}
     ORDER BY o.id
@@ -1235,6 +1325,7 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
       subjectId: r.subject_id,
       quantity: new Decimal(r.quantity).toFixed(6),
       declaredAt: new Date(r.declared_at).toISOString(),
+      recordedAt: new Date(r.recorded_at).toISOString(),
       tags: {
         brandIds: r.brand_ids ?? [],
         campaignId: r.campaign_id ?? null,

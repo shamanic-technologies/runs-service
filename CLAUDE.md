@@ -865,7 +865,8 @@ concept, a value-based joint-cost split.
   series, fleet / service / task: the dashboard v2 Monitoring chart reads it).
 - **Stored days** (`cost_ledger_days`, `outcome_coverage_days`, `cost_ledger_computed_days`): in-process refresher
   (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), <= 8 days a tick: the last 3
-  days always, then missing days of the last 60 newest first, and any day a late produced declaration moved. A day is
+  days always, then missing days back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an empty db) newest first,
+  and any day a declaration RECORDED after it moved (see "Backfill"). `computed_at` = the read transaction's now(). A day is
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
@@ -885,6 +886,23 @@ several keys and consumed their own, a cost loop) takes back the run's WHOLE dec
   so the refresher (`daysToCompute`) marks every computed day >= `affectedFromDay` of a void newer than its `computed_at` stale. A
   pre-void figure is reproducible from bronze (replay without voids after T); never edit a stored day by hand.
 - Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
+
+## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)
+
+Owner 2026-10-23: every spending service re-reads its own history and declares the outcomes on the past runs that paid for them
+(« pour être à 100 % now »). Through today's door a lead found in August and declared today cannot be the input of an August send:
+resolution keys on declaration time.
+- **`occurredAt`** on both declare doors and on **`POST /v1/platform-runs/outcomes/batch`** (≤ 500 runs, ≤ 1000 occurrences, per-run
+  `occurredAt`; all or nothing: unknown / voided / other-org / out-of-bounds run = 422 `invalid_runs` with the list, nothing written).
+  `run_started_at` = the run's start; an ISO instant must be in [run start, now] (400/422 `invalid_occurred_at`). Absent = on time.
+- **`run_outcomes.declared_at` IS the effective time** (payload item `declared_at`, else the bronze `occurred_at`); every rule keys on it
+  (resolution, reuse rank, the day an occurrence counts on). `recorded_at` = the bronze `occurred_at`; NULL on pre-0060 rows (all on
+  time), so reads use `COALESCE(recorded_at, declared_at)` (expression index `idx_run_outcomes_recorded`, no boot UPDATE). Cost always
+  lands on its cost rows' UTC days.
+- **Allocation rule unchanged (v1)**: a backfill adds FACTS. The refresher recomputes every stored day ≥ LEAST(effective declaration,
+  run start) day of an occurrence recorded after the day's `computed_at` (one grouped read); the same declarations recompute byte for
+  byte (tested). Idempotent: a replay is `already_recorded`, nothing written; a recorded occurrence keeps its stored time.
+- Guard: `tests/integration/outcome-backfill.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
 
