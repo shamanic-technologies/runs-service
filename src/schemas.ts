@@ -2672,7 +2672,7 @@ export const ProductionCostSchema = z
   .openapi("ProductionCost");
 
 const declarationDescription =
-  "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400. Immutable (no delete). Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}.";
+  "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}.";
 
 for (const [path, auth] of [
   ["/v1/runs/{id}/outcomes", "x-org-id required (must be the run's org)"],
@@ -2694,8 +2694,56 @@ for (const [path, auth] of [
       400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
       401: { description: "Unauthorized" },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
-      409: { description: "run_org_mismatch, or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
+      409: { description: "run_org_mismatch, run_outcomes_voided (declaration taken back: declare on a new run), or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
       502: { description: "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
+    },
+  });
+}
+
+// --- Taking a declaration back (RUNS-VOID-1023) ---
+
+export const VoidRunOutcomesRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2000).openapi({ description: "Why the declaration was wrong (kept in the audit log).", example: "one run declared several produced outcome keys; re-declared one key per run" }),
+    voidedBy: z.string().trim().min(1).max(256).openapi({ description: "Who decided it (a person, a ticket, a release).", example: "lead-service COST-ACCOUNTING-1023-LEAD-FIX" }),
+  })
+  .openapi("VoidRunOutcomesRequest");
+
+export const VoidRunOutcomesResponseSchema = z
+  .object({
+    runId: z.string().uuid(),
+    allocationVersion: z.number().int(),
+    status: z.enum(["voided", "already_voided"]),
+    voidedCount: z.number().int().openapi({ description: "Occurrences taken back by this call (0 on a replay)." }),
+    voidedAt: z.string().datetime(),
+  })
+  .openapi("VoidRunOutcomesResponse");
+
+const voidDescription =
+  "Takes back EVERY outcome occurrence this run declared (produced and consumed), when the declaration was made in error. Only the service that owns the run may (x-service-name must equal the run's serviceName, else 403 `not_run_owner`). From then on they count in no figure (cost per occurrence, outcome-cost totals, ledger check, coverage): the run's spend reads 'produced none', and stored days are recomputed by the next ledger refresh. The run then accepts no new declaration (409 `run_outcomes_voided`): re-declare the right facts on a NEW run. Audit: reason, voidedBy and the removed rows stay in the bronze log. Idempotent: a second call is 200 `already_voided`, nothing written.";
+
+for (const [path, auth] of [
+  ["/v1/runs/{id}/outcomes/void", "x-org-id required (must be the run's org) + x-service-name required"],
+  ["/v1/platform-runs/{id}/outcomes/void", "x-service-name required; x-org-id optional (when given, must be the run's org)"],
+] as const) {
+  registry.registerPath({
+    method: "post",
+    path,
+    summary: "Take back the outcome occurrences a run declared in error",
+    description: `${voidDescription} Auth: ${auth}.`,
+    security: [{ apiKey: [] }],
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: { content: { "application/json": { schema: VoidRunOutcomesRequestSchema } } },
+    },
+    responses: {
+      201: { description: "Declaration taken back", content: { "application/json": { schema: VoidRunOutcomesResponseSchema } } },
+      200: { description: "Already taken back (replay, nothing written)", content: { "application/json": { schema: VoidRunOutcomesResponseSchema } } },
+      400: { description: "Invalid body or run id, or missing x-service-name", content: { "application/json": { schema: ValidationErrorSchema } } },
+      401: { description: "Unauthorized" },
+      403: { description: "not_run_owner: the run belongs to another service", content: { "application/json": { schema: ErrorSchema } } },
+      404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
+      409: { description: "run_org_mismatch", content: { "application/json": { schema: ErrorSchema } } },
     },
   });
 }

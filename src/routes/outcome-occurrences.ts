@@ -9,12 +9,15 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE } from "../schemas.js";
+import { DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
   DuplicateOccurrenceInBodyError,
   OutcomeDeclarationConflictError,
+  RunOutcomesVoidedError,
+  isRunOutcomesVoided,
+  voidRunOutcomes,
   addDays,
   normalizeOutcomeKey,
   checkLedgerRow,
@@ -79,6 +82,7 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       res.status(409).json({ error: "run_org_mismatch", conflicts: [] });
       return;
     }
+    if (await isRunOutcomesVoided(id)) throw new RunOutcomesVoidedError(id);
     const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name);
     const recordedCount = occurrences.filter((o) => o.status === "recorded").length;
     res.status(recordedCount > 0 ? 201 : 200).json({
@@ -102,13 +106,67 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       res.status(409).json({ error: err.message, conflicts: err.conflicts });
       return;
     }
+    // The handler's check, or the projection's when a void lands between the check and the write.
+    // drizzle wraps the database error: the projection's message is on `cause`.
+    const dbMessage = `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`;
+    if (err instanceof RunOutcomesVoidedError || dbMessage.includes("run_outcomes_voided")) {
+      res.status(409).json({ error: "run_outcomes_voided", conflicts: [] });
+      return;
+    }
     console.error("[Runs Service] declare outcomes failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * Takes back what a run declared (RUNS-VOID-1023). Only the service that owns the
+ * run (runs.service_name = x-service-name) may: a service never voids another's.
+ */
+async function handleVoid(req: Request, res: Response, orgRequired: boolean) {
+  try {
+    const { id } = req.params;
+    if (!OUTCOME_UUID_RE.test(id)) {
+      res.status(400).json({ error: "Invalid run id", details: null });
+      return;
+    }
+    const caller = req.platformServiceName ?? (req.headers["x-service-name"] as string | undefined)?.trim();
+    if (!caller) {
+      res.status(400).json({ error: "x-service-name header is required (the service that owns the run)" });
+      return;
+    }
+    const parsed = VoidRunOutcomesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    const [run] = (await db.execute(sql`
+      SELECT id, organization_id, service_name FROM runs WHERE id = ${id}::uuid
+    `)) as any[];
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    const headerOrg = req.orgId as string | undefined;
+    if ((orgRequired || headerOrg) && run.organization_id !== (headerOrg ?? null)) {
+      res.status(409).json({ error: "run_org_mismatch" });
+      return;
+    }
+    if (run.service_name !== caller) {
+      res.status(403).json({ error: "not_run_owner", details: { runServiceName: run.service_name, callerServiceName: caller } });
+      return;
+    }
+    const v = await voidRunOutcomes(id, parsed.data, caller);
+    res.status(v.status === "voided" ? 201 : 200).json({ runId: id, allocationVersion: ALLOCATION_VERSION, ...v });
+  } catch (err) {
+    console.error("[Runs Service] void outcomes failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 }
 
 router.post("/v1/runs/:id/outcomes", requireApiKey, (req, res) => handleDeclare(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes", requirePlatformAuth, (req, res) => handleDeclare(req, res, false));
+router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
+router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
 
 const csv = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined;

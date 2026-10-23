@@ -34,7 +34,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
-- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals".
+- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -848,7 +848,7 @@ concept, a value-based joint-cost split.
   consumed?: [{outcomeKey, subjectService, subjectId}]}`, <= 1000 per call. Keys = features-service catalogue steps
   (`GET /public/catalogue/steps` rows[].key, Positive reply = `conversation`), checked on every call
   (`services/outcome-catalogue.ts`, 5 min cache, one re-read on a miss): unknown = 400 `unknown_outcome_key`,
-  catalogue unreadable = 502, never accepted blindly; `email_sent` stored as `message_sent`. Idempotent per (run, direction, key, subject); same occurrence with another quantity = 409; immutable.
+  catalogue unreadable = 502, never accepted blindly; `email_sent` stored as `message_sent`. Idempotent per (run, direction, key, subject); same occurrence with another quantity = 409; immutable item by item (see "Taking a declaration back").
   Bronze `outcome_declaration_events` -> trigger -> silver `run_outcomes`, as every lifecycle. Optional: a run that
   states nothing reads byte for byte as before.
 - **Allocation v1** (`ALLOCATION_VERSION`, served on every read; a change = v2, never an edit): each actual +
@@ -869,6 +869,22 @@ concept, a value-based joint-cost split.
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
+
+## Taking a declaration back — `POST /v1/runs/:id/outcomes/void` (migration 0059, RUNS-VOID-1023)
+
+A declaring service that stated outcomes on a run in error (lead-service 2026-10-23: two `outcome-recording` runs each PRODUCED
+several keys and consumed their own, a cost loop) takes back the run's WHOLE declaration, both directions, then re-declares on NEW runs.
+- **Owner only**: `x-service-name` must equal `runs.service_name` (else 403 `not_run_owner`; absent = 400). `/v1/runs/...` also needs the
+  run's `x-org-id` (409 `run_org_mismatch`), `/v1/platform-runs/...` as declare. Body `{reason, voidedBy}`, both required.
+- **A void is a bronze fact, the projection removes silver**: one `outcomes.voided` event (reason, voidedBy, the removed rows,
+  `affectedFromDay` = first UTC day of the run's start / its declarations), the trigger DELETEs the run's `run_outcomes`. Every read is
+  on silver, so the occurrences count in NO figure with no filter added anywhere; bronze keeps declaration + void (audit, replayable).
+- **Final**: a voided run accepts no new declaration (handler 409 `run_outcomes_voided`; the projection RAISEs on a racing write).
+  Idempotent: a second void = 200 `already_voided`, nothing written. No item-level void: re-declare the right facts on a new run.
+- **Versioning**: the allocation RULE is unchanged (still v1); a void changes the FACTS. A stored day recomputes from current silver,
+  so the refresher (`daysToCompute`) marks every computed day >= `affectedFromDay` of a void newer than its `computed_at` stale. A
+  pre-void figure is reproducible from bronze (replay without voids after T); never edit a stored day by hand.
+- Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
 
