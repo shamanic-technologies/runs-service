@@ -2607,19 +2607,42 @@ export const OutcomeOccurrenceInputSchema = z
   })
   .openapi("OutcomeOccurrenceInput");
 
+export const OccurredAtSchema = z
+  .union([z.literal("run_started_at"), z.string().datetime({ offset: true })])
+  .openapi({ description: "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (<= 8 days per 15-min tick, recent days first; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call).", example: "run_started_at" });
+
+const declareRunOutcomesShape = {
+  produced: z.array(OutcomeOccurrenceInputSchema).optional().openapi({
+    description:
+      "The outcome occurrences this run MADE: the run's whole cost (its own cost rows + those of descendants that declare nothing) is split over them. Declare only what was KEPT (a rejected email is not an output: the kept ones carry its cost) and only the run's DECLARED output (a by-product it also caused is not declared: $0).",
+  }),
+  consumed: z.array(OutcomeOccurrenceInputSchema.omit({ quantity: true })).optional().openapi({
+    description: "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first.",
+  }),
+  occurredAt: OccurredAtSchema.optional(),
+};
+
+const occurrenceCount = (b: { produced?: unknown[]; consumed?: unknown[] }) => (b.produced?.length ?? 0) + (b.consumed?.length ?? 0);
+
 export const DeclareRunOutcomesRequestSchema = z
-  .object({
-    produced: z.array(OutcomeOccurrenceInputSchema).optional().openapi({
-      description:
-        "The outcome occurrences this run MADE: the run's whole cost (its own cost rows + those of descendants that declare nothing) is split over them. Declare only what was KEPT (a rejected email is not an output: the kept ones carry its cost) and only the run's DECLARED output (a by-product it also caused is not declared: $0).",
-    }),
-    consumed: z.array(OutcomeOccurrenceInputSchema.omit({ quantity: true })).optional().openapi({
-      description: "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first.",
-    }),
-  })
-  .refine((b) => (b.produced?.length ?? 0) + (b.consumed?.length ?? 0) >= 1, { message: "state at least one produced or consumed occurrence" })
-  .refine((b) => (b.produced?.length ?? 0) + (b.consumed?.length ?? 0) <= 1000, { message: "at most 1000 occurrences per call" })
+  .object(declareRunOutcomesShape)
+  .refine((b) => occurrenceCount(b) >= 1, { message: "state at least one produced or consumed occurrence" })
+  .refine((b) => occurrenceCount(b) <= 1000, { message: "at most 1000 occurrences per call" })
   .openapi("DeclareRunOutcomesRequest");
+
+export const OUTCOMES_BATCH_MAX_RUNS = 500;
+
+export const DeclareOutcomesBatchRequestSchema = z
+  .object({
+    runs: z
+      .array(z.object({ runId: z.string().regex(UUID_STRING_RE).openapi({ description: "The run (production order) these occurrences are declared on; each run at most once per call." }), ...declareRunOutcomesShape }))
+      .min(1)
+      .max(OUTCOMES_BATCH_MAX_RUNS),
+  })
+  .refine((b) => b.runs.every((r) => occurrenceCount(r) >= 1), { message: "each run states at least one produced or consumed occurrence" })
+  .refine((b) => b.runs.reduce((n, r) => n + occurrenceCount(r), 0) <= 1000, { message: "at most 1000 occurrences per call" })
+  .refine((b) => new Set(b.runs.map((r) => r.runId.toLowerCase())).size === b.runs.length, { message: "a run stated twice in the batch" })
+  .openapi("DeclareOutcomesBatchRequest");
 
 export const OutcomeDirectionEnum = z.enum(["produced", "consumed"]).openapi("OutcomeDirection");
 
@@ -2631,7 +2654,8 @@ export const DeclaredOutcomeOccurrenceSchema = z
     subjectService: z.string(),
     subjectId: z.string(),
     quantity: z.string().openapi({ description: "6-decimal string." }),
-    declaredAt: z.string().datetime(),
+    declaredAt: z.string().datetime().openapi({ description: "Effective declaration time: what every rule keys on (= recordedAt on time; the stated past instant for a backfill)." }),
+    recordedAt: z.string().datetime().openapi({ description: "When runs-service recorded it." }),
     status: z.enum(["recorded", "already_recorded"]).openapi({ description: "recorded = written by this call; already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
   })
   .openapi("DeclaredOutcomeOccurrence");
@@ -2651,6 +2675,7 @@ export const OutcomeConflictResponseSchema = z
     error: z.string(),
     conflicts: z.array(
       z.object({
+        runId: z.string().uuid(),
         direction: OutcomeDirectionEnum,
         outcomeKey: z.string(),
         subjectService: z.string(),
@@ -2672,7 +2697,7 @@ export const ProductionCostSchema = z
   .openapi("ProductionCost");
 
 const declarationDescription =
-  "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}.";
+  "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. BACKFILL: a past run's outcomes are declared with `occurredAt` (`run_started_at` or an ISO instant between the run's start and now) and then behave, for consumption resolution, reuse ranking and every stored day series, as if declared at that time (see the field). Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}.";
 
 for (const [path, auth] of [
   ["/v1/runs/{id}/outcomes", "x-org-id required (must be the run's org)"],
@@ -2691,7 +2716,7 @@ for (const [path, auth] of [
     responses: {
       201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
       200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
-      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
+      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, `occurredAt` out of bounds (`invalid_occurred_at`: before the run started, or in the future), or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
       401: { description: "Unauthorized" },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
       409: { description: "run_org_mismatch, run_outcomes_voided (declaration taken back: declare on a new run), or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
@@ -2748,6 +2773,49 @@ for (const [path, auth] of [
   });
 }
 
+export const DeclareOutcomesBatchResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    recordedCount: z.number().int(),
+    alreadyRecordedCount: z.number().int(),
+    runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true })),
+  })
+  .openapi("DeclareOutcomesBatchResponse");
+
+export const OutcomesBatchInvalidResponseSchema = z
+  .object({
+    error: z.literal("invalid_runs"),
+    details: z.object({
+      invalid: z.array(
+        z.object({
+          runId: z.string(),
+          reason: z.enum(["run_not_found", "run_org_mismatch", "run_outcomes_voided", "invalid_occurred_at"]),
+          message: z.string().optional(),
+        }),
+      ),
+    }),
+  })
+  .openapi("OutcomesBatchInvalidResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/platform-runs/outcomes/batch",
+  summary: "Declare the outcome occurrences of many runs in one call (the backfill door)",
+  description:
+    "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: DeclareOutcomesBatchRequestSchema } } } },
+  responses: {
+    201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareOutcomesBatchResponseSchema } } },
+    200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareOutcomesBatchResponseSchema } } },
+    400: { description: "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice) or `unknown_outcome_key`", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "An occurrence already recorded with another quantity (conflicts[].runId), or a run voided while the call ran (run_outcomes_voided). Nothing written.", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
+    422: { description: "invalid_runs: per-run reasons; nothing written", content: { "application/json": { schema: OutcomesBatchInvalidResponseSchema } } },
+    502: { description: "outcome_catalogue_unavailable (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 export const ListOutcomeOccurrencesQuerySchema = z.object({
   runIds: z.string().optional().openapi({ description: "Comma-separated run ids (<= 500)." }),
   subjectService: z.string().optional(),
@@ -2773,7 +2841,8 @@ export const OutcomeOccurrenceWithCostSchema = z
     subjectService: z.string(),
     subjectId: z.string(),
     quantity: z.string(),
-    declaredAt: z.string().datetime(),
+    declaredAt: z.string().datetime().openapi({ description: "Effective declaration time (a backfill states it in the past): what every rule keys on." }),
+    recordedAt: z.string().datetime().openapi({ description: "When runs-service recorded it (= declaredAt for an on-time declaration)." }),
     tags: z
       .object({
         brandIds: z.array(z.string()),

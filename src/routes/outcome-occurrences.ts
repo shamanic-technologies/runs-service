@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
+import { DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -23,6 +23,8 @@ import {
   checkLedgerRow,
   ledgerCheckInputOf,
   declareRunOutcomes,
+  declareOutcomesBatch,
+  effectiveDeclaredAt,
   listOccurrences,
   utcDay,
   type Direction,
@@ -71,7 +73,7 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       return;
     }
     const [run] = (await db.execute(sql`
-      SELECT id, organization_id, service_name FROM runs WHERE id = ${id}::uuid
+      SELECT id, organization_id, service_name, started_at FROM runs WHERE id = ${id}::uuid
     `)) as any[];
     if (!run) {
       res.status(404).json({ error: "Run not found" });
@@ -82,8 +84,13 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       res.status(409).json({ error: "run_org_mismatch", conflicts: [] });
       return;
     }
+    const effective = effectiveDeclaredAt(parsed.data.occurredAt, run);
+    if ("error" in effective) {
+      res.status(400).json({ error: "invalid_occurred_at", details: effective.error });
+      return;
+    }
     if (await isRunOutcomesVoided(id)) throw new RunOutcomesVoidedError(id);
-    const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name);
+    const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name, effective.at);
     const recordedCount = occurrences.filter((o) => o.status === "recorded").length;
     res.status(recordedCount > 0 ? 201 : 200).json({
       runId: id,
@@ -93,28 +100,94 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       occurrences,
     });
   } catch (err) {
-    if (err instanceof DuplicateOccurrenceInBodyError) {
-      res.status(400).json({ error: "Invalid request", details: err.message });
+    declarationError(res, err);
+  }
+}
+
+/** The declaration errors both doors share (one run, a batch). */
+function declarationError(res: Response, err: unknown) {
+  if (err instanceof DuplicateOccurrenceInBodyError) {
+    res.status(400).json({ error: "Invalid request", details: err.message });
+    return;
+  }
+  if (err instanceof OutcomeCatalogueError) {
+    console.error("[Runs Service] outcome catalogue unreadable, declaration refused:", err.message);
+    res.status(502).json({ error: `outcome_catalogue_unavailable: ${err.message}` });
+    return;
+  }
+  if (err instanceof OutcomeDeclarationConflictError) {
+    res.status(409).json({ error: err.message, conflicts: err.conflicts });
+    return;
+  }
+  // The handler's check, or the projection's when a void lands between the check and the write.
+  // drizzle wraps the database error: the projection's message is on `cause`.
+  const dbMessage = `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`;
+  if (err instanceof RunOutcomesVoidedError || dbMessage.includes("run_outcomes_voided")) {
+    res.status(409).json({ error: "run_outcomes_voided", conflicts: [] });
+    return;
+  }
+  console.error("[Runs Service] declare outcomes failed:", err);
+  res.status(500).json({ error: "Internal server error" });
+}
+
+/**
+ * Many runs in one call (COST-BACKFILL-1023-RUNS): the backfill door. All or
+ * nothing: every run is checked first (exists, org, not voided, occurredAt within
+ * bounds); any refusal = 422 with the per-run list and nothing written.
+ */
+async function handleDeclareBatch(req: Request, res: Response) {
+  try {
+    const parsed = DeclareOutcomesBatchRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
-    if (err instanceof OutcomeCatalogueError) {
-      console.error("[Runs Service] outcome catalogue unreadable, declaration refused:", err.message);
-      res.status(502).json({ error: `outcome_catalogue_unavailable: ${err.message}` });
+    const entries = parsed.data.runs.map((r) => ({ ...r, runId: r.runId.toLowerCase() }));
+    const stated = entries.flatMap((r) => [...(r.produced ?? []), ...(r.consumed ?? [])].map((o) => normalizeOutcomeKey(o.outcomeKey)));
+    const unknown = await unknownOutcomeKeys([...new Set(stated)]);
+    if (unknown.length > 0) {
+      res.status(400).json({
+        error: "unknown_outcome_key",
+        details: { unknownKeys: unknown, catalogue: "features-service GET /public/catalogue/steps (rows[].key)" },
+      });
       return;
     }
-    if (err instanceof OutcomeDeclarationConflictError) {
-      res.status(409).json({ error: err.message, conflicts: err.conflicts });
+    const ids = `{${entries.map((r) => r.runId).join(",")}}`;
+    const runs = (await db.execute(sql`
+      SELECT r.id, r.organization_id, r.service_name, r.started_at,
+             EXISTS (SELECT 1 FROM outcome_declaration_events e WHERE e.run_id = r.id AND e.event_type = 'outcomes.voided') AS voided
+      FROM runs r WHERE r.id = ANY(${ids}::uuid[])
+    `)) as any[];
+    const byId = new Map(runs.map((r) => [r.id as string, r]));
+    const headerOrg = req.orgId as string | undefined;
+    const invalid: Array<{ runId: string; reason: string; message?: string }> = [];
+    const declarations = entries.map((e) => {
+      const run = byId.get(e.runId);
+      if (!run) return invalid.push({ runId: e.runId, reason: "run_not_found" }), null;
+      if (headerOrg && run.organization_id !== headerOrg) return invalid.push({ runId: e.runId, reason: "run_org_mismatch" }), null;
+      if (run.voided) return invalid.push({ runId: e.runId, reason: "run_outcomes_voided" }), null;
+      const effective = effectiveDeclaredAt(e.occurredAt, run);
+      if ("error" in effective) return invalid.push({ runId: e.runId, reason: "invalid_occurred_at", message: effective.error }), null;
+      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, declaredAt: effective.at };
+    });
+    if (invalid.length > 0) {
+      res.status(422).json({ error: "invalid_runs", details: { invalid } });
       return;
     }
-    // The handler's check, or the projection's when a void lands between the check and the write.
-    // drizzle wraps the database error: the projection's message is on `cause`.
-    const dbMessage = `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`;
-    if (err instanceof RunOutcomesVoidedError || dbMessage.includes("run_outcomes_voided")) {
-      res.status(409).json({ error: "run_outcomes_voided", conflicts: [] });
-      return;
-    }
-    console.error("[Runs Service] declare outcomes failed:", err);
-    res.status(500).json({ error: "Internal server error" });
+    const results = await declareOutcomesBatch(declarations.filter((d) => d !== null));
+    const out = entries.map((e, i) => {
+      const recordedCount = results[i].filter((o) => o.status === "recorded").length;
+      return { runId: e.runId, recordedCount, alreadyRecordedCount: results[i].length - recordedCount, occurrences: results[i] };
+    });
+    const recordedCount = out.reduce((n, r) => n + r.recordedCount, 0);
+    res.status(recordedCount > 0 ? 201 : 200).json({
+      allocationVersion: ALLOCATION_VERSION,
+      recordedCount,
+      alreadyRecordedCount: out.reduce((n, r) => n + r.alreadyRecordedCount, 0),
+      runs: out,
+    });
+  } catch (err) {
+    declarationError(res, err);
   }
 }
 
@@ -164,6 +237,7 @@ async function handleVoid(req: Request, res: Response, orgRequired: boolean) {
 }
 
 router.post("/v1/runs/:id/outcomes", requireApiKey, (req, res) => handleDeclare(req, res, true));
+router.post("/v1/platform-runs/outcomes/batch", requirePlatformAuth, handleDeclareBatch);
 router.post("/v1/platform-runs/:id/outcomes", requirePlatformAuth, (req, res) => handleDeclare(req, res, false));
 router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
