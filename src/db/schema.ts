@@ -296,7 +296,10 @@ export const runOutcomes = pgTable(
     subjectService: text("subject_service").notNull(),
     subjectId: text("subject_id").notNull(),
     quantity: numeric("quantity", { precision: 20, scale: 6 }).notNull().default("1"),
+    // Effective declaration time (a backfill states it in the past, migration 0060).
     declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
+    // When runs-service recorded it; NULL on rows before 0060 (= declared_at).
+    recordedAt: timestamp("recorded_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("idx_run_outcomes_occurrence").on(
@@ -309,6 +312,7 @@ export const runOutcomes = pgTable(
     index("idx_run_outcomes_subject").on(table.subjectService, table.subjectId, table.outcomeKey),
     index("idx_run_outcomes_key_declared").on(table.outcomeKey, table.declaredAt),
     index("idx_run_outcomes_declared").on(table.declaredAt),
+    index("idx_run_outcomes_recorded").on(sql`(COALESCE(${table.recordedAt}, ${table.declaredAt}))`),
   ]
 );
 

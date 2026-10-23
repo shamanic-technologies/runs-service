@@ -282,14 +282,14 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     expect(chk.body.totals.reuseGain.grossCents).toBe("20.0000000000");
   });
 
-  it("the refresher stores every day of the last 60 and reports missing days otherwise", async () => {
+  it("the refresher stores every day of the last 60 (floor pinned: the shared test ledger's first spend day varies) and reports missing days otherwise", async () => {
     await clearLedgerDays();
     const before = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY}&until=${DAY}`).set(getInternalAuthHeaders());
     expect(before.body.complete).toBe(false);
     expect(before.body.daysMissing).toEqual([DAY]);
-    const partial = await refreshLedgerDays(new Date("2025-01-20T12:00:00Z"));
+    const partial = await refreshLedgerDays(new Date("2025-01-20T12:00:00Z"), undefined, "2024-11-22");
     expect(partial.computed).toEqual(["2025-01-20", "2025-01-19", "2025-01-18", "2025-01-17", "2025-01-16", "2025-01-15", "2025-01-14", "2025-01-13"]);
-    const { computed, failed } = await refreshLedgerDays(new Date("2025-01-20T12:00:00Z"), Infinity);
+    const { computed, failed } = await refreshLedgerDays(new Date("2025-01-20T12:00:00Z"), Infinity, "2024-11-22");
     expect(failed).toEqual([]);
     expect(computed).toHaveLength(52 + 3);
     expect(computed).toContain(DAY);

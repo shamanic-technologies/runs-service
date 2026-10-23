@@ -4103,7 +4103,13 @@
           },
           "declaredAt": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Effective declaration time: what every rule keys on (= recordedAt on time; the stated past instant for a backfill)."
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When runs-service recorded it."
           },
           "status": {
             "type": "string",
@@ -4122,6 +4128,7 @@
           "subjectId",
           "quantity",
           "declaredAt",
+          "recordedAt",
           "status"
         ]
       },
@@ -4143,6 +4150,10 @@
             "items": {
               "type": "object",
               "properties": {
+                "runId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
                 "direction": {
                   "$ref": "#/components/schemas/OutcomeDirection"
                 },
@@ -4163,6 +4174,7 @@
                 }
               },
               "required": [
+                "runId",
                 "direction",
                 "outcomeKey",
                 "subjectService",
@@ -4220,6 +4232,22 @@
               ]
             },
             "description": "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first."
+          },
+          "occurredAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "run_started_at"
+                ]
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ],
+            "description": "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (<= 8 days per 15-min tick, recent days first; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call).",
+            "example": "run_started_at"
           }
         }
       },
@@ -4325,6 +4353,188 @@
           "voidedBy"
         ]
       },
+      "DeclareOutcomesBatchResponse": {
+        "type": "object",
+        "properties": {
+          "allocationVersion": {
+            "type": "integer"
+          },
+          "recordedCount": {
+            "type": "integer"
+          },
+          "alreadyRecordedCount": {
+            "type": "integer"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "recordedCount": {
+                  "type": "integer"
+                },
+                "alreadyRecordedCount": {
+                  "type": "integer"
+                },
+                "occurrences": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeclaredOutcomeOccurrence"
+                  }
+                }
+              },
+              "required": [
+                "runId",
+                "recordedCount",
+                "alreadyRecordedCount",
+                "occurrences"
+              ]
+            }
+          }
+        },
+        "required": [
+          "allocationVersion",
+          "recordedCount",
+          "alreadyRecordedCount",
+          "runs"
+        ]
+      },
+      "OutcomesBatchInvalidResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "invalid_runs"
+            ]
+          },
+          "details": {
+            "type": "object",
+            "properties": {
+              "invalid": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "runId": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "run_not_found",
+                        "run_org_mismatch",
+                        "run_outcomes_voided",
+                        "invalid_occurred_at"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "runId",
+                    "reason"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "invalid"
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "details"
+        ]
+      },
+      "DeclareOutcomesBatchRequest": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+                  "description": "The run (production order) these occurrences are declared on; each run at most once per call."
+                },
+                "produced": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OutcomeOccurrenceInput"
+                  },
+                  "description": "The outcome occurrences this run MADE: the run's whole cost (its own cost rows + those of descendants that declare nothing) is split over them. Declare only what was KEPT (a rejected email is not an output: the kept ones carry its cost) and only the run's DECLARED output (a by-product it also caused is not declared: $0)."
+                },
+                "consumed": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "outcomeKey": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_]{1,63}$",
+                        "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+                        "example": "email_checked"
+                      },
+                      "subjectService": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9-]{1,63}$",
+                        "description": "The service whose database holds the subject (a person: lead-service; an object: the channel's service).",
+                        "example": "lead-service"
+                      },
+                      "subjectId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "description": "The subject's id in that service (a lead id, a post id, an audience id…).",
+                        "example": "8c1f0b7e-2f43-4c3e-9a51-6f7b1f2d9e10"
+                      }
+                    },
+                    "required": [
+                      "outcomeKey",
+                      "subjectService",
+                      "subjectId"
+                    ]
+                  },
+                  "description": "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first."
+                },
+                "occurredAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "run_started_at"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  ],
+                  "description": "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (<= 8 days per 15-min tick, recent days first; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call).",
+                  "example": "run_started_at"
+                }
+              },
+              "required": [
+                "runId"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 500
+          }
+        },
+        "required": [
+          "runs"
+        ]
+      },
       "ListOutcomeOccurrencesResponse": {
         "type": "object",
         "properties": {
@@ -4393,7 +4603,13 @@
           },
           "declaredAt": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Effective declaration time (a backfill states it in the past): what every rule keys on."
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When runs-service recorded it (= declaredAt for an on-time declaration)."
           },
           "tags": {
             "type": "object",
@@ -4554,6 +4770,7 @@
           "subjectId",
           "quantity",
           "declaredAt",
+          "recordedAt",
           "tags",
           "cost",
           "costSlices",
@@ -9599,7 +9816,7 @@
     "/v1/runs/{id}/outcomes": {
       "post": {
         "summary": "Declare the outcome occurrences a run produced and consumed",
-        "description": "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}. Auth: x-org-id required (must be the run's org).",
+        "description": "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. BACKFILL: a past run's outcomes are declared with `occurredAt` (`run_started_at` or an ISO instant between the run's start and now) and then behave, for consumption resolution, reuse ranking and every stored day series, as if declared at that time (see the field). Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}. Auth: x-org-id required (must be the run's org).",
         "security": [
           {
             "apiKey": []
@@ -9647,7 +9864,7 @@
             }
           },
           "400": {
-            "description": "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)",
+            "description": "Invalid body (key format, empty, > 1000, duplicate in body), run id, `occurredAt` out of bounds (`invalid_occurred_at`: before the run started, or in the future), or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9695,7 +9912,7 @@
     "/v1/platform-runs/{id}/outcomes": {
       "post": {
         "summary": "Declare the outcome occurrences a run produced and consumed",
-        "description": "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}. Auth: x-service-name required; x-org-id optional (when given, must be the run's org).",
+        "description": "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400; a run whose declaration was taken back (`POST …/outcomes/void`) is 409 `run_outcomes_voided`. Immutable item by item; the owning service can take the whole declaration back. Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. BACKFILL: a past run's outcomes are declared with `occurredAt` (`run_started_at` or an ISO instant between the run's start and now) and then behave, for consumption resolution, reuse ranking and every stored day series, as if declared at that time (see the field). Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}. Auth: x-service-name required; x-org-id optional (when given, must be the run's org).",
         "security": [
           {
             "apiKey": []
@@ -9743,7 +9960,7 @@
             }
           },
           "400": {
-            "description": "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)",
+            "description": "Invalid body (key format, empty, > 1000, duplicate in body), run id, `occurredAt` out of bounds (`invalid_occurred_at`: before the run started, or in the future), or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9969,6 +10186,91 @@
           },
           "409": {
             "description": "run_org_mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/platform-runs/outcomes/batch": {
+      "post": {
+        "summary": "Declare the outcome occurrences of many runs in one call (the backfill door)",
+        "description": "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclareOutcomesBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every occurrence was already recorded (replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeclareOutcomesBatchResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "At least one occurrence recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeclareOutcomesBatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (shape, > 500 runs, > 1000 occurrences, a run or an occurrence stated twice) or `unknown_outcome_key`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "An occurrence already recorded with another quantity (conflicts[].runId), or a run voided while the call ran (run_outcomes_voided). Nothing written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeConflictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_runs: per-run reasons; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomesBatchInvalidResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "outcome_catalogue_unavailable (nothing written, retry)",
             "content": {
               "application/json": {
                 "schema": {
