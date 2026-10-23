@@ -355,6 +355,14 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 // descendant tree) joined to runs (row data) + runs_costs (own + descendant
 // cost arrays). Constant 4 SQL round-trips regardless of N (up to 10000).
 // ---------------------------------------------------------------------------
+/**
+ * A tree-sized id list as ONE array parameter. `sql.join` of one fragment per id
+ * recursed in drizzle's query builder and threw "Maximum call stack size exceeded"
+ * on a tree of tens of thousands of runs (content-generation backfill, 2026-10-24),
+ * and `inArray` binds one parameter per id (postgres caps a statement at 65,535).
+ */
+const uuidArray = (ids: string[]) => sql`${`{${ids.join(",")}}`}::uuid[]`;
+
 router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
   try {
     const parsed = BatchRunsRequestSchema.safeParse(req.body);
@@ -442,7 +450,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     const allCostRunIds = [...foundIds, ...descendantIds];
     const allCosts = allCostRunIds.length === 0
       ? []
-      : await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, allCostRunIds));
+      : await readDb.select().from(runsCosts).where(sql`${runsCosts.runId} = ANY(${uuidArray(allCostRunIds)})`);
     const costsByRunId = new Map<string, any[]>();
     for (const cost of allCosts) {
       const list = costsByRunId.get(cost.runId) || [];
@@ -456,7 +464,7 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
-      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      WHERE run_id = ANY(${uuidArray(descendantIds)})
       GROUP BY run_id
     `);
     const ownAggByRunId = new Map<string, any>(
@@ -600,7 +608,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
 
     let allDescendantCosts: any[] = [];
     if (descendantIds.length > 0) {
-      allDescendantCosts = await readDb.select().from(runsCosts).where(inArray(runsCosts.runId, descendantIds));
+      allDescendantCosts = await readDb.select().from(runsCosts).where(sql`${runsCosts.runId} = ANY(${uuidArray(descendantIds)})`);
     }
 
     // Per-descendant own-cost via SQL aggregation. Atomic literals via cost-aggregator.
@@ -609,7 +617,7 @@ router.get("/v1/runs/:id", requireApiKey, async (req, res) => {
         run_id,
         ${costAggregateOwnSelectSql("runs_costs")}
       FROM runs_costs
-      WHERE run_id IN (${sql.join(descendantIds.map((id) => sql`${id}`), sql`, `)})
+      WHERE run_id = ANY(${uuidArray(descendantIds)})
       GROUP BY run_id
     `);
     const ownByRunId = new Map<string, any>(
