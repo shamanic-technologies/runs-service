@@ -4,6 +4,8 @@ import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import { OrgNoCampaignTotalQuerySchema } from "../schemas.js";
+import { isStatsRollupReady } from "../services/stats-rollup.js";
+import { NO_CAMPAIGN_DAY_ROLLUP_NAME } from "../services/stats-rollup-no-campaign-day.js";
 
 // Campaign spend vs no-campaign spend (owner 2026-10-13: a customer is charged
 // only what its campaigns spend; Copilot chat, onboarding reads, card fees and any
@@ -104,6 +106,62 @@ router.get("/internal/org-no-campaign-total", requireInternalAuth, async (req, r
   });
 });
 
+// Live: every platform-projected cost row of the fleet (1.32M rows, 95 s on prod
+// under load, 2026-10-23: past the stats statement_timeout). Kept as the
+// fallback while the rollup is un-stamped (a rebuild in progress).
+const monthlyLiveSql = sql`
+  SELECT
+    rc.organization_id::text AS org_id,
+    to_char(date_trunc('month', rc.created_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month,
+    CASE WHEN GROUPING(rc.cost_name) = 0 THEN rc.cost_name END AS cost_name,
+    COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS no_campaign,
+    COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS net_no_campaign,
+    COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = true), 0)::text AS campaign,
+    COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = true), 0)::text AS net_campaign,
+    COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign IS NULL), 0)::text AS unknown,
+    COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign IS NULL), 0)::text AS net_unknown,
+    GROUPING(rc.cost_name) = 0 AS by_name,
+    GROUPING(rc.organization_id) = 0 AS by_org
+  FROM runs_costs rc
+  WHERE rc.is_platform_projected
+    AND rc.organization_id IS NOT NULL
+  GROUP BY GROUPING SETS (
+    (date_trunc('month', rc.created_at AT TIME ZONE 'UTC')),
+    (rc.organization_id, date_trunc('month', rc.created_at AT TIME ZONE 'UTC')),
+    (rc.organization_id, date_trunc('month', rc.created_at AT TIME ZONE 'UTC'), rc.cost_name)
+  )
+  ORDER BY 2, 1 NULLS FIRST, 3 NULLS FIRST
+`;
+
+// Rollup: same groups over (org, UTC day, cost name, run_has_campaign) rows. A
+// bucket renders '0' when no cost row of it matched (n = 0), exactly as the live
+// COALESCE(SUM … FILTER, 0) does, else its sum at the column's scale 10.
+const bucket = (has: string, col: "gross" | "net") =>
+  sql.raw(`CASE WHEN COALESCE(SUM(d.n) FILTER (WHERE d.run_has_campaign ${has}), 0) > 0
+    THEN round(SUM(d.${col}) FILTER (WHERE d.run_has_campaign ${has} AND d.n > 0), 10)::text ELSE '0' END`);
+const monthlyFromRollupSql = sql`
+  SELECT
+    d.organization_id::text AS org_id,
+    to_char(date_trunc('month', d.day), 'YYYY-MM') AS month,
+    CASE WHEN GROUPING(d.cost_name) = 0 THEN d.cost_name END AS cost_name,
+    ${bucket("= false", "gross")} AS no_campaign,
+    ${bucket("= false", "net")} AS net_no_campaign,
+    ${bucket("= true", "gross")} AS campaign,
+    ${bucket("= true", "net")} AS net_campaign,
+    ${bucket("IS NULL", "gross")} AS unknown,
+    ${bucket("IS NULL", "net")} AS net_unknown,
+    GROUPING(d.cost_name) = 0 AS by_name,
+    GROUPING(d.organization_id) = 0 AS by_org
+  FROM stats_rollup_no_campaign_day d
+  WHERE d.n > 0
+  GROUP BY GROUPING SETS (
+    (date_trunc('month', d.day)),
+    (d.organization_id, date_trunc('month', d.day)),
+    (d.organization_id, date_trunc('month', d.day), d.cost_name)
+  )
+  ORDER BY 2, 1 NULLS FIRST, 3 NULLS FIRST
+`;
+
 /**
  * GET /internal/stats/costs/no-campaign/monthly — fleet-wide, per org per UTC
  * calendar month of the cost row's created_at: platform spend (actual +
@@ -114,29 +172,11 @@ router.get("/internal/org-no-campaign-total", requireInternalAuth, async (req, r
  */
 router.get("/internal/stats/costs/no-campaign/monthly", requireInternalAuth, async (_req, res) => {
   try {
-    const rows = (await statsDb.execute(sql`
-      SELECT
-        rc.organization_id::text AS org_id,
-        to_char(date_trunc('month', rc.created_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month,
-        CASE WHEN GROUPING(rc.cost_name) = 0 THEN rc.cost_name END AS cost_name,
-        COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS no_campaign,
-        COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = false), 0)::text AS net_no_campaign,
-        COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign = true), 0)::text AS campaign,
-        COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign = true), 0)::text AS net_campaign,
-        COALESCE(SUM(rc.total_cost_in_usd_cents) FILTER (WHERE rc.run_has_campaign IS NULL), 0)::text AS unknown,
-        COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)) FILTER (WHERE rc.run_has_campaign IS NULL), 0)::text AS net_unknown,
-        GROUPING(rc.cost_name) = 0 AS by_name,
-        GROUPING(rc.organization_id) = 0 AS by_org
-      FROM runs_costs rc
-      WHERE rc.is_platform_projected
-        AND rc.organization_id IS NOT NULL
-      GROUP BY GROUPING SETS (
-        (date_trunc('month', rc.created_at AT TIME ZONE 'UTC')),
-        (rc.organization_id, date_trunc('month', rc.created_at AT TIME ZONE 'UTC')),
-        (rc.organization_id, date_trunc('month', rc.created_at AT TIME ZONE 'UTC'), rc.cost_name)
-      )
-      ORDER BY 2, 1 NULLS FIRST, 3 NULLS FIRST
-    `)) as any[];
+    // From the write-maintained rollup (migration 0055) once stamped; the live
+    // query (same figures, same text, same order) only until then.
+    const rows = (await statsDb.execute(
+      (await isStatsRollupReady(NO_CAMPAIGN_DAY_ROLLUP_NAME)) ? monthlyFromRollupSql : monthlyLiveSql
+    )) as any[];
 
     const figures = (r: any) => ({
       noCampaignCostInUsdCents: r.no_campaign as string,
