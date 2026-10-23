@@ -2,6 +2,7 @@ import { Router } from "express";
 import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, readDb } from "../db/index.js";
+import { uuidArray } from "../db/uuid-array.js";
 import { runs, runsCosts } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
@@ -355,14 +356,6 @@ router.post("/v1/runs/costs/batch", requireApiKey, async (req, res) => {
 // descendant tree) joined to runs (row data) + runs_costs (own + descendant
 // cost arrays). Constant 4 SQL round-trips regardless of N (up to 10000).
 // ---------------------------------------------------------------------------
-/**
- * A tree-sized id list as ONE array parameter. `sql.join` of one fragment per id
- * recursed in drizzle's query builder and threw "Maximum call stack size exceeded"
- * on a tree of tens of thousands of runs (content-generation backfill, 2026-10-24),
- * and `inArray` binds one parameter per id (postgres caps a statement at 65,535).
- */
-const uuidArray = (ids: string[]) => sql`${`{${ids.join(",")}}`}::uuid[]`;
-
 router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
   try {
     const parsed = BatchRunsRequestSchema.safeParse(req.body);
