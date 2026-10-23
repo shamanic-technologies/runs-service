@@ -256,7 +256,10 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     expect(c2.consumption).toMatchObject({ sourceOccurrenceId: p.id, reuse: true });
     expect(c2.consumption.standardCost).toEqual({ grossCents: "10.0000000000", netCents: "10.0000000000", vendorCents: "2.0000000000", unpricedGrossCents: zero });
     const [c3] = await occurrencesOf(orphan.id);
-    expect(c3.consumption).toEqual({ sourceOccurrenceId: null, sourceRunId: null, reuse: false, provenance: "unknown", standardCost: null });
+    expect(c3.consumption).toEqual({
+      sourceOccurrenceId: null, sourceRunId: null, reuse: false, provenance: "unknown", standardCost: null,
+      consumingOutcomes: [{ outcomeKey: null, weight: "1.0000000000", standardCost: null }],
+    });
 
     // A new reuse never moves the production cost.
     const third = await run({ organizationId: ORG_B });
