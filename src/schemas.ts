@@ -2551,3 +2551,312 @@ registry.registerPath({
     503: { description: "The rollup is not built on this database yet", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
+
+// --- Outcome occurrences: the production-cost ledger (COST-ACCOUNTING-1023) ---
+//
+// A run is a PRODUCTION ORDER. It may state the outcome occurrences it PRODUCED
+// and CONSUMED; runs-service then serves what each produced occurrence cost to
+// make, proves the ledger to the cent per org per day, and stores the coverage
+// series. See CLAUDE.md "Outcome occurrences — the production-cost ledger".
+
+export const OUTCOME_KEY_RE = /^[a-z][a-z0-9_]{1,63}$/;
+export const SUBJECT_SERVICE_RE = /^[a-z][a-z0-9-]{1,63}$/;
+const DECIMAL_STRING_RE = /^\d+(\.\d{1,6})?$/;
+const UUID_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const OutcomeOccurrenceInputSchema = z
+  .object({
+    outcomeKey: z.string().regex(OUTCOME_KEY_RE).openapi({
+      description:
+        "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+      example: "email_checked",
+    }),
+    subjectService: z.string().regex(SUBJECT_SERVICE_RE).openapi({
+      description: "The service whose database holds the subject (a person: lead-service; an object: the channel's service).",
+      example: "lead-service",
+    }),
+    subjectId: z.string().min(1).max(256).openapi({ description: "The subject's id in that service (a lead id, a post id, an audience id…).", example: "8c1f0b7e-2f43-4c3e-9a51-6f7b1f2d9e10" }),
+    quantity: z
+      .union([z.number().positive().max(1e12), z.string().regex(DECIMAL_STRING_RE)])
+      .optional()
+      .openapi({
+        description:
+          "PRODUCED only: this occurrence's weight in its run's cost split (default 1 = equal shares). State it only when one output really costs more than another (e.g. tokens written per message). Up to 6 decimals.",
+        example: 1,
+      }),
+  })
+  .openapi("OutcomeOccurrenceInput");
+
+export const DeclareRunOutcomesRequestSchema = z
+  .object({
+    produced: z.array(OutcomeOccurrenceInputSchema).optional().openapi({
+      description:
+        "The outcome occurrences this run MADE: the run's whole cost (its own cost rows + those of descendants that declare nothing) is split over them. Declare only what was KEPT (a rejected email is not an output: the kept ones carry its cost) and only the run's DECLARED output (a by-product it also caused is not declared: $0).",
+    }),
+    consumed: z.array(OutcomeOccurrenceInputSchema.omit({ quantity: true })).optional().openapi({
+      description: "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first.",
+    }),
+  })
+  .refine((b) => (b.produced?.length ?? 0) + (b.consumed?.length ?? 0) >= 1, { message: "state at least one produced or consumed occurrence" })
+  .refine((b) => (b.produced?.length ?? 0) + (b.consumed?.length ?? 0) <= 1000, { message: "at most 1000 occurrences per call" })
+  .openapi("DeclareRunOutcomesRequest");
+
+export const OutcomeDirectionEnum = z.enum(["produced", "consumed"]).openapi("OutcomeDirection");
+
+export const DeclaredOutcomeOccurrenceSchema = z
+  .object({
+    id: z.string().uuid().openapi({ description: "Occurrence id (stable: a replay returns the same id)." }),
+    direction: OutcomeDirectionEnum,
+    outcomeKey: z.string().openapi({ description: "Stored key (legacy keys normalized)." }),
+    subjectService: z.string(),
+    subjectId: z.string(),
+    quantity: z.string().openapi({ description: "6-decimal string." }),
+    declaredAt: z.string().datetime(),
+    status: z.enum(["recorded", "already_recorded"]).openapi({ description: "recorded = written by this call; already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
+  })
+  .openapi("DeclaredOutcomeOccurrence");
+
+export const DeclareRunOutcomesResponseSchema = z
+  .object({
+    runId: z.string().uuid(),
+    allocationVersion: z.number().int(),
+    recordedCount: z.number().int(),
+    alreadyRecordedCount: z.number().int(),
+    occurrences: z.array(DeclaredOutcomeOccurrenceSchema),
+  })
+  .openapi("DeclareRunOutcomesResponse");
+
+export const OutcomeConflictResponseSchema = z
+  .object({
+    error: z.string(),
+    conflicts: z.array(
+      z.object({
+        direction: OutcomeDirectionEnum,
+        outcomeKey: z.string(),
+        subjectService: z.string(),
+        subjectId: z.string(),
+        storedQuantity: z.string(),
+        statedQuantity: z.string(),
+      }),
+    ),
+  })
+  .openapi("OutcomeConflictResponse");
+
+export const ProductionCostSchema = z
+  .object({
+    grossCents: z.string().openapi({ description: "Billed gross share, USD cents, 10-decimal string." }),
+    netCents: z.string().openapi({ description: "Frozen net (usage discount at cost-write time) share, USD cents." }),
+    vendorCents: z.string().openapi({ description: "Vendor actual share (what the vendor charged us, costs-service catalogue), USD cents. Excludes unpricedGrossCents." }),
+    unpricedGrossCents: z.string().openapi({ description: "Billed gross share of cost rows the vendor catalogue cannot price (not in vendorCents). 0 = the vendor figure is complete." }),
+  })
+  .openapi("ProductionCost");
+
+const declarationDescription =
+  "Declares the outcome occurrences this run PRODUCED and CONSUMED (a run is a production order). Optional: a run that states nothing behaves exactly as before; its spend reads 'produced none'. Call it once the outputs are known (at the end of the run, or in several calls: occurrences accumulate). Idempotent per (run, direction, outcomeKey, subjectService, subjectId): a replay is `already_recorded` (200); the same occurrence with ANOTHER quantity is 409; a key twice in one body is 400. Immutable (no delete). Cost rule v1: the run's cost (own rows + descendants that declare nothing, actual + refunded, whoever pays) is split over its produced occurrences in proportion to quantity (default equal shares), exact to 10 decimals, same split on billed gross, net and vendor actual. Max 1000 occurrences per call. Example body: {\"produced\":[{\"outcomeKey\":\"email_checked\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}],\"consumed\":[{\"outcomeKey\":\"email_found\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\"}]}.";
+
+for (const [path, auth] of [
+  ["/v1/runs/{id}/outcomes", "x-org-id required (must be the run's org)"],
+  ["/v1/platform-runs/{id}/outcomes", "x-service-name required; x-org-id optional (when given, must be the run's org)"],
+] as const) {
+  registry.registerPath({
+    method: "post",
+    path,
+    summary: "Declare the outcome occurrences a run produced and consumed",
+    description: `${declarationDescription} Auth: ${auth}.`,
+    security: [{ apiKey: [] }],
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: { content: { "application/json": { schema: DeclareRunOutcomesRequestSchema } } },
+    },
+    responses: {
+      201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
+      200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
+      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
+      401: { description: "Unauthorized" },
+      404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
+      409: { description: "run_org_mismatch, or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
+      502: { description: "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
+    },
+  });
+}
+
+export const ListOutcomeOccurrencesQuerySchema = z.object({
+  runIds: z.string().optional().openapi({ description: "Comma-separated run ids (<= 500)." }),
+  subjectService: z.string().optional(),
+  subjectIds: z.string().optional().openapi({ description: "Comma-separated subject ids (<= 500); requires subjectService." }),
+  outcomeKey: z.string().optional(),
+  orgId: z.string().uuid().optional().openapi({ description: "The declaring run's org." }),
+  direction: OutcomeDirectionEnum.optional(),
+  declaredAfter: z.string().datetime({ offset: true }).optional().openapi({ description: "Inclusive." }),
+  declaredBefore: z.string().datetime({ offset: true }).optional().openapi({ description: "Exclusive." }),
+  cursor: z.string().uuid().optional().openapi({ description: "nextCursor of the previous page." }),
+  limit: z.string().optional().openapi({ description: "1..1000, default 500." }),
+});
+
+export const OutcomeOccurrenceWithCostSchema = z
+  .object({
+    id: z.string().uuid(),
+    runId: z.string().uuid().openapi({ description: "The run that declared it (the production order)." }),
+    organizationId: z.string().uuid().nullable(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    direction: OutcomeDirectionEnum,
+    outcomeKey: z.string(),
+    subjectService: z.string(),
+    subjectId: z.string(),
+    quantity: z.string(),
+    declaredAt: z.string().datetime(),
+    tags: z
+      .object({
+        brandIds: z.array(z.string()),
+        campaignId: z.string().nullable(),
+        workflowSlug: z.string().nullable(),
+        featureSlug: z.string().nullable(),
+        audienceId: z.string().nullable(),
+      })
+      .openapi({ description: "The declaring run's tags (for a produced occurrence: the production tags). Offer = the campaign's (campaign-service). Any customer scope is an exact sum of occurrences over these tags." }),
+    cost: ProductionCostSchema.nullable().openapi({ description: "PRODUCED: what this occurrence cost to make (its standard cost), under allocation v1, as of now (a cost row written later on its run moves it). CONSUMED: null (see consumption)." }),
+    consumption: z
+      .object({
+        sourceOccurrenceId: z.string().uuid().nullable().openapi({ description: "The produced occurrence this consumption resolved to. Null = unknown provenance." }),
+        sourceRunId: z.string().uuid().nullable(),
+        reuse: z.boolean().openapi({ description: "true = an earlier consumption already used that occurrence: charged at standard cost with no new spend (reuse gain)." }),
+        provenance: z.enum(["known", "unknown"]),
+        standardCost: ProductionCostSchema.nullable().openapi({ description: "The standard cost charged to this consumption = the source occurrence's production cost. Null when provenance is unknown." }),
+      })
+      .nullable()
+      .openapi({ description: "CONSUMED only (null for produced)." }),
+  })
+  .openapi("OutcomeOccurrenceWithCost");
+
+export const ListOutcomeOccurrencesResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    allocationRule: z.string(),
+    occurrences: z.array(OutcomeOccurrenceWithCostSchema),
+    nextCursor: z.string().uuid().nullable(),
+  })
+  .openapi("ListOutcomeOccurrencesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/outcome-occurrences",
+  summary: "Outcome occurrences with what each produced one cost to make (service-auth)",
+  description:
+    "The production cost of each outcome occurrence: ordered by id, paged by cursor. At least one of runIds, subjectIds (+subjectService), outcomeKey, orgId is required. Each produced occurrence carries its v1 share of its run's cost (the run's own actual + refunded rows and those of descendants that declare nothing, split per (UTC day, org) group in proportion to quantity, cumulative rounding at 10 decimals: a run's occurrences sum exactly to its cost). The same groups feed /internal/outcome-costs/ledger-check, so Σ occurrences of a day = that day's allocated. Each consumed occurrence carries `consumption`: the produced occurrence it resolved to, whether it is a reuse, and the standard cost charged (that occurrence's production cost: a past figure never moves when a new reuse happens). Every row carries the declaring run's tags (org, brands, campaign, workflow, feature, audience), so a customer scope is an exact sum. Production cost only: what the client PAID is billing-service's. Fail loud: vendor catalogue unreadable = 502.",
+  security: [{ apiKey: [] }],
+  request: { query: ListOutcomeOccurrencesQuerySchema },
+  responses: {
+    200: { description: "Occurrences", content: { "application/json": { schema: ListOutcomeOccurrencesResponseSchema } } },
+    400: { description: "No filter, or invalid filter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "costs-service vendor catalogue unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const LedgerMoneySchema = z.object({
+  grossCents: z.string(),
+  netCents: z.string(),
+  vendorCents: z.string(),
+  unpricedGrossCents: z.string(),
+});
+
+export const LedgerCheckRowSchema = z
+  .object({
+    day: z.string().openapi({ description: "UTC day of the cost rows, YYYY-MM-DD." }),
+    organizationId: z.string().uuid().nullable().openapi({ description: "The cost rows' org (null = org-less platform runs)." }),
+    ledger: LedgerMoneySchema.openapi({ description: "Every actual + refunded cost row of the day, summed straight from the ledger." }),
+    allocated: LedgerMoneySchema.openapi({ description: "Σ of the per-occurrence shares (the cost spread on produced occurrences)." }),
+    producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs with no declaring run at or above them." }),
+    standard: LedgerMoneySchema.openapi({ description: "Σ standard cost charged on occurrences: allocated + the standard charges of the day's reuses (consuming org, consumption's UTC day)." }),
+    reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges with no spend behind them (consumptions after the first of an occurrence). standard - actual spread." }),
+    differences: LedgerMoneySchema.openapi({ description: "standard - reuseGain + producedNone - ledger per basis. Zero when balanced." }),
+    balanced: z.boolean(),
+    costRows: z.number().int(),
+    occurrences: z.number().int().openapi({ description: "Produced occurrences receiving a share of the day's spend." }),
+    reuseCount: z.number().int().openapi({ description: "Reuse consumptions declared that day by this org." }),
+    unknownProvenanceCount: z.number().int().openapi({ description: "Consumptions declared that day by this org whose occurrence no run declared producing." }),
+  })
+  .openapi("LedgerCheckRow");
+
+export const LedgerCheckResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    allocationRule: z.string(),
+    since: z.string(),
+    until: z.string(),
+    balanced: z.boolean().openapi({ description: "Every stored (day, org) row balances EXACTLY on gross, net, vendor and unpriced gross (no tolerance)." }),
+    complete: z.boolean().openapi({ description: "Every day of the range is computed (daysMissing empty)." }),
+    daysMissing: z.array(z.string()),
+    totals: z.object({ ledger: LedgerMoneySchema, standard: LedgerMoneySchema, reuseGain: LedgerMoneySchema, allocated: LedgerMoneySchema, producedNone: LedgerMoneySchema }),
+    mismatches: z.array(LedgerCheckRowSchema),
+    rows: z.array(LedgerCheckRowSchema).openapi({ description: "Every (day, org) row, day ascending. Omitted when rows=false." }),
+  })
+  .openapi("LedgerCheckResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/outcome-costs/ledger-check",
+  summary: "To-the-cent check: standard cost on occurrences - reuse gain + spend that produced none = the ledger, per org per day (service-auth)",
+  description:
+    "Reads the stored daily computation (refreshed in-process every 15 min: the last 3 days always, every missing day of the last 60, and any day a late declaration moved) and checks, in exact decimals, standard - reuseGain + producedNone == ledger per (UTC day, org) on billed gross, frozen net, vendor actual and unpriced gross. standard = the spend spread on the produced occurrences (allocated) + the standard charges of reuses; reuseGain = those reuse charges, served as its own line. Default range: the 60 days ending yesterday. `rows=false` returns only totals + mismatches.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: until - 59 days)." }),
+      until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: yesterday UTC)." }),
+      rows: z.enum(["true", "false"]).optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Check", content: { "application/json": { schema: LedgerCheckResponseSchema } } },
+    400: { description: "Invalid range (bad date, since > until, > 400 days)", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+const CoveragePointSchema = z.object({
+  day: z.string(),
+  complete: z.boolean().openapi({ description: "false for today (UTC): the day is still running." }),
+  spendGrossCents: z.string(),
+  coveredGrossCents: z.string().openapi({ description: "Spend whose run (or an ancestor) states its produced outputs." }),
+  spendNetCents: z.string(),
+  coveredNetCents: z.string(),
+  coveragePct: z.string().nullable().openapi({ description: "coveredGross / spendGross x 100, 2 decimals. Null when the day spent nothing." }),
+});
+
+export const OutcomeCoverageResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    since: z.string(),
+    until: z.string(),
+    daysMissing: z.array(z.string()),
+    fleet: z.array(CoveragePointSchema).openapi({ description: "One point per computed day." }),
+    services: z.array(CoveragePointSchema.extend({ serviceName: z.string() })),
+    tasks: z.array(CoveragePointSchema.extend({ serviceName: z.string(), taskName: z.string() })),
+  })
+  .openapi("OutcomeCoverageResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-coverage",
+  summary: "Stored daily series: share of spend whose run states its outputs, fleet / per service / per task (service-auth)",
+  description:
+    "The monitor of the production-cost ledger: per UTC day of the cost rows (actual + refunded), the spend and the part of it spread on a declared produced occurrence. Bad = low: every spending service is expected to declare its outputs. Stored by the same refresh as the ledger check. Filters: serviceName, taskName. Default range: the 60 days ending today.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      since: z.string().optional(),
+      until: z.string().optional(),
+      serviceName: z.string().optional(),
+      taskName: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Coverage series", content: { "application/json": { schema: OutcomeCoverageResponseSchema } } },
+    400: { description: "Invalid range", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export { UUID_STRING_RE as OUTCOME_UUID_RE };

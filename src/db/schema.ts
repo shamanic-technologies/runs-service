@@ -262,3 +262,49 @@ export const costLifecycleEvents = pgTable(
 
 export type CostLifecycleEvent = typeof costLifecycleEvents.$inferSelect;
 export type NewCostLifecycleEvent = typeof costLifecycleEvents.$inferInsert;
+
+// Outcome occurrences (migration 0057, COST-ACCOUNTING-1023). Bronze: one
+// `outcomes.declared` event per declaring call; the trigger projects its items
+// into run_outcomes (silver). App code never writes run_outcomes directly.
+export const outcomeDeclarationEvents = pgTable(
+  "outcome_declaration_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    sourceService: text("source_service"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_ode_run_occurred").on(table.runId, table.occurredAt)]
+);
+
+export const runOutcomes = pgTable(
+  "run_outcomes",
+  {
+    id: uuid("id").primaryKey(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    direction: text("direction").notNull(),
+    outcomeKey: text("outcome_key").notNull(),
+    subjectService: text("subject_service").notNull(),
+    subjectId: text("subject_id").notNull(),
+    quantity: numeric("quantity", { precision: 20, scale: 6 }).notNull().default("1"),
+    declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_run_outcomes_occurrence").on(
+      table.runId,
+      table.direction,
+      table.outcomeKey,
+      table.subjectService,
+      table.subjectId,
+    ),
+    index("idx_run_outcomes_subject").on(table.subjectService, table.subjectId, table.outcomeKey),
+    index("idx_run_outcomes_key_declared").on(table.outcomeKey, table.declaredAt),
+    index("idx_run_outcomes_declared").on(table.declaredAt),
+  ]
+);
+
+export type RunOutcome = typeof runOutcomes.$inferSelect;

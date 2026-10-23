@@ -34,6 +34,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
+- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -864,6 +865,40 @@ cheaper on the incurred basis).
   locks). Apply 422s with the per-item list if any item is invalid, writing nothing.
 - Guard: `tests/integration/incurred-costs.test.ts` (charge reads byte-equal before /
   after, refunded columns + cost-day rows on the stated days, rollup vs live).
+
+## Outcome occurrences — the production-cost ledger (migration 0057, COST-ACCOUNTING-1023)
+
+Owner 2026-10-23 (doctrine: agent-config skill `cost-accounting`): runs-service is the general ledger of what each
+outcome costs to PRODUCE; a run is a PRODUCTION ORDER. features-service only reads it (graph rollup, A/B, estimates);
+billing stays imputation (who pays). Rejected, do not reintroduce: an accounting-service, billing as ledger, a "unit"
+concept, a value-based joint-cost split.
+
+- **Declare**: `POST /v1/runs/:id/outcomes` (x-org-id = the run's org, else 409 `run_org_mismatch`) and
+  `POST /v1/platform-runs/:id/outcomes`, body `{produced?: [{outcomeKey, subjectService, subjectId, quantity?}],
+  consumed?: [{outcomeKey, subjectService, subjectId}]}`, <= 1000 per call. Keys = features-service catalogue steps
+  (`GET /public/catalogue/steps` rows[].key, Positive reply = `conversation`), checked on every call
+  (`services/outcome-catalogue.ts`, 5 min cache, one re-read on a miss): unknown = 400 `unknown_outcome_key`,
+  catalogue unreadable = 502, never accepted blindly; `email_sent` stored as `message_sent`. Idempotent per (run, direction, key, subject); same occurrence with another quantity = 409; immutable.
+  Bronze `outcome_declaration_events` -> trigger -> silver `run_outcomes`, as every lifecycle. Optional: a run that
+  states nothing reads byte for byte as before.
+- **Allocation v1** (`ALLOCATION_VERSION`, served on every read; a change = v2, never an edit): each actual +
+  refunded cost row goes to its nearest run (self or ancestor) with a produced occurrence; per (that run, UTC day,
+  org) split by quantity with CUMULATIVE rounding at 10 decimals (shares telescope to the exact total); same split on
+  gross, frozen net, vendor actual (+ unpriced gross apart). No such run = "produced none".
+- **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
+  (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
+  consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
+  cost as an explicit **reuse gain** (consuming org, consumption day). No producer = unknown provenance (counted).
+- **Reads (service-auth)**: `GET /internal/outcome-occurrences` (cost per occurrence, the declaring run's tags, the
+  consumption's source + standard cost), `GET /internal/outcome-costs/ledger-check` (per (day, org), exact:
+  standard - reuseGain + producedNone == ledger on every basis), `GET /internal/stats/outcome-coverage` (stored daily
+  series, fleet / service / task: the dashboard v2 Monitoring chart reads it).
+- **Stored days** (`cost_ledger_days`, `outcome_coverage_days`, `cost_ledger_computed_days`): in-process refresher
+  (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), <= 8 days a tick: the last 3
+  days always, then missing days of the last 60 newest first, and any day a late produced declaration moved. A day is
+  ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
+  cold run PK probes took minutes. A failed day never blocks the others.
+- Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
 
 ## `/health` answers about the pool, and never queues behind it
 
