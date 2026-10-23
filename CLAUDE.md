@@ -34,7 +34,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
-- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0055). See "Outcome occurrences — the production-cost ledger".
+- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -219,7 +219,20 @@ from a cutover instant billing-service owns.
 - **`GET /internal/stats/costs/no-campaign/monthly`** (staff, statsDb): per org per
   UTC month of `created_at`, projected platform spend split no-campaign / campaign /
   unknown, gross + net, plus `noCampaignByCostName` (billing sets acquiring fees
-  apart); `months[]` dense fleet totals since the first row.
+  apart); `months[]` dense fleet totals since the first row. Served from
+  **`stats_rollup_no_campaign_day`** (migration 0055: per cost row's org × UTC day ×
+  cost name × `run_has_campaign`, n + gross + net, atomic upsert trigger) once stamped
+  `no_campaign_day` (`scripts/rebuild-stats-rollup.ts no_campaign_day` after the deploy);
+  live it scanned all 1.32M projected rows + a 109 MB disk sort, 95 s at box load ~89,
+  every call 500 on the 30 s timeout (2026-10-23). Parity guard (rollup vs live, raw
+  bodies, red if the trigger is off): `tests/integration/no-campaign-spend.test.ts`.
+  **`orgBasis=incurred`** (migration 0056) keys orgs[] on the org the run was OPENED
+  under (bronze run.created `organizationId`, `run_origin_org()`), so a transferred
+  brand's history stays on the org that spent it (Doc Dinners' pre-2026-09-28 spend on
+  agency b645207b); default `current` = the cost row's org now. months[] is the same on
+  both. Rollup rows carry `origin_org_id`; rows from before 0056 have none, so a row's
+  n can go negative: every read test is on a GROUP's SUM(n). Incurred basis needs the
+  extra stamp `no_campaign_origin` (set by the same `no_campaign_day` rebuild).
 - **`hasCampaign=true|false` on `GET /v1/stats/public/costs/timeseries`** (live and
   rollup paths: `campaign_id IS [NOT] NULL` on the run): billing's 14-day forecast
   reads campaign spend only.
@@ -823,7 +836,7 @@ cheaper on the incurred basis).
 - Guard: `tests/integration/incurred-costs.test.ts` (charge reads byte-equal before /
   after, refunded columns + cost-day rows on the stated days, rollup vs live).
 
-## Outcome occurrences — the production-cost ledger (migration 0055, COST-ACCOUNTING-1023)
+## Outcome occurrences — the production-cost ledger (migration 0057, COST-ACCOUNTING-1023)
 
 Owner 2026-10-23 (doctrine: agent-config skill `cost-accounting`): runs-service is the general ledger of what each
 outcome costs to PRODUCE; a run is a PRODUCTION ORDER. features-service only reads it (graph rollup, A/B, estimates);

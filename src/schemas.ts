@@ -1055,10 +1055,21 @@ const NoCampaignFiguresSchema = {
   netUnknownCostInUsdCents: z.string().openapi({ description: "Frozen NET twin of unknownCostInUsdCents." }),
 };
 
+export const NoCampaignMonthlyQuerySchema = z.object({
+  orgBasis: z
+    .enum(["current", "incurred"])
+    .optional()
+    .openapi({
+      description:
+        "Which org each cost row counts under in orgs[]. `current` (absent = current): the cost row's org now, where a brand transfer moved it. `incurred`: the org its run was opened under, so a transferred brand's history stays on the org that held the brand when the money was spent. months[] (fleet totals) is the same on both.",
+    }),
+});
+
 export const NoCampaignMonthlyResponseSchema = z
   .object({
     timezone: z.literal("UTC"),
     statuses: z.array(z.string()),
+    orgBasis: z.enum(["current", "incurred"]).openapi({ description: "The basis orgs[] is keyed on (the query's, `current` when absent)." }),
     months: z
       .array(z.object({ month: z.string().openapi({ description: "YYYY-MM, UTC, of the cost row's created_at." }), ...NoCampaignFiguresSchema, orgsWithNoCampaignSpend: z.number().int() }))
       .openapi({ description: "Fleet totals, DENSE from the month of the first org-attributed platform cost row to the current month." }),
@@ -1083,10 +1094,12 @@ registry.registerPath({
   summary: "Fleet-wide platform spend per org per UTC month, campaign vs no campaign (service-auth only)",
   description:
     "Every org-attributed platform cost row (actual + provisioned, the org-usage-total predicate), per org per UTC calendar month of its created_at: spend of runs with no campaign, spend of runs carrying a campaign, and spend whose campaign status is not known yet, gross and net, plus the no-campaign figure per cost name. months[] = fleet totals, dense since inception.",
+  request: { query: NoCampaignMonthlyQuerySchema },
   security: [{ apiKey: [] }],
   responses: {
     200: { description: "Monthly campaign / no-campaign split", content: { "application/json": { schema: NoCampaignMonthlyResponseSchema } } },
     401: { description: "Unauthorized" },
+    400: { description: "Invalid orgBasis", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

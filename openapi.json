@@ -1248,6 +1248,14 @@
               "type": "string"
             }
           },
+          "orgBasis": {
+            "type": "string",
+            "enum": [
+              "current",
+              "incurred"
+            ],
+            "description": "The basis orgs[] is keyed on (the query's, `current` when absent)."
+          },
           "months": {
             "type": "array",
             "items": {
@@ -1375,6 +1383,7 @@
         "required": [
           "timezone",
           "statuses",
+          "orgBasis",
           "months",
           "orgs"
         ]
@@ -6278,6 +6287,22 @@
             "apiKey": []
           }
         ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "current",
+                "incurred"
+              ],
+              "description": "Which org each cost row counts under in orgs[]. `current` (absent = current): the cost row's org now, where a brand transfer moved it. `incurred`: the org its run was opened under, so a transferred brand's history stays on the org that held the brand when the money was spent. months[] (fleet totals) is the same on both."
+            },
+            "required": false,
+            "description": "Which org each cost row counts under in orgs[]. `current` (absent = current): the cost row's org now, where a brand transfer moved it. `incurred`: the org its run was opened under, so a transferred brand's history stays on the org that held the brand when the money was spent. months[] (fleet totals) is the same on both.",
+            "name": "orgBasis",
+            "in": "query"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Monthly campaign / no-campaign split",
@@ -6285,6 +6310,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NoCampaignMonthlyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid orgBasis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }

@@ -263,7 +263,7 @@ export const costLifecycleEvents = pgTable(
 export type CostLifecycleEvent = typeof costLifecycleEvents.$inferSelect;
 export type NewCostLifecycleEvent = typeof costLifecycleEvents.$inferInsert;
 
-// Outcome occurrences (migration 0055, COST-ACCOUNTING-1023). Bronze: one
+// Outcome occurrences (migration 0057, COST-ACCOUNTING-1023). Bronze: one
 // `outcomes.declared` event per declaring call; the trigger projects its items
 // into run_outcomes (silver). App code never writes run_outcomes directly.
 export const outcomeDeclarationEvents = pgTable(
