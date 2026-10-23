@@ -4,6 +4,8 @@ import { Decimal } from "decimal.js";
 import { createTestApp, getAuthHeaders, getInternalAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, insertTestRun, insertTestRunCost, closeDb } from "../helpers/test-db.js";
 import { sql } from "../../src/db/index.js";
+import { isStatsRollupReady } from "../../src/services/stats-rollup.js";
+import { rebuildNoCampaignDayRollup } from "../../src/services/stats-rollup-no-campaign-day.js";
 
 const ORG_ID = "a7a7a7a7-0045-4000-a000-000000000001";
 const OTHER_ORG_ID = "a7a7a7a7-0045-4000-a000-000000000002";
@@ -151,6 +153,52 @@ describe("no-campaign spend (migration 0045)", () => {
     expect(res.status).toBe(500);
     // Outside the window it does not matter.
     expect((await noCampaign(ORG_ID, "2026-11-01T00:00:00Z")).spent_cents).toBe("0.0000000000");
+  });
+
+  it("monthly read: the 0055 rollup answers byte-identical to the live query, through updates, deletes and an org move", async () => {
+    const mine = (body: any) => body.orgs.filter((o: any) => ORG_IDS.includes(o.orgId));
+    async function both() {
+      const ready = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers);
+      expect(ready.status).toBe(200);
+      await sql`DELETE FROM stats_rollups WHERE name = 'no_campaign_day'`;
+      try {
+        const live = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers);
+        expect(live.status).toBe(200);
+        expect(JSON.stringify(mine(ready.body))).toBe(JSON.stringify(mine(live.body)));
+        return mine(ready.body);
+      } finally {
+        await sql`INSERT INTO stats_rollups (name, ready_at) VALUES ('no_campaign_day', now()) ON CONFLICT (name) DO NOTHING`;
+      }
+    }
+    expect(await isStatsRollupReady("no_campaign_day")).toBe(true);
+
+    const camp = await run({ campaignId: CAMPAIGN });
+    const chat = await run();
+    const other = await run({ orgId: OTHER_ORG_ID });
+    await cost(camp.id, "10.0000000000");
+    const a = await cost(chat.id, "0.4000000000", { netCostInUsdCents: "0.3000000000" });
+    await cost(chat.id, "0", { costName: "free-tier" });
+    const prov = await cost(chat.id, "3.0000000000", { status: "provisioned", createdAt: BEFORE });
+    const gone = await cost(chat.id, "5.0000000000", { costName: "gone" });
+    const unknown = await cost(other.id, "2.0000000000", { createdAt: BEFORE, costName: "legacy" });
+    await cost(chat.id, "9.0000000000", { status: "cancelled" });
+    await cost(chat.id, "7.0000000000", { costSource: "org" });
+    expect((await both()).length).toBeGreaterThan(0);
+
+    await sql`UPDATE runs_costs SET run_has_campaign = NULL WHERE id = ${unknown.id}`;
+    await sql`UPDATE runs_costs SET status = 'actual' WHERE id = ${prov.id}`;
+    await sql`UPDATE runs_costs SET status = 'cancelled' WHERE id = ${a.id}`;
+    await sql`DELETE FROM runs_costs WHERE id = ${gone.id}`;
+    await sql`UPDATE runs_costs SET organization_id = ${OTHER_ORG_ID}::uuid WHERE run_id = ${camp.id}`;
+    const after = await both();
+    const oct = after.find((o: any) => o.orgId === ORG_ID && o.month === "2026-10");
+    expect(oct.noCampaignByCostName.map((c: any) => c.costName)).toEqual(["free-tier"]);
+    expect(oct.noCampaignByCostName[0].noCampaignCostInUsdCents).toBe("0.0000000000");
+    expect(oct.campaignCostInUsdCents).toBe("0");
+
+    // A rebuild from the ledger lands on the same figures as the triggers did.
+    await rebuildNoCampaignDayRollup(process.env.RUNS_SERVICE_DATABASE_URL!);
+    expect(await both()).toEqual(after);
   });
 
   it("monthly fleet read: per org per UTC month, campaign / no campaign / unknown, no-campaign per cost name", async () => {

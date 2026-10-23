@@ -218,7 +218,13 @@ from a cutover instant billing-service owns.
 - **`GET /internal/stats/costs/no-campaign/monthly`** (staff, statsDb): per org per
   UTC month of `created_at`, projected platform spend split no-campaign / campaign /
   unknown, gross + net, plus `noCampaignByCostName` (billing sets acquiring fees
-  apart); `months[]` dense fleet totals since the first row.
+  apart); `months[]` dense fleet totals since the first row. Served from
+  **`stats_rollup_no_campaign_day`** (migration 0055: per cost row's org × UTC day ×
+  cost name × `run_has_campaign`, n + gross + net, atomic upsert trigger) once stamped
+  `no_campaign_day` (`scripts/rebuild-stats-rollup.ts no_campaign_day` after the deploy);
+  live it scanned all 1.32M projected rows + a 109 MB disk sort, 95 s at box load ~89,
+  every call 500 on the 30 s timeout (2026-10-23). Parity guard (rollup vs live, raw
+  bodies, red if the trigger is off): `tests/integration/no-campaign-spend.test.ts`.
 - **`hasCampaign=true|false` on `GET /v1/stats/public/costs/timeseries`** (live and
   rollup paths: `campaign_id IS [NOT] NULL` on the run): billing's 14-day forecast
   reads campaign spend only.
