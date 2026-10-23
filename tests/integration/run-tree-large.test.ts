@@ -5,12 +5,12 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 
-// A run tree of tens of thousands of runs (content-generation backfill,
+// A run tree of 150,000+ runs (content-generation backfill,
 // 2026-10-24): POST /v1/runs/batch and GET /v1/runs/:id threw
 // "Maximum call stack size exceeded" building one SQL fragment per descendant id.
 
 const ORG = "0c05acc0-1024-4c0a-8b1e-0000000000d1";
-const N = 30_000;
+const N = 150_000;
 const app = createTestApp();
 
 describe("Run tree reads on a very large tree", () => {
@@ -38,7 +38,7 @@ describe("Run tree reads on a very large tree", () => {
     await closeDb();
   });
 
-  it("POST /v1/runs/batch answers for a root with 30,000 descendants", async () => {
+  it("POST /v1/runs/batch answers for a root with 150,000 descendants", async () => {
     const res = await request(app).post("/v1/runs/batch").set(getAuthHeaders({ orgId: ORG })).send({ runIds: [rootId] });
     expect(res.status).toBe(200);
     expect(res.body.runs).toHaveLength(1);
