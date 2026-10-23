@@ -5,7 +5,7 @@ import { createTestApp, getAuthHeaders, getInternalAuthHeaders, getPlatformAuthH
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
-import { computeLedgerDay, refreshLedgerDays, storeLedgerDay, checkLedgerRow, utcDay } from "../../src/services/outcome-ledger.js";
+import { addDays, computeLedgerDay, daysToCompute, refreshLedgerDays, storeLedgerDay, checkLedgerRow, ledgerCheckInputOf, utcDay } from "../../src/services/outcome-ledger.js";
 
 // COST-ACCOUNTING-1023: a run states the outcome occurrences it produced and
 // consumed; runs-service serves what each one cost to make and proves the ledger
@@ -13,6 +13,7 @@ import { computeLedgerDay, refreshLedgerDays, storeLedgerDay, checkLedgerRow, ut
 
 const ORG = "0c05acc0-1023-4c0a-8b1e-000000000001";
 const ORG_B = "0c05acc0-1023-4c0a-8b1e-000000000002";
+const ORG_V = "0c05acc0-1023-4c0a-8b1e-000000000003";
 
 const catalog = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock("../../src/services/vendor-costs.js", async (importOriginal) => {
@@ -21,7 +22,7 @@ vi.mock("../../src/services/vendor-costs.js", async (importOriginal) => {
 });
 
 // features-service's step catalogue (the keys a run may declare).
-const CATALOGUE = new Set(["email_checked", "email_found", "lead_found", "message_written", "message_sent", "post_published", "conversation"]);
+const CATALOGUE = new Set(["meeting_booked", "meeting_attended", "email_checked", "email_found", "lead_found", "message_written", "message_sent", "post_published", "conversation"]);
 const stepCatalogue = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/services/outcome-catalogue.js")>();
@@ -86,14 +87,14 @@ async function clearLedgerDays() {
 
 describe("Outcome occurrences: the production-cost ledger", () => {
   beforeAll(async () => {
-    await cleanTestData([ORG, ORG_B, null]);
+    await cleanTestData([ORG, ORG_B, ORG_V, null]);
     await clearLedgerDays();
     catalog.fn.mockResolvedValue(VERSIONS);
     stepCatalogue.fn.mockImplementation(async (keys: string[]) => keys.filter((k) => !CATALOGUE.has(k)));
   });
 
   afterAll(async () => {
-    await cleanTestData([ORG, ORG_B, null]);
+    await cleanTestData([ORG, ORG_B, ORG_V, null]);
     await clearLedgerDays();
     await closeDb();
   });
@@ -371,5 +372,86 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     const off = checkLedgerRow({ ledger: m("100"), standard: m("70"), reuseGain: m("10"), producedNone: { ...m("40"), gross: "39" } });
     expect(off.balanced).toBe(false);
     expect(off.differences.gross).toBe("-1.0000000000");
+  });
+  it("RUNS-VOID-1023: a taken-back declaration counts in no figure, only its owning service may take it back, and the run accepts no new one", async () => {
+    const vday = addDays(utcDay(new Date()), -10);
+    const vAt = `${vday}T10:00:00Z`;
+    const vrun = (serviceName: string) =>
+      insertTestRun({ organizationId: ORG_V, serviceName, taskName: "outcome-recording", status: "completed", startedAt: new Date(`${vday}T09:00:00Z`) });
+    const vcost = async (runId: string) =>
+      insertTestRunCost({ runId, costName: "tok", quantity: "20", unitCostInUsdCents: "5", totalCostInUsdCents: "100.0000000000", status: "actual", createdAt: new Date(vAt) });
+    const lead = (outcomeKey: string, subjectId = "void-lead") => ({ outcomeKey, subjectService: "lead-service", subjectId });
+    const orgHeaders = (serviceName?: string) => ({ ...getAuthHeaders({ orgId: ORG_V }), ...(serviceName && { "x-service-name": serviceName }) });
+    const body = { reason: "one run declared several produced keys", voidedBy: "lead-service COST-ACCOUNTING-1023-LEAD-FIX" };
+
+    // The wrong shape of 2026-10-23: one run producing several keys, consuming its own.
+    const wrong = await vrun("lead-service");
+    await vcost(wrong.id);
+    expect((await declare(wrong.id, { produced: [lead("meeting_booked"), lead("meeting_attended")], consumed: [lead("conversation"), lead("meeting_booked")] }, orgHeaders())).status).toBe(201);
+    // Another run consuming one of its outputs, and an untouched sibling run of the same service.
+    const consumer = await vrun("svc");
+    await vcost(consumer.id);
+    await declare(consumer.id, { produced: [lead("message_sent")], consumed: [lead("meeting_attended")] }, orgHeaders());
+    const sibling = await vrun("lead-service");
+    await vcost(sibling.id);
+    await declare(sibling.id, { produced: [lead("meeting_booked", "other-lead")] }, orgHeaders());
+
+    const d0 = await computeLedgerDay(vday, VERSIONS as any);
+    await storeLedgerDay(d0);
+    const before = d0.orgs.find((o) => o.organizationId === ORG_V)!;
+    expect(before.allocated.gross).toBe("300.0000000000");
+    expect(await daysToCompute()).not.toContain(addDays(utcDay(new Date()), -10));
+    expect((await occurrencesOf(consumer.id)).find((o) => o.direction === "consumed").consumption.sourceRunId).toBe(wrong.id);
+
+    // Another service can never take back lead-service's run; nor can a call without its name.
+    const foreign = await request(app).post(`/v1/platform-runs/${wrong.id}/outcomes/void`).set(getPlatformAuthHeaders({ serviceName: "instantly-service" })).send(body);
+    expect(foreign.status).toBe(403);
+    expect(foreign.body.error).toBe("not_run_owner");
+    expect((await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set(orgHeaders()).send(body)).status).toBe(400);
+    expect((await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set(orgHeaders("lead-service")).send({ reason: "" , voidedBy: "x" })).status).toBe(400);
+    expect((await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set({ ...getAuthHeaders({ orgId: ORG }), "x-service-name": "lead-service" }).send(body)).status).toBe(409);
+    expect(await occurrencesOf(wrong.id)).toHaveLength(4);
+
+    // The owner takes it back.
+    const v = await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set(orgHeaders("lead-service")).send(body);
+    expect(v.status).toBe(201);
+    expect(v.body).toMatchObject({ runId: wrong.id, status: "voided", voidedCount: 4, allocationVersion: 1 });
+    const again = await request(app).post(`/v1/platform-runs/${wrong.id}/outcomes/void`).set(getPlatformAuthHeaders({ serviceName: "lead-service" })).send(body);
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ status: "already_voided", voidedCount: 0, voidedAt: v.body.voidedAt });
+
+    // Nothing new can be recorded on it.
+    const redeclare = await declare(wrong.id, { produced: [lead("meeting_booked")] }, orgHeaders());
+    expect(redeclare.status).toBe(409);
+    expect(redeclare.body.error).toBe("run_outcomes_voided");
+    const projected = await db
+      .execute(sql`INSERT INTO outcome_declaration_events (run_id, event_type, payload) VALUES (${wrong.id}::uuid, 'outcomes.declared', ${JSON.stringify({ items: [{ id: "6f0d3c1e-0000-4000-8000-00000000a001", direction: "produced", outcome_key: "meeting_booked", subject_service: "lead-service", subject_id: "x" }] })}::jsonb)`)
+      .then(() => null, (e: any) => `${e.message} ${e.cause?.message}`);
+    expect(projected).toMatch(/run_outcomes_voided/);
+
+    // Audit: the bronze log keeps the declaration AND the void, with its motive and the removed rows.
+    const events = (await db.execute(sql`SELECT event_type, payload FROM outcome_declaration_events WHERE run_id = ${wrong.id}::uuid ORDER BY occurred_at`)) as any[];
+    expect(events.map((e) => e.event_type)).toEqual(["outcomes.declared", "outcomes.voided"]);
+    expect(events[1].payload).toMatchObject({ reason: body.reason, voidedBy: body.voidedBy, affectedFromDay: vday });
+    expect(events[1].payload.items).toHaveLength(4);
+
+    // No figure counts it: occurrences, the consumer's provenance, the stored day (marked stale), the ledger, the totals.
+    expect(await occurrencesOf(wrong.id)).toHaveLength(0);
+    expect((await occurrencesOf(consumer.id)).find((o) => o.direction === "consumed").consumption.provenance).toBe("unknown");
+    expect((await occurrencesOf(sibling.id))[0].cost.grossCents).toBe("100.0000000000");
+    expect(await daysToCompute()).toContain(vday);
+    const d1 = await computeLedgerDay(vday, VERSIONS as any);
+    await storeLedgerDay(d1);
+    expect(await daysToCompute()).not.toContain(vday);
+    const after = d1.orgs.find((o) => o.organizationId === ORG_V)!;
+    expect(after.allocated.gross).toBe("200.0000000000");
+    expect(after.producedNone.gross).toBe("100.0000000000");
+    expect(checkLedgerRow(ledgerCheckInputOf(after)).balanced).toBe(true);
+    const totals = await request(app).get(`/internal/stats/outcome-costs?since=${vday}&until=${vday}&costOrgId=${ORG_V}&groupBy=outcomeKey`).set(getInternalAuthHeaders());
+    expect(totals.status).toBe(200);
+    expect(totals.body.produced.map((g: any) => g.dimensions.outcomeKey).sort()).toEqual(["meeting_booked", "message_sent"]);
+    expect(totals.body.complete).toBe(true);
+    for (const g of totals.body.produced) expect(g.cost.grossCents).toBe("100.0000000000");
+    expect(totals.body.produced.some((g: any) => g.dimensions.outcomeKey === "meeting_attended")).toBe(false);
   });
 });

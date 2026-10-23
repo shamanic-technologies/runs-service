@@ -265,7 +265,8 @@ export type NewCostLifecycleEvent = typeof costLifecycleEvents.$inferInsert;
 
 // Outcome occurrences (migration 0057, COST-ACCOUNTING-1023). Bronze: one
 // `outcomes.declared` event per declaring call; the trigger projects its items
-// into run_outcomes (silver). App code never writes run_outcomes directly.
+// into run_outcomes (silver). An `outcomes.voided` event (migration 0059) removes
+// the run's rows from silver. App code never writes run_outcomes directly.
 export const outcomeDeclarationEvents = pgTable(
   "outcome_declaration_events",
   {
@@ -276,7 +277,11 @@ export const outcomeDeclarationEvents = pgTable(
     sourceService: text("source_service"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("idx_ode_run_occurred").on(table.runId, table.occurredAt)]
+  (table) => [
+    index("idx_ode_run_occurred").on(table.runId, table.occurredAt),
+    // Migration 0059: the refresher finds `outcomes.voided` events after a day was computed.
+    index("idx_ode_event_type_occurred").on(table.eventType, table.occurredAt),
+  ]
 );
 
 export const runOutcomes = pgTable(

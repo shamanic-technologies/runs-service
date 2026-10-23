@@ -192,6 +192,81 @@ export async function declareRunOutcomes(
 }
 
 // ---------------------------------------------------------------------------
+// Taking a declaration back (RUNS-VOID-1023)
+// ---------------------------------------------------------------------------
+
+/** True once the run's declaration was taken back: it accepts no new occurrence. */
+export async function isRunOutcomesVoided(runId: string): Promise<boolean> {
+  const [row] = (await db.execute(sql`
+    SELECT 1 AS x FROM outcome_declaration_events
+    WHERE run_id = ${runId}::uuid AND event_type = 'outcomes.voided' LIMIT 1
+  `)) as any[];
+  return Boolean(row);
+}
+
+export class RunOutcomesVoidedError extends Error {
+  constructor(runId: string) {
+    super(`run_outcomes_voided: run ${runId} had its declaration taken back, it accepts no new one`);
+  }
+}
+
+export interface VoidedRunOutcomes {
+  status: "voided" | "already_voided";
+  voidedCount: number;
+  voidedAt: string;
+}
+
+/**
+ * Takes back EVERY occurrence the run declared (both directions): one bronze
+ * `outcomes.voided` event carrying the reason, who, the removed rows and the
+ * first UTC day they could have moved (the run's start or the earliest
+ * declaration, whichever is first); the projection removes them from silver, so
+ * they count in no figure, and the refresher recomputes every stored day from
+ * that one. Idempotent: a second call writes nothing.
+ */
+export async function voidRunOutcomes(runId: string, body: { reason: string; voidedBy: string }, sourceService: string): Promise<VoidedRunOutcomes> {
+  const [prior] = (await db.execute(sql`
+    SELECT occurred_at FROM outcome_declaration_events
+    WHERE run_id = ${runId}::uuid AND event_type = 'outcomes.voided'
+    ORDER BY occurred_at LIMIT 1
+  `)) as any[];
+  if (prior) return { status: "already_voided", voidedCount: 0, voidedAt: new Date(prior.occurred_at).toISOString() };
+
+  const rows = (await db.execute(sql`
+    SELECT id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity, declared_at
+    FROM run_outcomes WHERE run_id = ${runId}::uuid ORDER BY id
+  `)) as any[];
+  const [run] = (await db.execute(sql`SELECT started_at FROM runs WHERE id = ${runId}::uuid`)) as any[];
+  const firstDay = [new Date(run.started_at), ...rows.map((r) => new Date(r.declared_at))]
+    .map(utcDay)
+    .sort()[0];
+  const [event] = await db
+    .insert(outcomeDeclarationEvents)
+    .values({
+      runId,
+      eventType: "outcomes.voided",
+      sourceService,
+      payload: {
+        allocationVersion: ALLOCATION_VERSION,
+        reason: body.reason,
+        voidedBy: body.voidedBy,
+        affectedFromDay: firstDay,
+        items: rows.map((r) => ({
+          id: r.id,
+          direction: r.direction,
+          outcome_key: r.outcome_key,
+          subject_service: r.subject_service,
+          subject_id: r.subject_id,
+          quantity: r.quantity,
+          declared_at: new Date(r.declared_at).toISOString(),
+        })),
+      },
+    })
+    .returning({ occurredAt: outcomeDeclarationEvents.occurredAt });
+  return { status: "voided", voidedCount: rows.length, voidedAt: event.occurredAt.toISOString() };
+}
+
+// ---------------------------------------------------------------------------
 // Shared SQL: vendor pricing of cost rows + the v1 share
 // ---------------------------------------------------------------------------
 
@@ -900,6 +975,19 @@ export async function daysToCompute(now = new Date()): Promise<string[]> {
         `)) as any[];
         if (stale) out.add(day);
       }
+    }
+  }
+  // A declaration taken back after a day was computed moves every day from the
+  // first one its rows could have touched (stated on the void event).
+  if (computed.size > 0) {
+    const oldest = new Date(Math.min(...[...computed.values()].map((d) => d.getTime())));
+    const voids = (await db.execute(sql`
+      SELECT payload->>'affectedFromDay' AS from_day, occurred_at FROM outcome_declaration_events
+      WHERE event_type = 'outcomes.voided' AND occurred_at > ${oldest.toISOString()}::timestamptz
+    `)) as any[];
+    for (const v of voids) {
+      const at = new Date(v.occurred_at);
+      for (const [day, computedAt] of computed) if (day >= v.from_day && computedAt < at) out.add(day);
     }
   }
   // Recent days first (they feed today's monitor), then missing days newest first.
