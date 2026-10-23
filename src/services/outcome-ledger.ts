@@ -722,8 +722,11 @@ const tagsOf = (r: any): RunTags => ({
   featureSlug: r.feature_slug ?? null,
 });
 
-async function resolveConsumptions(targetSql: SQL): Promise<ResolvedConsumption[]> {
-  const rows = (await statsDb.execute(resolvedConsumptionsSql(targetSql))) as any[];
+/** What runs a read: the stats pool for a request, the day's long-timeout transaction for the refresher. */
+type Exec = { execute: (query: SQL) => Promise<unknown> };
+
+async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promise<ResolvedConsumption[]> {
+  const rows = (await exec.execute(resolvedConsumptionsSql(targetSql))) as any[];
   return rows.map((r) => ({
     id: r.id,
     runId: r.run_id,
@@ -737,9 +740,9 @@ async function resolveConsumptions(targetSql: SQL): Promise<ResolvedConsumption[
 }
 
 /** Standard (production) cost of each producing occurrence named, live (rule 1-3). */
-async function standardCostsOf(consumptions: ResolvedConsumption[], versions: VendorCostVersion[]): Promise<Map<string, Money>> {
+async function standardCostsOf(consumptions: ResolvedConsumption[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, Money>> {
   const anchors = [...new Set(consumptions.filter((c) => c.producerRunId).map((c) => c.producerRunId!))];
-  return occurrenceCosts(anchors, versions);
+  return occurrenceCosts(anchors, versions, exec);
 }
 
 const ZERO = (): Money => ({ gross: fx(0), net: fx(0), vendor: fx(0), unpricedGross: fx(0) });
@@ -759,12 +762,12 @@ const round10 = (x: Decimal.Value) => new D(x).toDecimalPlaces(10, Decimal.ROUND
  * declaring a produced occurrence, rule 1), with the Σ quantity per key. A run
  * without an anchor maps to []. Keys ordered by key.
  */
-export async function anchorKeysOf(runIds: string[]): Promise<Map<string, Array<{ outcomeKey: string; quantity: string }>>> {
+export async function anchorKeysOf(runIds: string[], exec: Exec = statsDb): Promise<Map<string, Array<{ outcomeKey: string; quantity: string }>>> {
   const out = new Map<string, Array<{ outcomeKey: string; quantity: string }>>();
   if (runIds.length === 0) return out;
   const ids = [...new Set(runIds)];
   for (const id of ids) out.set(id, []);
-  const rows = (await statsDb.execute(sql`
+  const rows = (await exec.execute(sql`
     WITH RECURSIVE
     walk(run_id, cur_id, parent_id, depth, found) AS (
       SELECT r.id, r.id, r.parent_run_id, 0, ${stopsWalkSql(sql`r.id`)}
@@ -842,17 +845,20 @@ export interface OutcomeCostRow {
 }
 
 export async function computeLedgerDay(day: string, versions: VendorCostVersion[]): Promise<LedgerDay> {
-  // Background work, one statement per day: a read-only transaction on the stats
-  // pool with its own timeout (the pool's 30 s is for request reads; on a cold,
-  // loaded box a day's ~25k run lookups took minutes, 2026-10-23).
-  let computedAt = new Date();
-  const [row] = (await statsDb.transaction(async (tx) => {
+  // Background work: EVERY read of the day runs in one read-only transaction on
+  // the stats pool with its own timeout (the pool's 30 s is for request reads; on
+  // a cold, loaded box a day's ~25k run lookups took minutes, and the consumption
+  // resolution of a backfilled day timed out at 30 s, 2026-10-23).
+  return statsDb.transaction(async (tx) => {
     await tx.execute(sql`SET TRANSACTION READ ONLY`);
     await tx.execute(sql`SET LOCAL statement_timeout = '900s'`);
     const [t] = (await tx.execute(sql`SELECT now() AS at`)) as any[];
-    computedAt = new Date(t.at);
-    return tx.execute(ledgerDaySql(day, versions));
-  })) as any[];
+    return computeLedgerDayIn(tx, day, versions, new Date(t.at));
+  });
+}
+
+async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVersion[], computedAt: Date): Promise<LedgerDay> {
+  const [row] = (await tx.execute(ledgerDaySql(day, versions))) as any[];
   const orgs = new Map<string, LedgerDayOrgRow>();
   for (const r of row.orgs as any[]) {
     orgs.set(r.org_id ?? "", {
@@ -872,8 +878,8 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
     SELECT id FROM run_outcomes
     WHERE direction = 'consumed'
       AND declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`);
-  const standard = consumptions.some((c) => c.producerId) ? await standardCostsOf(consumptions, versions) : new Map<string, Money>();
+      AND declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`, tx);
+  const standard = consumptions.some((c) => c.producerId) ? await standardCostsOf(consumptions, versions, tx) : new Map<string, Money>();
   for (const c of consumptions) {
     if (c.producerId && !c.reuse) continue;
     const key = c.orgId ?? "";
@@ -908,7 +914,7 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
   });
   for (const r of row.produced_cost as any[]) outcomeCosts.push(blank("produced_cost", r));
   for (const r of row.none_cost as any[]) outcomeCosts.push(blank("none", r));
-  const declared = (await statsDb.execute(sql`
+  const declared = (await tx.execute(sql`
     SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
            COUNT(*)::text AS n, SUM(o.quantity)::text AS quantity
     FROM run_outcomes o
@@ -923,7 +929,7 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
   for (const r of declared) {
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
   }
-  const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId));
+  const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId), tx);
   const consumed = new Map<string, OutcomeCostRow>();
   for (const c of consumptions) {
     const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
@@ -1285,8 +1291,8 @@ export interface OccurrenceWithCost {
  * excluded with their subtrees), summed over its (UTC day, org) groups — the same
  * groups the stored days split, so Σ occurrences of a day = that day's allocated.
  */
-export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[]): Promise<Map<string, Money>> {
-  const slices = await occurrenceCostSlices(anchorIds, versions);
+export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, Money>> {
+  const slices = await occurrenceCostSlices(anchorIds, versions, exec);
   return new Map([...slices].map(([id, c]) => [id, c.total]));
 }
 
@@ -1299,10 +1305,10 @@ export interface CostSlice {
 }
 
 /** Per produced occurrence: its cost and the (UTC day, cost org) slices it sums, day then org order. */
-export async function occurrenceCostSlices(anchorIds: string[], versions: VendorCostVersion[]): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
+export async function occurrenceCostSlices(anchorIds: string[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
   if (anchorIds.length === 0) return new Map();
   const vj = vendorJoinSql("b");
-  const rows = (await statsDb.execute(sql`
+  const rows = (await exec.execute(sql`
     WITH RECURSIVE
     v AS MATERIALIZED (${versionWindowsSql(versions)}),
     anchors AS MATERIALIZED (SELECT DISTINCT unnest(${`{${anchorIds.join(",")}}`}::uuid[]) AS anchor_id),
