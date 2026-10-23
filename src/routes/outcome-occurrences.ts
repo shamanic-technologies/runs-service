@@ -27,6 +27,14 @@ import {
 } from "../services/outcome-ledger.js";
 import { VendorCostCatalogError } from "../services/vendor-costs.js";
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
+import {
+  MAX_OUTCOME_COST_GROUPS,
+  OUTCOME_COST_DIMENSIONS,
+  TooManyGroupsError,
+  firstOutcomeCostDay,
+  readOutcomeCostTotals,
+  type OutcomeCostDimension,
+} from "../services/outcome-cost-totals.js";
 
 const router = Router();
 
@@ -161,8 +169,16 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
       occurrences: page.occurrences.map((o) => ({
         ...o,
         cost: o.cost ? wireMoney(o.cost) : null,
+        costSlices: o.costSlices ? o.costSlices.map((c) => ({ ...c, cost: wireMoney(c.cost) })) : null,
         consumption: o.consumption
-          ? { ...o.consumption, standardCost: o.consumption.standardCost ? wireMoney(o.consumption.standardCost) : null }
+          ? {
+              ...o.consumption,
+              standardCost: o.consumption.standardCost ? wireMoney(o.consumption.standardCost) : null,
+              consumingOutcomes: o.consumption.consumingOutcomes.map((p) => ({
+                ...p,
+                standardCost: p.standardCost ? wireMoney(p.standardCost) : null,
+              })),
+            }
           : null,
       })),
       nextCursor: page.nextCursor,
@@ -368,6 +384,71 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
     });
   } catch (err) {
     console.error("[Runs Service] outcome coverage read failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res) => {
+  try {
+    const q = req.query as Record<string, string | undefined>;
+    const groupBy = (csv(q.groupBy) ?? []) as OutcomeCostDimension[];
+    const bad = groupBy.filter((d) => !(OUTCOME_COST_DIMENSIONS as readonly string[]).includes(d));
+    if (bad.length > 0 || new Set(groupBy).size !== groupBy.length) {
+      res.status(400).json({ error: `groupBy must be distinct values of ${OUTCOME_COST_DIMENSIONS.join(", ")}` });
+      return;
+    }
+    for (const k of ["orgId", "costOrgId"] as const) {
+      if (q[k] && !OUTCOME_UUID_RE.test(q[k]!)) {
+        res.status(400).json({ error: `${k} must be a uuid` });
+        return;
+      }
+    }
+    const today = utcDay(new Date());
+    const until = q.until ?? today;
+    const first = q.since ? null : await firstOutcomeCostDay();
+    const range = parseRange({ since: q.since ?? (first && first <= until ? first : until), until }, today, 1);
+    if (typeof range === "string") {
+      res.status(400).json({ error: range });
+      return;
+    }
+    const totals = await readOutcomeCostTotals(
+      groupBy,
+      {
+        orgId: q.orgId,
+        costOrgId: q.costOrgId,
+        brandId: q.brandId,
+        campaignId: q.campaignId,
+        workflowSlug: q.workflowSlug,
+        featureSlug: q.featureSlug,
+        outcomeKey: q.outcomeKey ? normalizeOutcomeKey(q.outcomeKey) : undefined,
+      },
+      range.since,
+      range.until,
+    );
+    res.json({
+      allocationVersion: ALLOCATION_VERSION,
+      allocationRule: ALLOCATION_RULE,
+      since: totals.since,
+      until: totals.until,
+      groupBy,
+      maxGroups: MAX_OUTCOME_COST_GROUPS,
+      complete: totals.daysMissing.length === 0,
+      daysMissing: totals.daysMissing,
+      produced: totals.produced.map((g) => ({ ...g, cost: wireMoney(g.cost) })),
+      consumed: totals.consumed.map((g) => ({ ...g, standardCost: wireMoney(g.standardCost), reuseGain: wireMoney(g.reuseGain) })),
+      scope: totals.scope.map((g) => ({
+        ...g,
+        spend: wireMoney(g.spend),
+        producedCost: wireMoney(g.producedCost),
+        producedNone: wireMoney(g.producedNone),
+      })),
+    });
+  } catch (err) {
+    if (err instanceof TooManyGroupsError) {
+      res.status(422).json({ error: err.message, details: { section: err.section, maxGroups: err.cap } });
+      return;
+    }
+    console.error("[Runs Service] outcome cost totals read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

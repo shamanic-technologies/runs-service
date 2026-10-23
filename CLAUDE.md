@@ -34,7 +34,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
-- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger".
+- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -899,6 +899,23 @@ concept, a value-based joint-cost split.
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
+
+## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
+
+features-service's per-outcome cost rollup (unit cost = own cost per occurrence + Σ inputs per occurrence x input unit cost)
+reads TOTALS, never pages occurrences. Stored per UTC day by the ledger refresher, same computation as the ledger check
+(`outcome_cost_days`; `cost_ledger_computed_days.outcome_costs` = the day holds them, a day stored before 0058 is recomputed).
+
+- **Kinds / grain**: `produced_count` (occurrences DECLARED that day, declaring run's tags), `produced_cost` (v1 shares of the
+  day's spend: cost row's UTC day + cost row's org, declaring run's tags), `consumed` (consumptions declared that day per
+  (consuming outcome, consumed outcome), consuming run's tags), `none` (spend no declaring run carries, spending run's tags).
+- **Consuming outcome** = produced key(s) of the consuming run's anchor (rule 1); several keys = quantity-weighted split,
+  cumulative rounding (weights sum to exactly 1, `splitConsumption`); no anchor = null. Served per row on the occurrence read
+  (`consumption.consumingOutcomes`), and `costSlices` (per day x cost org) on produced rows: totals == Σ occurrence rows, exact.
+- **Dimensions**: outcomeKey, day, orgId (run's org), costOrgId (cost row's org = ledger check's), brandId (unnested: each brand),
+  campaignId, workflowSlug, featureSlug. `costOrgId,day`: produced + none == ledger check `ledger`. Cap 5000 groups per section
+  -> 422 `too_many_groups`, never truncated. Consumed standard cost = live production cost at compute time (recent 3 days recomputed).
+- Guard: `tests/integration/outcome-cost-totals.test.ts` (red if a cost-org or split is wrong; writers shard).
 
 ## A platform run made on behalf of a caller's run (`body.parentRunId`, COST-ACCOUNTING-1023-P1)
 

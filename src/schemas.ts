@@ -2736,6 +2736,16 @@ export const OutcomeOccurrenceWithCostSchema = z
       })
       .openapi({ description: "The declaring run's tags (for a produced occurrence: the production tags). Offer = the campaign's (campaign-service). Any customer scope is an exact sum of occurrences over these tags." }),
     cost: ProductionCostSchema.nullable().openapi({ description: "PRODUCED: what this occurrence cost to make (its standard cost), under allocation v1, as of now (a cost row written later on its run moves it). CONSUMED: null (see consumption)." }),
+    costSlices: z
+      .array(
+        z.object({
+          day: z.string().openapi({ description: "UTC day of the cost rows, YYYY-MM-DD." }),
+          costOrganizationId: z.string().uuid().nullable().openapi({ description: "Org of the cost rows (the ledger check's org; null = platform-billed spend made for this run)." }),
+          cost: ProductionCostSchema,
+        }),
+      )
+      .nullable()
+      .openapi({ description: "PRODUCED: `cost` per (UTC day, cost org) of the spend it carries; sums exactly to cost. Empty when its run spent nothing. CONSUMED: null." }),
     consumption: z
       .object({
         sourceOccurrenceId: z.string().uuid().nullable().openapi({ description: "The produced occurrence this consumption resolved to. Null = unknown provenance." }),
@@ -2743,6 +2753,15 @@ export const OutcomeOccurrenceWithCostSchema = z
         reuse: z.boolean().openapi({ description: "true = an earlier consumption already used that occurrence: charged at standard cost with no new spend (reuse gain)." }),
         provenance: z.enum(["known", "unknown"]),
         standardCost: ProductionCostSchema.nullable().openapi({ description: "The standard cost charged to this consumption = the source occurrence's production cost. Null when provenance is unknown." }),
+        consumingOutcomes: z
+          .array(
+            z.object({
+              outcomeKey: z.string().nullable().openapi({ description: "An outcome the consuming production order makes (the produced key of its run, or of the nearest ancestor declaring one). Null = it produced nothing." }),
+              weight: z.string().openapi({ description: "This consumption's share of that outcome, 10 decimals: 1 for a single-outcome order, quantity-weighted (cumulative rounding) otherwise; weights sum to exactly 1." }),
+              standardCost: ProductionCostSchema.nullable().openapi({ description: "standardCost x weight (cumulative rounding: sums exactly to standardCost). Null when provenance is unknown." }),
+            }),
+          )
+          .openapi({ description: "What the consumption was an input OF: the rows /internal/stats/outcome-costs sums per (consumingOutcomeKey, consumedOutcomeKey)." }),
       })
       .nullable()
       .openapi({ description: "CONSUMED only (null for produced)." }),
@@ -2876,6 +2895,79 @@ registry.registerPath({
     200: { description: "Coverage series", content: { "application/json": { schema: OutcomeCoverageResponseSchema } } },
     400: { description: "Invalid range", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
+  },
+});
+
+const OutcomeCostDimensionsSchema = z.record(z.string(), z.string().nullable()).openapi({
+  description: "The group's value of each requested dimension (null = none: an org-less run, a run with no campaign...).",
+});
+
+export const OutcomeCostTotalsResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    allocationRule: z.string(),
+    since: z.string(),
+    until: z.string(),
+    groupBy: z.array(z.string()),
+    maxGroups: z.number().int().openapi({ description: "Per-section cap. Above it the read is a 422 `too_many_groups`, never a truncated list." }),
+    complete: z.boolean().openapi({ description: "Every day of the range holds stored totals (daysMissing empty)." }),
+    daysMissing: z.array(z.string()),
+    produced: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema,
+        occurrences: z.number().int().openapi({ description: "Produced occurrences DECLARED in the range (day = their declaration's UTC day), under the declaring run's tags." }),
+        quantity: z.string().openapi({ description: "Σ quantity of those occurrences (6 decimals)." }),
+        cost: ProductionCostSchema.openapi({ description: "Σ own production cost (allocation v1 shares) of the spend in the range (day = the cost row's UTC day), under the declaring run's tags. = Σ costSlices of /internal/outcome-occurrences." }),
+      }),
+    ),
+    consumed: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "Always consumingOutcomeKey + consumedOutcomeKey (the requested outcomeKey dimension reads as consumingOutcomeKey), plus the other requested dimensions, under the consuming run's tags; day = the consumption's UTC day." }),
+        consumptions: z.string().openapi({ description: "Σ weights (10 decimals): a whole number unless a production order makes several outcomes." }),
+        reuses: z.string().openapi({ description: "Of which reuses (an earlier consumption already used the occurrence)." }),
+        unknownProvenance: z.string().openapi({ description: "Of which no run declared producing the occurrence (no standard cost)." }),
+        standardCost: ProductionCostSchema.openapi({ description: "Σ standard cost charged (each consumption = its source occurrence's production cost)." }),
+        reuseGain: ProductionCostSchema.openapi({ description: "Of which charged on reuses (no spend behind it)." }),
+      }),
+    ),
+    scope: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except outcomeKey." }),
+        spend: ProductionCostSchema.openapi({ description: "Every actual + refunded cost row of the scope in the range = producedCost + producedNone." }),
+        producedCost: ProductionCostSchema.openapi({ description: "Part spread on produced occurrences (Σ produced[].cost of the scope)." }),
+        producedNone: ProductionCostSchema.openapi({ description: "Part of runs with no declaring run at or above them, under the spending run's tags." }),
+        coverageShare: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "producedCost / spend, 10 decimals (0..1). Null when the scope spent nothing." }),
+      }),
+    ),
+  })
+  .openapi("OutcomeCostTotalsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-costs",
+  summary: "The outcome ledger as totals: produced, consumed and produced-none per outcome x day x org x brand x campaign x workflow x feature (service-auth)",
+  description:
+    "The per-outcome cost rollup's input (features-service): unit cost of an outcome = own cost per occurrence + Σ over inputs (consumptions per occurrence x the input's unit cost). Read from the per-day rows the ledger refresher stores (every 15 min, same computation as /internal/outcome-costs/ledger-check), never a ledger scan. Exact decimals on billed gross, frozen net and vendor actual (+ unpriced gross). Every figure equals the sum of the matching /internal/outcome-occurrences rows (produced: costSlices; consumed: consumption.consumingOutcomes). Grouped by org (costOrgId) and day, produced cost + producedNone = the ledger check's ledger for that org-day. Dimensions (groupBy, comma list, any subset): outcomeKey, day (UTC), orgId (the declaring / consuming / spending run's org), costOrgId (the cost row's org = the ledger check's org; differs from orgId only for platform-billed spend made for an org's run), brandId (a co-branded run counts under each brand), campaignId, workflowSlug, featureSlug. Filters: the same names (outcomeKey filters produced and consumed by the consuming outcome, not scope). Default range: since the first stored day until today (UTC), <= 400 days. Each section holds at most maxGroups groups: above, 422 `too_many_groups`.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug. Empty = one group per section." }),
+      since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: the first stored day)." }),
+      until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: today UTC)." }),
+      outcomeKey: z.string().optional(),
+      orgId: z.string().uuid().optional(),
+      costOrgId: z.string().uuid().optional(),
+      brandId: z.string().optional(),
+      campaignId: z.string().optional(),
+      workflowSlug: z.string().optional(),
+      featureSlug: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Totals", content: { "application/json": { schema: OutcomeCostTotalsResponseSchema } } },
+    400: { description: "Invalid groupBy, filter or range", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "too_many_groups: a section exceeds maxGroups (narrow groupBy, filters or range)", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
