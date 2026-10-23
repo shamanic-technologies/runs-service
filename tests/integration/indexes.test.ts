@@ -175,6 +175,8 @@ describe("Silver table naming (migration 0031)", () => {
       { conname: "run_events_run_id_runs_id_fk", tbl: "run_events", ref: "runs" },
       // Migration 0057: a declared outcome occurrence cascades with its run.
       { conname: "run_outcomes_run_id_fkey", tbl: "run_outcomes", ref: "runs" },
+      // Migration 0062: a support mark cascades with its run.
+      { conname: "run_support_marks_run_id_fkey", tbl: "run_support_marks", ref: "runs" },
       { conname: "runs_costs_run_id_runs_id_fk", tbl: "runs_costs", ref: "runs" },
       { conname: "runs_parent_run_id_runs_id_fk", tbl: "runs", ref: "runs" },
     ]);

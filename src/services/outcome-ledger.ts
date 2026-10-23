@@ -287,6 +287,41 @@ export async function declareRunOutcomes(
 }
 
 // ---------------------------------------------------------------------------
+// Support marks (migration 0062): a staff experiment / probe produces nothing
+// ---------------------------------------------------------------------------
+
+export type SupportKind = "staff_experiment" | "support";
+
+/**
+ * Marks runs SUPPORT: one bronze `run.support_marked` event per run not yet
+ * marked (kind, reason, markedBy), projected into run_support_marks. The anchor
+ * walk stops there, so the run's and its subtree's cost stay "produced none".
+ * The caller has checked every run exists and declares no produced occurrence.
+ * Idempotent: an already marked run writes nothing.
+ */
+export async function markRunsSupport(
+  runIds: string[],
+  body: { kind: SupportKind; reason: string; markedBy: string },
+): Promise<{ marked: string[]; alreadyMarked: string[] }> {
+  const ids = `{${runIds.join(",")}}`;
+  const already = new Set(
+    ((await db.execute(sql`SELECT run_id FROM run_support_marks WHERE run_id = ANY(${ids}::uuid[])`)) as any[]).map((r) => r.run_id as string),
+  );
+  const fresh = runIds.filter((id) => !already.has(id));
+  for (let i = 0; i < fresh.length; i += 500) {
+    await db.insert(outcomeDeclarationEvents).values(
+      fresh.slice(i, i + 500).map((runId) => ({
+        runId,
+        eventType: "run.support_marked",
+        sourceService: body.markedBy,
+        payload: { allocationVersion: ALLOCATION_VERSION, kind: body.kind, reason: body.reason, markedBy: body.markedBy },
+      })),
+    );
+  }
+  return { marked: fresh, alreadyMarked: runIds.filter((id) => already.has(id)) };
+}
+
+// ---------------------------------------------------------------------------
 // Taking a declaration back (RUNS-VOID-1023)
 // ---------------------------------------------------------------------------
 
@@ -398,6 +433,14 @@ function occurrencesOfAnchorsSql(anchorsCte: string): SQL {
 const hasProducedSql = (runIdCol: SQL) =>
   sql`EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = ${runIdCol} AND o.direction = 'produced')`;
 
+/**
+ * Where the anchor walk STOPS: a run that declared a produced occurrence (it is
+ * the anchor), or a run marked SUPPORT (migration 0062: a staff experiment, a
+ * probe): its own and its subtree's cost stays "produced none", never climbs.
+ */
+const stopsWalkSql = (runIdCol: SQL) =>
+  sql`(${hasProducedSql(runIdCol)} OR EXISTS (SELECT 1 FROM run_support_marks m WHERE m.run_id = ${runIdCol}))`;
+
 // ---------------------------------------------------------------------------
 // One UTC day: ledger vs spread vs produced none, and coverage
 // ---------------------------------------------------------------------------
@@ -503,16 +546,17 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     ),
     -- Nearest run, itself or an ancestor, that declared a produced occurrence.
     walk(run_id, cur_id, parent_id, depth, found) AS (
-      SELECT d.run_id, d.run_id, d.parent_run_id, 0, ${hasProducedSql(sql`d.run_id`)}
+      SELECT d.run_id, d.run_id, d.parent_run_id, 0, ${stopsWalkSql(sql`d.run_id`)}
       FROM day_runs d
       UNION ALL
-      SELECT w.run_id, p.id, p.parent_run_id, w.depth + 1, ${hasProducedSql(sql`p.id`)}
+      SELECT w.run_id, p.id, p.parent_run_id, w.depth + 1, ${stopsWalkSql(sql`p.id`)}
       FROM walk w
       CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = w.parent_id OFFSET 0) p
       WHERE NOT w.found AND w.parent_id IS NOT NULL AND w.depth < ${MAX_WALK_DEPTH}
     ),
     walked AS MATERIALIZED (SELECT * FROM walk),
-    anchor_of AS MATERIALIZED (SELECT run_id, cur_id AS anchor_id FROM walked WHERE found),
+    -- A walk that stopped on a support mark has no anchor: produced none.
+    anchor_of AS MATERIALIZED (SELECT run_id, cur_id AS anchor_id FROM walked WHERE found AND ${hasProducedSql(sql`cur_id`)}),
     g AS MATERIALIZED (
       SELECT a.anchor_id, c.org_key,
              SUM(c.gross) AS gross, SUM(c.net) AS net, SUM(c.vendor) AS vendor, SUM(c.unpriced) AS unpriced
@@ -723,11 +767,11 @@ export async function anchorKeysOf(runIds: string[]): Promise<Map<string, Array<
   const rows = (await statsDb.execute(sql`
     WITH RECURSIVE
     walk(run_id, cur_id, parent_id, depth, found) AS (
-      SELECT r.id, r.id, r.parent_run_id, 0, ${hasProducedSql(sql`r.id`)}
+      SELECT r.id, r.id, r.parent_run_id, 0, ${stopsWalkSql(sql`r.id`)}
       FROM unnest(${`{${ids.join(",")}}`}::uuid[]) AS i(id)
       CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = i.id OFFSET 0) r
       UNION ALL
-      SELECT w.run_id, p.id, p.parent_run_id, w.depth + 1, ${hasProducedSql(sql`p.id`)}
+      SELECT w.run_id, p.id, p.parent_run_id, w.depth + 1, ${stopsWalkSql(sql`p.id`)}
       FROM walk w
       CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = w.parent_id OFFSET 0) p
       WHERE NOT w.found AND w.parent_id IS NOT NULL AND w.depth < ${MAX_WALK_DEPTH}
@@ -1086,8 +1130,15 @@ export async function daysToCompute(now = new Date(), firstDay?: string): Promis
       WHERE COALESCE(o.recorded_at, o.declared_at) > ${oldest.toISOString()}::timestamptz
       GROUP BY 1
     `)) as any[];
+    // A support mark moves every day from its run's start (its subtree's cost leaves an anchor).
+    const marks = (await db.execute(sql`
+      SELECT to_char(r.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(m.marked_at) AS last_recorded
+      FROM run_support_marks m JOIN runs r ON r.id = m.run_id
+      WHERE m.marked_at > ${oldest.toISOString()}::timestamptz
+      GROUP BY 1
+    `)) as any[];
     for (const [day, at] of computed) {
-      if (late.some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
+      if ([...late, ...marks].some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
     }
   }
   // A declaration taken back after a day was computed moves every day from the
@@ -1245,7 +1296,7 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
       SELECT s.anchor_id, c.id, s.depth + 1
       FROM sub s
       CROSS JOIN LATERAL (SELECT id FROM runs WHERE parent_run_id = s.run_id OFFSET 0) c
-      WHERE s.depth < ${MAX_WALK_DEPTH} AND NOT ${hasProducedSql(sql`c.id`)}
+      WHERE s.depth < ${MAX_WALK_DEPTH} AND NOT ${stopsWalkSql(sql`c.id`)}
     ),
     b AS MATERIALIZED (
       SELECT s.anchor_id, rc.cost_name, rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity,

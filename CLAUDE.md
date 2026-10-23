@@ -937,6 +937,11 @@ resolution keys on declaration time.
   `not_run_owner`). One bronze `outcomes.redated` event per run (id, new + previous time); the projection updates `declared_at` and sets
   `recorded_at` to the re-date instant so the refresher recomputes the moved days. First user: instantly-service's 79k sends of
   2026-05-17..10-22 declared through today's door on 2026-10-23 before `occurredAt` existed.
+- **Support marks (migration 0062)**: `POST /internal/runs/support-marks` (staff, ≤ 5000 runs, kind `staff_experiment|support`, reason,
+  markedBy) marks runs SUPPORT: the anchor walk STOPS there, so the run's and its subtree's cost stay produced none, whatever the
+  parent link says. Bronze `run.support_marked` → `run_support_marks`. A marked run produces nothing (409 `run_marked_support`); a
+  run with a produced occurrence cannot be marked (422). Final, idempotent; the refresher recomputes days from the run's start.
+  First case: 3,052 apollo/chat probe runs parented to 7 postmark sends via a reused x-run-id (~$114 riding newsletter message_sent).
 - Guard: `tests/integration/outcome-backfill.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
