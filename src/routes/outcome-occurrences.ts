@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
+import { MarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -24,6 +24,7 @@ import {
   ledgerCheckInputOf,
   declareRunOutcomes,
   declareOutcomesBatch,
+  markRunsSupport,
   effectiveDeclaredAt,
   listOccurrences,
   utcDay,
@@ -124,6 +125,10 @@ function declarationError(res: Response, err: unknown) {
   const dbMessage = `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`;
   if (err instanceof RunOutcomesVoidedError || dbMessage.includes("run_outcomes_voided")) {
     res.status(409).json({ error: "run_outcomes_voided", conflicts: [] });
+    return;
+  }
+  if (dbMessage.includes("run_marked_support")) {
+    res.status(409).json({ error: "run_marked_support", conflicts: [] });
     return;
   }
   console.error("[Runs Service] declare outcomes failed:", err);
@@ -243,6 +248,37 @@ router.post("/v1/platform-runs/outcomes/batch", requirePlatformAuth, handleDecla
 router.post("/v1/platform-runs/:id/outcomes", requirePlatformAuth, (req, res) => handleDeclare(req, res, false));
 router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
+
+router.post("/internal/runs/support-marks", requireInternalAuth, async (req, res) => {
+  try {
+    const parsed = MarkRunsSupportRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    const runIds = [...new Set(parsed.data.runIds.map((id) => id.toLowerCase()))];
+    const found = (await db.execute(sql`
+      SELECT r.id, EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = r.id AND o.direction = 'produced') AS produces
+      FROM runs r WHERE r.id = ANY(${`{${runIds.join(",")}}`}::uuid[])
+    `)) as any[];
+    const byId = new Map(found.map((r) => [r.id as string, r]));
+    const invalid = runIds.flatMap((runId) => {
+      const r = byId.get(runId);
+      if (!r) return [{ runId, reason: "run_not_found" }];
+      if (r.produces) return [{ runId, reason: "run_declares_outcomes" }];
+      return [];
+    });
+    if (invalid.length > 0) {
+      res.status(422).json({ error: "invalid_runs", details: { invalid } });
+      return;
+    }
+    const out = await markRunsSupport(runIds, parsed.data);
+    res.json({ markedCount: out.marked.length, alreadyMarkedCount: out.alreadyMarked.length });
+  } catch (err) {
+    console.error("[Runs Service] support marks failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 const csv = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined;

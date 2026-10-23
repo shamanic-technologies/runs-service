@@ -2827,6 +2827,37 @@ registry.registerPath({
   },
 });
 
+export const MarkRunsSupportRequestSchema = z
+  .object({
+    runIds: z.array(z.string().regex(UUID_STRING_RE)).min(1).max(5000).openapi({ description: "Runs to mark (<= 5000 per call). Marking a run covers its whole subtree: its descendants' cost stops at it too." }),
+    kind: z.enum(["staff_experiment", "support"]).openapi({ description: "staff_experiment = a staff probe / test; support = any other support function (cost-accounting: reported apart, never an outcome)." }),
+    reason: z.string().min(1).max(2000),
+    markedBy: z.string().min(1).max(200).openapi({ description: "Who decided (session, person, ticket)." }),
+  })
+  .openapi("MarkRunsSupportRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/runs/support-marks",
+  summary: "Mark runs as SUPPORT (staff experiment / probe): their cost never rides an outcome (staff, service-auth)",
+  description:
+    "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked here STOPS that walk: its own cost and its whole subtree's stay 'produced none' (reported apart), never on an ancestor's outcomes, whatever its parent link says (first case 2026-10-23: 3,052 apollo/chat probe runs parented to postmark newsletter sends through a reused x-run-id). A marked run produces no outcome (a produced declaration on it = 409 run_marked_support); a run that already declared a produced occurrence cannot be marked (void it first). One bronze run.support_marked event per run (kind, reason, markedBy); final, idempotent (an already marked run writes nothing). The refresher recomputes every stored day from the run's start; the ledger check stays balanced (the spend moves from an outcome to produced none). Spend, billing and the run tree are untouched. All or nothing: any invalid run = 422 with the list, nothing written.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: MarkRunsSupportRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Marked",
+      content: { "application/json": { schema: z.object({ markedCount: z.number().int(), alreadyMarkedCount: z.number().int() }) } },
+    },
+    400: { description: "Invalid body", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: {
+      description: "invalid_runs: run_not_found, or run_declares_outcomes (void its declaration first); nothing written",
+      content: { "application/json": { schema: z.object({ error: z.literal("invalid_runs"), details: z.object({ invalid: z.array(z.object({ runId: z.string(), reason: z.enum(["run_not_found", "run_declares_outcomes"]) })) }) }) } },
+    },
+  },
+});
+
 export const ListOutcomeOccurrencesQuerySchema = z.object({
   runIds: z.string().optional().openapi({ description: "Comma-separated run ids (<= 500)." }),
   subjectService: z.string().optional(),

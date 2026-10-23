@@ -4549,6 +4549,46 @@
           "runs"
         ]
       },
+      "MarkRunsSupportRequest": {
+        "type": "object",
+        "properties": {
+          "runIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i"
+            },
+            "minItems": 1,
+            "maxItems": 5000,
+            "description": "Runs to mark (<= 5000 per call). Marking a run covers its whole subtree: its descendants' cost stops at it too."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "staff_experiment",
+              "support"
+            ],
+            "description": "staff_experiment = a staff probe / test; support = any other support function (cost-accounting: reported apart, never an outcome)."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "markedBy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Who decided (session, person, ticket)."
+          }
+        },
+        "required": [
+          "runIds",
+          "kind",
+          "reason",
+          "markedBy"
+        ]
+      },
       "ListOutcomeOccurrencesResponse": {
         "type": "object",
         "properties": {
@@ -10289,6 +10329,115 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/runs/support-marks": {
+      "post": {
+        "summary": "Mark runs as SUPPORT (staff experiment / probe): their cost never rides an outcome (staff, service-auth)",
+        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked here STOPS that walk: its own cost and its whole subtree's stay 'produced none' (reported apart), never on an ancestor's outcomes, whatever its parent link says (first case 2026-10-23: 3,052 apollo/chat probe runs parented to postmark newsletter sends through a reused x-run-id). A marked run produces no outcome (a produced declaration on it = 409 run_marked_support); a run that already declared a produced occurrence cannot be marked (void it first). One bronze run.support_marked event per run (kind, reason, markedBy); final, idempotent (an already marked run writes nothing). The refresher recomputes every stored day from the run's start; the ledger check stays balanced (the spend moves from an outcome to produced none). Spend, billing and the run tree are untouched. All or nothing: any invalid run = 422 with the list, nothing written.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkRunsSupportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Marked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "markedCount": {
+                      "type": "integer"
+                    },
+                    "alreadyMarkedCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "markedCount",
+                    "alreadyMarkedCount"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_runs: run_not_found, or run_declares_outcomes (void its declaration first); nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_runs"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "invalid": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runId": {
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "run_not_found",
+                                  "run_declares_outcomes"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "runId",
+                              "reason"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "details"
+                  ]
                 }
               }
             }
