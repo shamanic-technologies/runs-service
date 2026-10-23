@@ -255,6 +255,13 @@ from a cutover instant billing-service owns.
   live it scanned all 1.32M projected rows + a 109 MB disk sort, 95 s at box load ~89,
   every call 500 on the 30 s timeout (2026-10-23). Parity guard (rollup vs live, raw
   bodies, red if the trigger is off): `tests/integration/no-campaign-spend.test.ts`.
+  **`orgBasis=incurred`** (migration 0056) keys orgs[] on the org the run was OPENED
+  under (bronze run.created `organizationId`, `run_origin_org()`), so a transferred
+  brand's history stays on the org that spent it (Doc Dinners' pre-2026-09-28 spend on
+  agency b645207b); default `current` = the cost row's org now. months[] is the same on
+  both. Rollup rows carry `origin_org_id`; rows from before 0056 have none, so a row's
+  n can go negative: every read test is on a GROUP's SUM(n). Incurred basis needs the
+  extra stamp `no_campaign_origin` (set by the same `no_campaign_day` rebuild).
 - **`hasCampaign=true|false` on `GET /v1/stats/public/costs/timeseries`** (live and
   rollup paths: `campaign_id IS [NOT] NULL` on the run): billing's 14-day forecast
   reads campaign spend only.

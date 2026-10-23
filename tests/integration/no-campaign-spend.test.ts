@@ -48,6 +48,25 @@ describe("no-campaign spend (migration 0045)", () => {
     return res.body;
   }
 
+  // The monthly read from the rollup, then live (stamps removed), compared on this
+  // file's orgs as raw JSON. Other files on the shard write meanwhile; their orgs
+  // are filtered out.
+  const mine = (body: any) => body.orgs.filter((o: any) => ORG_IDS.includes(o.orgId));
+  async function both(orgBasis: "current" | "incurred" = "current") {
+    const ready = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers).query({ orgBasis });
+    expect(ready.status).toBe(200);
+    expect(ready.body.orgBasis).toBe(orgBasis);
+    await sql`DELETE FROM stats_rollups WHERE name IN ('no_campaign_day', 'no_campaign_origin')`;
+    try {
+      const live = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers).query({ orgBasis });
+      expect(live.status).toBe(200);
+      expect(JSON.stringify(mine(ready.body))).toBe(JSON.stringify(mine(live.body)));
+      return mine(ready.body);
+    } finally {
+      await sql`INSERT INTO stats_rollups (name, ready_at) VALUES ('no_campaign_day', now()), ('no_campaign_origin', now()) ON CONFLICT (name) DO NOTHING`;
+    }
+  }
+
   beforeEach(async () => {
     await cleanTestData(ORG_IDS);
   });
@@ -156,21 +175,8 @@ describe("no-campaign spend (migration 0045)", () => {
   });
 
   it("monthly read: the 0055 rollup answers byte-identical to the live query, through updates, deletes and an org move", async () => {
-    const mine = (body: any) => body.orgs.filter((o: any) => ORG_IDS.includes(o.orgId));
-    async function both() {
-      const ready = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers);
-      expect(ready.status).toBe(200);
-      await sql`DELETE FROM stats_rollups WHERE name = 'no_campaign_day'`;
-      try {
-        const live = await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers);
-        expect(live.status).toBe(200);
-        expect(JSON.stringify(mine(ready.body))).toBe(JSON.stringify(mine(live.body)));
-        return mine(ready.body);
-      } finally {
-        await sql`INSERT INTO stats_rollups (name, ready_at) VALUES ('no_campaign_day', now()) ON CONFLICT (name) DO NOTHING`;
-      }
-    }
     expect(await isStatsRollupReady("no_campaign_day")).toBe(true);
+    expect(await isStatsRollupReady("no_campaign_origin")).toBe(true);
 
     const camp = await run({ campaignId: CAMPAIGN });
     const chat = await run();
@@ -196,9 +202,81 @@ describe("no-campaign spend (migration 0045)", () => {
     expect(oct.noCampaignByCostName[0].noCampaignCostInUsdCents).toBe("0.0000000000");
     expect(oct.campaignCostInUsdCents).toBe("0");
 
+    expect(await both("incurred")).toEqual(after); // no bronze run.created here: incurred = current
+
     // A rebuild from the ledger lands on the same figures as the triggers did.
     await rebuildNoCampaignDayRollup(process.env.RUNS_SERVICE_DATABASE_URL!);
     expect(await both()).toEqual(after);
+  });
+
+  it("monthly read: a rollup row written before 0056 (no origin) stays exact on the current basis when its cost row moves or goes", async () => {
+    const res = await request(app).post("/v1/runs").set(getAuthHeaders({ orgId: ORG_ID })).send({ serviceName: "svc", taskName: "task" });
+    expect(res.status).toBe(201);
+    const keep = await cost(res.body.id, "3.0000000000");
+    const gone = await cost(res.body.id, "2.0000000000", { costName: "gone" });
+    // As 0055 wrote them: no origin.
+    await sql`UPDATE stats_rollup_no_campaign_day SET origin_org_id = NULL WHERE organization_id = ${ORG_ID}::uuid`;
+    await sql`DELETE FROM runs_costs WHERE id = ${gone.id}`;
+    await sql`UPDATE runs_costs SET organization_id = ${OTHER_ORG_ID}::uuid WHERE id = ${keep.id}`;
+    const rows = await both("current");
+    expect(rows.map((o: any) => [o.orgId, o.month, o.noCampaignCostInUsdCents])).toEqual([[OTHER_ORG_ID, "2026-10", "3.0000000000"]]);
+  });
+
+  it("monthly read, orgBasis=incurred: a transferred brand's history stays on the org that spent it (0056)", async () => {
+    const BRAND = "a7a7a7a7-0056-4000-a000-0000000000b1";
+    // Runs opened through the API, so bronze holds their run.created (the org that opened them).
+    const open = async (campaignId?: string) => {
+      const res = await request(app)
+        .post("/v1/runs")
+        .set({ ...getAuthHeaders({ orgId: ORG_ID }), ...(campaignId ? { "x-campaign-id": campaignId } : {}) })
+        .send({ serviceName: "svc", taskName: "task", brandIds: [BRAND] });
+      expect(res.status).toBe(201);
+      return res.body.id as string;
+    };
+    const camp = await open(CAMPAIGN);
+    const chat = await open();
+    await cost(camp, "10.0000000000", { createdAt: BEFORE });
+    await cost(chat, "0.4000000000", { createdAt: AFTER, netCostInUsdCents: "0.3000000000" });
+    const before = await both("current");
+
+    const t = await request(app)
+      .post("/internal/transfer-brand")
+      .set(headers)
+      .send({ sourceBrandId: BRAND, sourceOrgId: ORG_ID, targetOrgId: OTHER_ORG_ID });
+    expect(t.status).toBe(200);
+    // Spend after the move, under the new org.
+    const later = await request(app)
+      .post("/v1/runs")
+      .set(getAuthHeaders({ orgId: OTHER_ORG_ID }))
+      .send({ serviceName: "svc", taskName: "task", brandIds: [BRAND] });
+    await cost(later.body.id, "1.0000000000", { createdAt: AFTER });
+
+    const current = await both("current");
+    const incurred = await both("incurred");
+    const pick = (rows: any[], org: string, month: string) => rows.find((o) => o.orgId === org && o.month === month);
+
+    // current: the target holds the whole history.
+    expect(pick(current, ORG_ID, "2026-09")).toBeUndefined();
+    expect(pick(current, OTHER_ORG_ID, "2026-09").campaignCostInUsdCents).toBe("10.0000000000");
+    expect(pick(current, OTHER_ORG_ID, "2026-10").noCampaignCostInUsdCents).toBe("1.4000000000");
+    // incurred: what the source spent stays on the source, byte-equal to before the move.
+    expect(pick(incurred, ORG_ID, "2026-09")).toEqual(pick(before, ORG_ID, "2026-09"));
+    expect(pick(incurred, ORG_ID, "2026-10")).toEqual(pick(before, ORG_ID, "2026-10"));
+    expect(pick(incurred, OTHER_ORG_ID, "2026-09")).toBeUndefined();
+    expect(pick(incurred, OTHER_ORG_ID, "2026-10").noCampaignCostInUsdCents).toBe("1.0000000000");
+
+    // Same totals summed over orgs on both bases.
+    const total = (rows: any[], f: string) => rows.reduce((acc, o) => acc.plus(o[f]), new Decimal(0)).toFixed(10);
+    for (const f of ["noCampaignCostInUsdCents", "netNoCampaignCostInUsdCents", "campaignCostInUsdCents", "netCampaignCostInUsdCents"]) {
+      expect(total(incurred, f)).toBe(total(current, f));
+    }
+
+    // A rebuild lands on the same figures on both bases.
+    await rebuildNoCampaignDayRollup(process.env.RUNS_SERVICE_DATABASE_URL!);
+    expect(await both("current")).toEqual(current);
+    expect(await both("incurred")).toEqual(incurred);
+
+    expect((await request(app).get("/internal/stats/costs/no-campaign/monthly").set(headers).query({ orgBasis: "nope" })).status).toBe(400);
   });
 
   it("monthly fleet read: per org per UTC month, campaign / no campaign / unknown, no-campaign per cost name", async () => {

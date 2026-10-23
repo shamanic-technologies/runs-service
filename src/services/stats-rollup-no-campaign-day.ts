@@ -8,11 +8,16 @@ import type postgres from "postgres";
 import { rebuildRollup } from "./stats-rollup.js";
 
 export const NO_CAMPAIGN_DAY_ROLLUP_NAME = "no_campaign_day";
+// Migration 0056: rows also keyed on the org the run was opened under (bronze
+// run.created). Rows written before it carry none, so the incurred-org basis is
+// served only once a rebuild (which sets this stamp beside the main one) ran.
+export const NO_CAMPAIGN_ORIGIN_STAMP = "no_campaign_origin";
 
 export async function rebuildNoCampaignDayRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
   return rebuildRollup(url, {
     name: NO_CAMPAIGN_DAY_ROLLUP_NAME,
     tables: ["stats_rollup_no_campaign_day"],
+    alsoStamps: [NO_CAMPAIGN_ORIGIN_STAMP],
     aggregate: async (b: postgres.Sql) => {
       await b`
         CREATE TEMP TABLE rebuild_no_campaign_day ON COMMIT PRESERVE ROWS AS
@@ -20,18 +25,19 @@ export async function rebuildNoCampaignDayRollup(url: string): Promise<{ runGrou
           (created_at AT TIME ZONE 'UTC')::date AS day,
           cost_name,
           run_has_campaign,
+          run_origin_org(run_id) AS origin_org_id,
           count(*) AS n,
           SUM(total_cost_in_usd_cents) AS gross,
           SUM(COALESCE(net_cost_in_usd_cents, total_cost_in_usd_cents)) AS net
         FROM runs_costs
         WHERE is_platform_projected AND organization_id IS NOT NULL
-        GROUP BY 1, 2, 3, 4
+        GROUP BY 1, 2, 3, 4, 5
       `;
     },
     merge: async (tx: postgres.Sql) => {
       const costGroups = await tx`
-        INSERT INTO stats_rollup_no_campaign_day AS d (organization_id, day, cost_name, run_has_campaign, n, gross, net)
-        SELECT organization_id, day, cost_name, run_has_campaign, n, gross, net
+        INSERT INTO stats_rollup_no_campaign_day AS d (organization_id, day, cost_name, run_has_campaign, origin_org_id, n, gross, net)
+        SELECT organization_id, day, cost_name, run_has_campaign, origin_org_id, n, gross, net
         FROM rebuild_no_campaign_day
         ON CONFLICT ON CONSTRAINT stats_rollup_no_campaign_day_key DO UPDATE SET
           n     = d.n + EXCLUDED.n,
