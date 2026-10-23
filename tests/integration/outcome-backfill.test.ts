@@ -233,4 +233,50 @@ describe("Backfill: declaring the outcomes of past runs", () => {
     expect(single.body.error).toBe("invalid_occurred_at");
     expect(await occurrencesOf(other.id)).toHaveLength(0);
   });
+  it("RE-DATE: an occurrence declared through today's door (pre-0060) moves EARLIER to its real time, owner only, never later, replay is a no-op", async () => {
+    const producer = await pastRun("lead-service", "16:00");
+    await batch({ runs: [{ runId: producer.id, occurredAt: "run_started_at", produced: [lead("lead_found", "R1")] }] });
+    const send = await pastRun("instantly-service", "16:30");
+    await cost(send.id, "40", "16:31");
+    const sendBody = { produced: [lead("message_sent", "R1")], consumed: [lead("lead_found", "R1")] };
+    // The worker of 2026-10-23: today's door, no occurredAt; recorded before 0060 (recorded_at NULL).
+    expect((await request(app).post(`/v1/platform-runs/${send.id}/outcomes`).set(getPlatformAuthHeaders({ serviceName: "instantly-service" })).send(sendBody)).status).toBe(201);
+    await db.execute(sql`UPDATE run_outcomes SET recorded_at = NULL WHERE run_id = ${send.id}::uuid`);
+    const consumedOf = async () => (await occurrencesOf(send.id)).find((o) => o.direction === "consumed");
+    expect((await consumedOf()).declaredAt.slice(0, 10)).not.toBe(PDAY);
+    await refresh(PDAY);
+    expect(await daysToCompute(NOW, FLOOR)).not.toContain(PDAY);
+
+    const at = `${PDAY}T16:31:00.000Z`;
+    const entry = { runId: send.id, occurredAt: at, redate: true, ...sendBody };
+    const foreign = await batch({ runs: [entry] }, "lead-service");
+    expect(foreign.status).toBe(422);
+    expect(foreign.body.details.invalid[0].reason).toBe("not_run_owner");
+    expect((await batch({ runs: [{ runId: send.id, redate: true, ...sendBody }] }, "instantly-service")).status).toBe(400);
+
+    const moved = await batch({ runs: [entry] }, "instantly-service");
+    expect(moved.status).toBe(201);
+    expect(moved.body).toMatchObject({ recordedCount: 0, redatedCount: 2, alreadyRecordedCount: 0 });
+    for (const o of moved.body.runs[0].occurrences) expect(o).toMatchObject({ status: "redated", declaredAt: at });
+    const c = await consumedOf();
+    expect(c.declaredAt).toBe(at);
+    expect(c.consumption).toMatchObject({ provenance: "known", sourceRunId: producer.id });
+    const [ev] = (await db.execute(sql`SELECT payload FROM outcome_declaration_events WHERE run_id = ${send.id}::uuid AND event_type = 'outcomes.redated'`)) as any[];
+    expect(ev.payload.items).toHaveLength(2);
+    expect(ev.payload.items[0].previous_declared_at.slice(0, 10)).not.toBe(PDAY);
+
+    // The stored day moves and still balances.
+    expect(await daysToCompute(NOW, FLOOR)).toContain(PDAY);
+    await refresh(PDAY);
+    const chk = await request(app).get(`/internal/outcome-costs/ledger-check?since=${PDAY}&until=${PDAY}`).set(getInternalAuthHeaders());
+    expect(chk.body.balanced).toBe(true);
+
+    // Replay: nothing to move. A LATER time never moves it.
+    const replay = await batch({ runs: [entry] }, "instantly-service");
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ redatedCount: 0, alreadyRecordedCount: 2 });
+    const later = await batch({ runs: [{ ...entry, occurredAt: `${PDAY}T18:00:00.000Z` }] }, "instantly-service");
+    expect(later.body.redatedCount).toBe(0);
+    expect((await consumedOf()).declaredAt).toBe(at);
+  });
 });
