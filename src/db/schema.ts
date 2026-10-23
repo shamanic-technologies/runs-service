@@ -317,3 +317,16 @@ export const runOutcomes = pgTable(
 );
 
 export type RunOutcome = typeof runOutcomes.$inferSelect;
+
+// Runs marked SUPPORT (migration 0062): the ledger's anchor walk stops there. Projected from bronze.
+export const runSupportMarks = pgTable(
+  "run_support_marks",
+  {
+    runId: uuid("run_id")
+      .primaryKey()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    markedAt: timestamp("marked_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [index("idx_run_support_marks_marked").on(table.markedAt)]
+);

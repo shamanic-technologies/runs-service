@@ -279,4 +279,43 @@ describe("Backfill: declaring the outcomes of past runs", () => {
     expect(later.body.redatedCount).toBe(0);
     expect((await consumedOf()).declaredAt).toBe(at);
   });
+  it("SUPPORT MARK: a staff probe parented to a send stops riding its message_sent; the day recomputes and balances", async () => {
+    const send = await pastRun("postmark-service", "17:00");
+    await cost(send.id, "10", "17:01");
+    await batch({ runs: [{ runId: send.id, occurredAt: "run_started_at", produced: [lead("message_sent", "N1")] }] }, "postmark-service");
+    const probe = await insertTestRun({ organizationId: ORG, serviceName: "apollo-service", taskName: "enrichment", status: "completed", parentRunId: send.id, startedAt: new Date(`${PDAY}T17:05:00Z`) });
+    await cost(probe.id, "30", "17:06");
+    const deep = await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", status: "completed", parentRunId: probe.id, startedAt: new Date(`${PDAY}T17:06:00Z`) });
+    await cost(deep.id, "5", "17:07");
+    const sendCost = async () => (await occurrencesOf(send.id))[0].cost.grossCents;
+    expect(await sendCost()).toBe("45.0000000000");
+    await refresh(PDAY);
+    const before = orgRow(await storedDay(PDAY));
+
+    const mark = (runIds: string[]) =>
+      request(app).post("/internal/runs/support-marks").set(getInternalAuthHeaders()).send({ runIds, kind: "staff_experiment", reason: "probe reused a real run id as x-run-id", markedBy: "test" });
+    const refused = await mark([probe.id, send.id, "9b0a3c3e-0000-4000-8000-0000000000c1"]);
+    expect(refused.status).toBe(422);
+    expect(refused.body.details.invalid.map((i: any) => i.reason)).toEqual(["run_declares_outcomes", "run_not_found"]);
+
+    const ok = await mark([probe.id]);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ markedCount: 1, alreadyMarkedCount: 0 });
+    expect((await mark([probe.id])).body).toEqual({ markedCount: 0, alreadyMarkedCount: 1 });
+    // The probe and its subtree no longer ride the send.
+    expect(await sendCost()).toBe("10.0000000000");
+    // A marked run produces nothing.
+    const produce = await request(app).post(`/v1/platform-runs/${probe.id}/outcomes`).set(getPlatformAuthHeaders({ serviceName: "apollo-service" })).send({ produced: [lead("email_checked", "N1")] });
+    expect(produce.status).toBe(409);
+    expect(produce.body.error).toBe("run_marked_support");
+
+    expect(await daysToCompute(NOW, FLOOR)).toContain(PDAY);
+    await refresh(PDAY);
+    const after = orgRow(await storedDay(PDAY));
+    expect(new Decimal(before.a).minus(after.a).toFixed(10)).toBe("35.0000000000");
+    expect(new Decimal(after.b).minus(before.b).toFixed(10)).toBe("35.0000000000");
+    expect(after.c).toBe(before.c);
+    const chk = await request(app).get(`/internal/outcome-costs/ledger-check?since=${PDAY}&until=${PDAY}`).set(getInternalAuthHeaders());
+    expect(chk.body.balanced).toBe(true);
+  });
 });
