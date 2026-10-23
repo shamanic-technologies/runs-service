@@ -1154,20 +1154,36 @@ export async function daysToCompute(now = new Date(), firstDay?: string): Promis
       for (const [day, computedAt] of computed) if (day >= v.from_day && computedAt < at) out.add(day);
     }
   }
-  // Recent days first (they feed today's monitor), then missing days newest first.
+  // Recent days first (they feed today's monitor), then days never computed,
+  // then stale days, each newest first. Missing before stale: while producers
+  // backfill, the newest days stay stale on every tick, and ranked by date alone
+  // they took every slot and the older missing days were never reached (2026-10-23:
+  // 8 days stored out of 265).
   const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(today, -i)));
-  return [...out].sort((a, b) => (recent.has(a) === recent.has(b) ? (a < b ? 1 : -1) : recent.has(a) ? -1 : 1));
+  const rank = (d: string) => (recent.has(d) ? 0 : computed.has(d) ? 2 : 1);
+  return [...out].sort((a, b) => rank(a) - rank(b) || (a < b ? 1 : -1));
 }
 
-/** Days per tick: the backfill spreads over ticks instead of loading the box at once. */
-export const MAX_DAYS_PER_TICK = 8;
+/**
+ * Time budget of one tick: days are computed one at a time until it is spent
+ * (a day takes ~1-50 s on the box), so a backlog of months clears in a few ticks
+ * while the 15-min cadence keeps a third of the time free.
+ */
+export const TICK_BUDGET_MS = 10 * 60_000;
 
-export async function refreshLedgerDays(now = new Date(), maxDays = MAX_DAYS_PER_TICK, firstDay?: string): Promise<{ computed: string[]; failed: string[] }> {
+export async function refreshLedgerDays(
+  now = new Date(),
+  maxDays = Infinity,
+  firstDay?: string,
+  budgetMs = TICK_BUDGET_MS,
+): Promise<{ computed: string[]; failed: string[] }> {
+  const started = Date.now();
   const versions = await fetchVendorCostCatalog();
   const days = (await daysToCompute(now, firstDay)).slice(0, maxDays);
   const computed: string[] = [];
   const failed: string[] = [];
   for (const day of days) {
+    if (Date.now() - started >= budgetMs) break;
     const t0 = Date.now();
     try {
       const d = await computeLedgerDay(day, versions);

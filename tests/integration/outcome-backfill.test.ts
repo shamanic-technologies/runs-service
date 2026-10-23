@@ -318,4 +318,13 @@ describe("Backfill: declaring the outcomes of past runs", () => {
     const chk = await request(app).get(`/internal/outcome-costs/ledger-check?since=${PDAY}&until=${PDAY}`).set(getInternalAuthHeaders());
     expect(chk.body.balanced).toBe(true);
   });
+  it("the refresher reaches days never computed before re-running stale ones (a backfill keeps the newest days stale)", async () => {
+    await refresh(PDAY);
+    const r = await pastRun("lead-service", "19:00");
+    await batch({ runs: [{ runId: r.id, occurredAt: "run_started_at", produced: [lead("lead_found", "S1")] }] });
+    const days = await daysToCompute(NOW, "2025-03-10");
+    expect(days.slice(0, 3)).toEqual(["2025-03-30", "2025-03-29", "2025-03-28"]);
+    expect(days[days.length - 1]).toBe(PDAY); // stale, after every missing day
+    expect(days.indexOf("2025-03-10")).toBeLessThan(days.indexOf(PDAY));
+  });
 });
