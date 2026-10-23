@@ -393,6 +393,13 @@
       "when": 1782950400000,
       "tag": "0055_stats_rollup_no_campaign_day",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1783036800000,
+      "tag": "0056_no_campaign_day_origin_org",
+      "breakpoints": true
     }
   ]
 }

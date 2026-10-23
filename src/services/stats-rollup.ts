@@ -114,6 +114,9 @@ export interface RollupRebuildSpec {
   name: string;
   /** The rollup's own tables, cleared under the lock. */
   tables: string[];
+  /** Further stamps un-set under the lock and set with `name` (a basis that
+   *  only a rebuild makes exact). */
+  alsoStamps?: string[];
   /** Aggregate the exported snapshot into session temp tables (session B). */
   aggregate: (b: postgres.Sql) => Promise<void>;
   /** Add the temp tables on top of the deltas landed meanwhile, then drop them. */
@@ -157,7 +160,7 @@ export async function rebuildRollup(
     try {
       await a`SET LOCAL lock_timeout = '10s'`;
       await a`LOCK TABLE runs, runs_costs IN SHARE ROW EXCLUSIVE MODE`;
-      await a`DELETE FROM stats_rollups WHERE name = ${spec.name}`;
+      for (const stamp of [spec.name, ...(spec.alsoStamps ?? [])]) await a`DELETE FROM stats_rollups WHERE name = ${stamp}`;
       for (const table of spec.tables) await a.unsafe(`DELETE FROM ${table}`);
       const [{ snapshot }] = await a`SELECT pg_export_snapshot() AS snapshot`;
       await b`BEGIN ISOLATION LEVEL REPEATABLE READ`;
@@ -184,10 +187,12 @@ export async function rebuildRollup(
       // (a known typing gap); at runtime it is the same callable client.
       const tx = txn as unknown as postgres.Sql;
       const counts = await spec.merge(tx);
-      await tx`
-        INSERT INTO stats_rollups (name, ready_at) VALUES (${spec.name}, now())
-        ON CONFLICT (name) DO UPDATE SET ready_at = EXCLUDED.ready_at
-      `;
+      for (const stamp of [spec.name, ...(spec.alsoStamps ?? [])]) {
+        await tx`
+          INSERT INTO stats_rollups (name, ready_at) VALUES (${stamp}, now())
+          ON CONFLICT (name) DO UPDATE SET ready_at = EXCLUDED.ready_at
+        `;
+      }
       return { ...counts, lockedMs };
     });
   } finally {
