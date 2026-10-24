@@ -271,6 +271,64 @@ describe("GET /internal/stats/outcome-costs: the outcome ledger as totals", () =
     expect(Object.fromEntries(one.body.produced.map((g: any) => [g.dimensions.outcomeKey, g.occurrences]))).toEqual({ email_found: 3, email_checked: 2 });
   });
 
+  it("AC (P4): consumptions grouped by the PRODUCING run's tags sum exactly to the ungrouped read; unknown provenance stays counted", async () => {
+    const q = `orgId=${ORG}&since=${YESTERDAY}&until=${TODAY}`;
+    const flat = await totals(`groupBy=&${q}`);
+    expect(flat.status).toBe(200);
+    const sum = (rows: any[], f: string) => rows.reduce((x: Decimal, g: any) => x.plus(g[f]), new Decimal(0)).toFixed(10);
+    const sumM = (rows: any[], f: string) => rows.reduce((x: any, g: any) => addM(x, g[f]), zeroM());
+
+    for (const dim of ["sourceWorkflowSlug", "sourceCampaignId", "sourceBrandId", "sourceOrgId", "sourceFeatureSlug"]) {
+      const res = await totals(`groupBy=${dim}&${q}`);
+      expect(res.status, dim).toBe(200);
+      expect(res.body.complete).toBe(true);
+      // Produced and scope ignore source dimensions: byte for byte the ungrouped read.
+      expect(res.body.produced).toEqual(flat.body.produced);
+      expect(res.body.scope).toEqual(flat.body.scope);
+      for (const f of ["consumptions", "reuses", "unknownProvenance"]) expect(sum(res.body.consumed, f), `${dim} ${f}`).toBe(sum(flat.body.consumed, f));
+      for (const f of ["standardCost", "reuseGain"]) expect(sumM(res.body.consumed, f), `${dim} ${f}`).toEqual(sumM(flat.body.consumed, f));
+    }
+
+    // Every email found was produced by A (wf-1, cmp-1, B1); the ghost has no producer.
+    const byWf = await totals(`groupBy=sourceWorkflowSlug,sourceCampaignId,sourceBrandId&${q}`);
+    const agg = new Map<string, { n: Decimal; unknown: Decimal }>();
+    for (const g of byWf.body.consumed) {
+      const k = `${g.dimensions.sourceWorkflowSlug}|${g.dimensions.sourceCampaignId}|${g.dimensions.sourceBrandId}`;
+      const e = agg.get(k) ?? { n: new Decimal(0), unknown: new Decimal(0) };
+      agg.set(k, { n: e.n.plus(g.consumptions), unknown: e.unknown.plus(g.unknownProvenance) });
+    }
+    expect(Object.fromEntries([...agg].map(([k, v]) => [k, [v.n.toFixed(10), v.unknown.toFixed(10)]]))).toEqual({
+      [`wf-1|cmp-1|${B1}`]: ["4.0000000000", "0.0000000000"],
+      "null|null|null": ["1.0000000000", "1.0000000000"],
+    });
+    // The consuming run's tags still group beside the source's (B consumed under wf-2).
+    const both = await totals(`groupBy=workflowSlug,sourceWorkflowSlug&${q}`);
+    const pairs = both.body.consumed.filter((g: any) => g.dimensions.workflowSlug === "wf-2");
+    expect(pairs.map((g: any) => [g.dimensions.sourceWorkflowSlug, g.consumptions])).toEqual([["wf-1", "2.0000000000"]]);
+    expect(both.body.consumed[0].dimensions).toHaveProperty("sourceWorkflowSlug");
+    expect(both.body.produced[0].dimensions).not.toHaveProperty("sourceWorkflowSlug");
+  });
+
+  it("P4: a day stored before consumed rows carried their source is missing for a source read only", async () => {
+    await db.execute(sql`UPDATE cost_ledger_computed_days SET consumed_sources = false WHERE day = ${YESTERDAY}::date`);
+    try {
+      const src = await totals(`groupBy=sourceWorkflowSlug&orgId=${ORG}&since=${YESTERDAY}&until=${TODAY}`);
+      expect(src.body.daysMissing).toEqual([YESTERDAY]);
+      const today = await totals(`groupBy=day&orgId=${ORG}&since=${TODAY}&until=${TODAY}`);
+      const srcAll = await totals(`groupBy=day,sourceWorkflowSlug&orgId=${ORG}&since=${YESTERDAY}&until=${TODAY}`);
+      expect(srcAll.body.produced.map((g: any) => g.dimensions.day)).not.toContain(YESTERDAY);
+      expect(srcAll.body.produced.map((g: any) => g.dimensions.day)).toEqual(today.body.produced.map((g: any) => g.dimensions.day));
+      const plain = await totals(`groupBy=day&orgId=${ORG}&since=${YESTERDAY}&until=${TODAY}`);
+      expect(plain.body.daysMissing).toEqual([]);
+      expect(plain.body.produced.map((g: any) => g.dimensions.day)).toContain(YESTERDAY);
+      // The refresher recomputes such a day.
+      const { daysToCompute } = await import("../../src/services/outcome-ledger.js");
+      expect(await daysToCompute(new Date(), YESTERDAY)).toContain(YESTERDAY);
+    } finally {
+      await db.execute(sql`UPDATE cost_ledger_computed_days SET consumed_sources = true WHERE day = ${YESTERDAY}::date`);
+    }
+  });
+
   it("contract: bad groupBy 400, missing days stated, too many groups 422 (never truncated)", async () => {
     expect((await totals("groupBy=subjectId")).status).toBe(400);
     expect((await totals("groupBy=day,day")).status).toBe(400);
