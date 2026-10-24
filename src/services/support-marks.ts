@@ -92,8 +92,8 @@ export interface SupportSelectionResult {
   declaresOutcomesCount: number;
   /** Own spend (actual + refunded) of the runs to mark, gross and frozen net. */
   spend: { grossCents: string; netCents: string };
-  /** Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. */
-  onOutcomeNowCount: number;
+  /** Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null = not computed (tooMany). */
+  onOutcomeNowCount: number | null;
   tooMany: boolean;
 }
 
@@ -103,7 +103,7 @@ export interface SupportSelectionResult {
  * service (no service-first index: ~9 s on 6M runs), in its own transaction
  * with a statement timeout sized for it.
  */
-export async function selectSupportRuns(s: SupportSelection): Promise<SupportSelectionResult> {
+export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPORT_MARK_RUNS): Promise<SupportSelectionResult> {
   const where: SQL[] = s.runIds
     ? [sql`r.id = ANY(${`{${s.runIds.join(",")}}`}::uuid[])`]
     : [sql`r.service_name = ${s.serviceName}`];
@@ -133,13 +133,15 @@ export async function selectSupportRuns(s: SupportSelection): Promise<SupportSel
     `)) as any[];
   });
   const toMarkRows = rows.filter((r) => !r.produces && !r.marked);
-  const tooMany = toMarkRows.length > MAX_SUPPORT_MARK_RUNS;
+  const tooMany = toMarkRows.length > maxRuns;
   const withParent = tooMany ? [] : toMarkRows.filter((r) => r.has_parent).map((r) => r.id as string);
-  let onOutcomeNowCount = 0;
+  let onOutcome = 0;
   for (let i = 0; i < withParent.length; i += 5000) {
     const keys = await anchorKeysOf(withParent.slice(i, i + 5000), db);
-    for (const k of keys.values()) if (k.length > 0) onOutcomeNowCount += 1;
+    for (const k of keys.values()) if (k.length > 0) onOutcome += 1;
   }
+  // Over the cap the walk is not run: the count is unknown, never a reassuring 0.
+  const onOutcomeNowCount = tooMany ? null : onOutcome;
   return {
     toMark: toMarkRows.map((r) => r.id as string),
     matchedRunCount: rows.length,

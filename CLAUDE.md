@@ -965,7 +965,8 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
   on 'none' rows); `cost_ledger_computed_days.support_split = false` (day stored before 0064) = recomputed by the refresher and
   listed in `supportDaysMissing`. Allocation rule unchanged (v1).
 - **Retired products** (no owning repo): marked by staff as `retired_product` through the staff door (legacy `google` serper
-  queries Mar..Jul 2026, `emailgeneration-service`); `apollo/angel-round-enrich` (2026-10-01, one staff run) = `staff_experiment`.
+  queries Mar..Jul 2026, 51,464 runs $213.50; `emailgeneration-service`, 330 runs $2.55); `apollo/angel-round-enrich` (2026-10-01, one
+  staff run, $148.21) = `staff_experiment`. All marked 2026-10-24. Preview `onOutcomeNowCount` is null when `tooMany` (not computed).
 - Guard: `tests/integration/support-functions.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
