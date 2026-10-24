@@ -166,6 +166,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     r = await recon(DAY2, DAY2);
     expect(r).toMatchObject({ complete: false, reconciled: false, daysMissing: [DAY2], daysStale: [DAY2] });
     expect(r.totals.spend.grossCents).toBe("0.0000000000"); // a stale day is never summed
+    expect(r.services).toEqual([]); // ... nor listed
     const oc = await request(app).get(`/internal/stats/outcome-costs?since=${DAY2}&until=${DAY2}`).set(getInternalAuthHeaders());
     expect(oc.body).toMatchObject({ complete: false, daysMissing: [DAY2], daysStale: [DAY2] });
 
