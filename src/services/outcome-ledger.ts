@@ -127,21 +127,46 @@ export const OCCURRED_AT_RUN_START = "run_started_at";
  * the run's start and now: an outcome never precedes its production order, and
  * a declaration never lands in the future. Returns the instant, or the reason it
  * is refused.
+ *
+ * MEETING-DATED-OCCURRENCES-1024-RUNS: a SPEND-FREE run (`spend_free`: no cost
+ * row, no child run; a production order that only states a FACT, e.g.
+ * lead-service's `outcome-recording`) may date an occurrence at ANY past instant,
+ * before its own start (`beforeStart: true`; the caller checks it owns the run).
+ * Spend is never back-dated: a run with spend keeps the [start, now] bound, and
+ * migration 0068's guards refuse spend or a child on a run holding such a fact.
  */
 export function effectiveDeclaredAt(
   occurredAt: string | undefined,
-  run: { started_at: Date | string },
+  run: { started_at: Date | string; spend_free?: boolean },
   now = new Date(),
-): { at: Date | null } | { error: string } {
+): { at: Date | null; beforeStart?: true } | { error: string } {
   if (occurredAt === undefined) return { at: null };
   const started = new Date(run.started_at);
   if (occurredAt === OCCURRED_AT_RUN_START) return { at: started };
   const at = new Date(occurredAt);
   if (Number.isNaN(at.getTime())) return { error: "occurredAt must be an ISO instant or run_started_at" };
-  if (at < started) return { error: `occurredAt ${at.toISOString()} is before the run started (${started.toISOString()})` };
   if (at > now) return { error: `occurredAt ${at.toISOString()} is in the future` };
+  if (at < started) {
+    if (run.spend_free === true) return { at, beforeStart: true };
+    return { error: `occurredAt ${at.toISOString()} is before the run started (${started.toISOString()}); only a run with no cost and no child run may state a fact before its start` };
+  }
   return { at };
 }
+
+/** Migration 0068's refusal of a cost / child run on a run holding a fact dated before its start (drizzle wraps it on `cause`). */
+export function isRunHoldsDatedFacts(err: unknown): boolean {
+  return `${(err as any)?.message ?? ""} ${(err as any)?.cause?.message ?? ""}`.includes("run_holds_dated_facts");
+}
+
+export const RUN_HOLDS_DATED_FACTS_BODY = {
+  error: "run_holds_dated_facts",
+  details: "this run holds an outcome dated before its start (a recorded past fact): it takes no cost and no child run",
+};
+
+/** SQL selecting `spend_free` for runs aliased `r`: no cost row, no child run (indexed probes). */
+export const SPEND_FREE_SQL = sql.raw(
+  `(NOT EXISTS (SELECT 1 FROM runs_costs c WHERE c.run_id = r.id) AND NOT EXISTS (SELECT 1 FROM runs ch WHERE ch.parent_run_id = r.id)) AS spend_free`,
+);
 
 export interface DeclarationEntry {
   runId: string;

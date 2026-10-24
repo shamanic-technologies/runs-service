@@ -199,6 +199,8 @@ describe("Backfill: declaring the outcomes of past runs", () => {
   it("all or nothing: an unknown run, a voided run, another org or an out-of-bounds time = 422 with the list, nothing written", async () => {
     const ok = await pastRun("lead-service", "15:00");
     const other = await pastRun("lead-service", "15:00", ORG_X);
+    // A run with spend: its start bounds occurredAt (a spend-free run may state a past fact, see outcome-dated-facts.test.ts).
+    await cost(other.id, "10", "15:01");
     const bad = await batch({
       runs: [
         { runId: ok.id, occurredAt: "run_started_at", produced: [lead("lead_found", "A1")] },
