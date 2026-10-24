@@ -4695,7 +4695,8 @@
           },
           "onOutcomeNowCount": {
             "type": "integer",
-            "description": "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome."
+            "nullable": true,
+            "description": "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null when tooMany (not computed: narrow the selection)."
           },
           "spend": {
             "type": "object",
