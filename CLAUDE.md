@@ -882,7 +882,8 @@ concept, a value-based joint-cost split.
   series, fleet / service / task: the dashboard v2 Monitoring chart reads it).
 - **Stored days** (`cost_ledger_days`, `outcome_coverage_days`, `cost_ledger_computed_days`): in-process refresher
   (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), days one by one within a 10-min budget
-  per tick: the last 3 days always, then days NEVER computed back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an
+  per tick: today always and the 2 days before once their figures are > 1 h old (`recentDaysDue`: all 3 every tick ate ~9 of the 10
+  min at ~3 min/day and the history never converged, 2026-10-24), then days NEVER computed back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an
   empty db), then days a declaration RECORDED after them moved (see "Backfill"), each newest first. Missing before stale: during
   backfills the newest days are stale every tick, and a date-only order starved the history (8 of 265 days stored, 2026-10-23). `computed_at` = the read transaction's now(). A day is
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
