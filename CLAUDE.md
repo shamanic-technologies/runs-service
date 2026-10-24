@@ -931,6 +931,9 @@ several keys and consumed their own, a cost loop) takes back the run's WHOLE dec
 - **Versioning**: the allocation RULE is unchanged (still v1); a void changes the FACTS. A stored day recomputes from current silver,
   so the refresher (`daysToCompute`) marks every computed day >= `affectedFromDay` of a void newer than its `computed_at` stale. A
   pre-void figure is reproducible from bronze (replay without voids after T); never edit a stored day by hand.
+- **Scoped void (migration 0074, SCOPED-VOID-1024)**: body `scope: {direction, outcomeKey}` takes back only those rows of the run
+  (bronze `outcomes.voided_scoped`, projection deletes exactly the listed ids); the rest stays and the run stays OPEN to a corrected
+  declaration (only a whole-run `outcomes.voided` is final). Matching nothing = 200 `nothing_to_void`. Re-stales days like a void.
 - Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
 
 ## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)

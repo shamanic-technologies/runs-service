@@ -343,7 +343,7 @@ export class RunOutcomesVoidedError extends Error {
 }
 
 export interface VoidedRunOutcomes {
-  status: "voided" | "already_voided";
+  status: "voided" | "already_voided" | "nothing_to_void";
   voidedCount: number;
   voidedAt: string;
 }
@@ -356,7 +356,11 @@ export interface VoidedRunOutcomes {
  * they count in no figure, and the refresher recomputes every stored day from
  * that one. Idempotent: a second call writes nothing.
  */
-export async function voidRunOutcomes(runId: string, body: { reason: string; voidedBy: string }, sourceService: string): Promise<VoidedRunOutcomes> {
+export async function voidRunOutcomes(
+  runId: string,
+  body: { reason: string; voidedBy: string; scope?: { direction: Direction; outcomeKey: string } },
+  sourceService: string,
+): Promise<VoidedRunOutcomes> {
   const [prior] = (await db.execute(sql`
     SELECT occurred_at FROM outcome_declaration_events
     WHERE run_id = ${runId}::uuid AND event_type = 'outcomes.voided'
@@ -364,10 +368,15 @@ export async function voidRunOutcomes(runId: string, body: { reason: string; voi
   `)) as any[];
   if (prior) return { status: "already_voided", voidedCount: 0, voidedAt: new Date(prior.occurred_at).toISOString() };
 
+  // SCOPED-VOID-1024: one direction x outcome key; the run stays open.
+  const scope = body.scope ? { direction: body.scope.direction, outcomeKey: normalizeOutcomeKey(body.scope.outcomeKey) } : null;
   const rows = (await db.execute(sql`
     SELECT id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity, declared_at
-    FROM run_outcomes WHERE run_id = ${runId}::uuid ORDER BY id
+    FROM run_outcomes WHERE run_id = ${runId}::uuid
+      ${scope ? sql`AND direction = ${scope.direction} AND outcome_key = ${scope.outcomeKey}` : sql``}
+    ORDER BY id
   `)) as any[];
+  if (scope && rows.length === 0) return { status: "nothing_to_void", voidedCount: 0, voidedAt: new Date().toISOString() };
   const [run] = (await db.execute(sql`SELECT started_at FROM runs WHERE id = ${runId}::uuid`)) as any[];
   const firstDay = [new Date(run.started_at), ...rows.map((r) => new Date(r.declared_at))]
     .map(utcDay)
@@ -376,12 +385,13 @@ export async function voidRunOutcomes(runId: string, body: { reason: string; voi
     .insert(outcomeDeclarationEvents)
     .values({
       runId,
-      eventType: "outcomes.voided",
+      eventType: scope ? "outcomes.voided_scoped" : "outcomes.voided",
       sourceService,
       payload: {
         allocationVersion: ALLOCATION_VERSION,
         reason: body.reason,
         voidedBy: body.voidedBy,
+        ...(scope && { scope }),
         affectedFromDay: firstDay,
         items: rows.map((r) => ({
           id: r.id,
@@ -1426,7 +1436,7 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   }
   const voids = (await db.execute(sql`
     SELECT payload->>'affectedFromDay' AS from_day, MAX(occurred_at) AS occurred_at FROM outcome_declaration_events
-    WHERE event_type IN ('outcomes.voided', 'run.support_unmarked') AND occurred_at > ${oldest}::timestamptz
+    WHERE event_type IN ('outcomes.voided', 'outcomes.voided_scoped', 'run.support_unmarked') AND occurred_at > ${oldest}::timestamptz
     GROUP BY 1
   `)) as any[];
   for (const v of voids) {
