@@ -27,7 +27,7 @@ vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
 const VERSIONS = [
   { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
 ];
-const CATALOGUE = new Set(["lead_found", "message_sent", "conversation"]);
+const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified"]);
 
 // Days of their own: no other test file writes spend on them (the reconciliation is fleet-wide).
 const DAY = "2024-08-05";
@@ -106,7 +106,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     await refresh(DAY);
 
     const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY}&until=${DAY}`).set(getInternalAuthHeaders());
-    expect(check.body.allocationVersion).toBe(3);
+    expect(check.body.allocationVersion).toBe(4);
     expect(check.body.balanced).toBe(true);
     const row = check.body.rows.find((r: any) => r.organizationId === ORG);
     expect(row.ledger.grossCents).toBe("16.0000000000");
@@ -173,7 +173,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
 
     // The refresher's sweep flags it and moves its window past the backfill: still stale (by the flag).
     expect(await daysToCompute(new Date("2024-08-20T12:00:00Z"), DAY2, true)).toContain(DAY2);
-    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 3`)) as any[];
+    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 4`)) as any[];
     expect(flag.stale).toBe(true);
     expect(await recon(DAY2, DAY2)).toMatchObject({ complete: false, daysStale: [DAY2] });
 
@@ -223,6 +223,33 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect(r.totals.shares.unattributed.gross).toBe("0.8000000000");
     expect(r).toMatchObject({ balanced: true, complete: true, declarationsComplete: true, reconciled: true });
     expect(r.services.find((x: any) => x.serviceName === "scraping-service")).toMatchObject({ unattributedRuns: 1, undeclaredRuns: 0 });
+  });
+
+  it("v4: a run with no workflow that kept nothing rides its own TASK's production that org-day", async () => {
+    const day = "2024-08-09";
+    const judge = (hour: string) => run(day, hour, { serviceName: "crm-service", taskName: "judge-lead" }); // no workflow, no campaign
+    const kept = await judge("09:00");
+    await cost(kept.id, "3", at(day, "09:01"));
+    const nothing = await judge("10:00");
+    await cost(nothing.id, "5", at(day, "10:01"));
+    const otherTask = await run(day, "11:00", { serviceName: "crm-service", taskName: "sync" }); // its task produced nothing
+    await cost(otherTask.id, "1", at(day, "11:01"));
+    expect(
+      (await declare("crm-service", [
+        { runId: kept.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "R1" }] },
+      ])).status,
+    ).toBe(201);
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals).toMatchObject({
+      spend: { grossCents: "9.0000000000" },
+      declaredProduction: { grossCents: "3.0000000000" },
+      normalLoss: { grossCents: "5.0000000000" },
+      undeclared: { grossCents: "1.0000000000" },
+      differences: { grossCents: "0.0000000000" },
+    });
+    const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id}&limit=10`).set(getInternalAuthHeaders());
+    expect(occ.body.occurrences[0].cost.grossCents).toBe("8.0000000000");
   });
 
   it("refuses an unknown parameter", async () => {
