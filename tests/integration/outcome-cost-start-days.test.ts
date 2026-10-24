@@ -7,7 +7,7 @@ import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
 import { addDays, computeLedgerDay, daysToCompute, storeLedgerDay, utcDay } from "../../src/services/outcome-ledger.js";
 
-// COST-ACCOUNTING-1023-SWITCH-RUNS (migration 0066): the outcome totals grouped
+// COST-ACCOUNTING-1023-SWITCH-RUNS (migration 0067): the outcome totals grouped
 // by WHEN. A reply consumed today is grouped by the day the send it answers was
 // produced (sourceDay) and the day that send's run started (sourceRunStartDay);
 // every section can be grouped / cut by the day its run started (runStartDay).
@@ -156,7 +156,7 @@ describe("GET /internal/stats/outcome-costs: grouped by when the run started and
     expect(mature.body.scope.map((g: any) => g.dimensions.workflowSlug)).toEqual(["wf-a", "wf-b"]);
   });
 
-  it("a day stored before 0066 is missing for a when-read only, and the refresher recomputes it", async () => {
+  it("a day stored before 0067 is missing for a when-read only, and the refresher recomputes it", async () => {
     await db.execute(sql`UPDATE cost_ledger_computed_days SET start_days = false WHERE day = ${D3}::date`);
     try {
       for (const q of ["groupBy=sourceDay", "groupBy=runStartDay", `groupBy=&runStartUntil=${TODAY}`]) {

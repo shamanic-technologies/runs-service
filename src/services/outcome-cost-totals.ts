@@ -41,7 +41,7 @@ export const OUTCOME_COST_DIMENSIONS = [
 export type OutcomeCostDimension = (typeof OUTCOME_COST_DIMENSIONS)[number];
 
 const isSource = (d: OutcomeCostDimension) => d.startsWith("source");
-/** Dimensions stored from migration 0066 on: a day stored before is missing for a read using them. */
+/** Dimensions stored from migration 0067 on: a day stored before is missing for a read using them. */
 const START_DAY_DIMENSIONS: readonly OutcomeCostDimension[] = ["runStartDay", "sourceDay", "sourceRunStartDay"];
 
 /** Groups per section above which the read refuses (422) instead of truncating. */
@@ -68,7 +68,7 @@ export interface OutcomeCostFilters {
   sourceRunStartUntil?: string;
 }
 
-/** The read needs rows carrying their run-start / source days (0066). */
+/** The read needs rows carrying their run-start / source days (0067). */
 const needsStartDays = (groupBy: OutcomeCostDimension[], f: OutcomeCostFilters) =>
   groupBy.some((d) => START_DAY_DIMENSIONS.includes(d)) || !!(f.runStartUntil || f.sourceDayUntil || f.sourceRunStartUntil);
 
@@ -114,7 +114,7 @@ const MONEY_SUMS = (p = "", col = "") =>
  * under EACH brand, as every other brand read here); a brand filter alone keeps
  * one row per stored row. Same for the producing run's brands (sourceBrandId).
  * `sourced`: only days whose consumed rows carry their source (0063); `startDays`:
- * only days whose rows carry their run-start / source days (0066); the others
+ * only days whose rows carry their run-start / source days (0067); the others
  * are reported in daysMissing. The source-day filters apply to the consumed
  * section only (`consumedSection`).
  */

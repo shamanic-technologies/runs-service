@@ -5471,6 +5471,29 @@
                   "unpricedGrossCents"
                 ]
               },
+              "normalLoss": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ]
+              },
               "producedNone": {
                 "type": "object",
                 "properties": {
@@ -5754,6 +5777,7 @@
               "standard",
               "reuseGain",
               "allocated",
+              "normalLoss",
               "producedNone",
               "support",
               "supportByFunction",
@@ -5852,6 +5876,30 @@
               "unpricedGrossCents"
             ],
             "description": "Σ of the per-occurrence shares (the cost spread on produced occurrences)."
+          },
+          "normalLoss": {
+            "type": "object",
+            "properties": {
+              "grossCents": {
+                "type": "string"
+              },
+              "netCents": {
+                "type": "string"
+              },
+              "vendorCents": {
+                "type": "string"
+              },
+              "unpricedGrossCents": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "grossCents",
+              "netCents",
+              "vendorCents",
+              "unpricedGrossCents"
+            ],
+            "description": "Part of allocated that is cross-run normal loss (rule 4b, v2): spend of runs of a workflow that produced nothing, carried by the occurrences that workflow produced that day in that org."
           },
           "producedNone": {
             "type": "object",
@@ -6188,6 +6236,7 @@
           "organizationId",
           "ledger",
           "allocated",
+          "normalLoss",
           "producedNone",
           "support",
           "supportByFunction",
