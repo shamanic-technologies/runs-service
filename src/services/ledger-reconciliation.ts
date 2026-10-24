@@ -20,7 +20,10 @@
 //    features pools it on the pipe's output;
 //  - undeclared: spend of a run with no outcome, no support mark and no pipe: a
 //    producer that has not declared yet (the gap the backfills close);
-//  - support: spend named apart by its owner (support functions, 0064).
+//  - unattributed: real production work its owner marked `unattributed_production`
+//    (it belongs to no pipe and its subject was never recorded, e.g. runs from
+//    before campaigns existed): an unabsorbed period cost, never spread;
+//  - support: spend named apart by its owner (every other support function, 0064).
 //
 // Nothing here is an estimate: every figure is a sum of stored rows.
 
@@ -29,6 +32,8 @@ import { Decimal } from "decimal.js";
 import { statsDb } from "../db/index.js";
 import { ALLOCATION_VERSION, addDays, checkLedgerRow, ledgerCheckInputOf, type Money } from "./outcome-ledger.js";
 
+/** The mark kind stated on real production that belongs to no pipe (its own line, never support). */
+const UNATTRIBUTED = "unattributed_production";
 const D = Decimal.clone({ precision: 60, rounding: Decimal.ROUND_HALF_UP });
 const BASES = ["gross", "net", "vendor", "unpricedGross"] as const;
 type Acc = Record<(typeof BASES)[number], Decimal>;
@@ -58,12 +63,13 @@ export interface ReconciliationParts {
   normalLoss: WireMoney;
   unpooledLoss: WireMoney;
   undeclared: WireMoney;
+  unattributed: WireMoney;
   support: WireMoney;
   /** Standard charges of the day's reuses (no spend behind them; never part of spend). */
   reuseGain: WireMoney;
   /** Σ parts − spend per basis: "0.0000000000" when the day reconciles. */
   differences: WireMoney;
-  shares: Record<"declaredProduction" | "normalLoss" | "unpooledLoss" | "undeclared" | "support", { gross: string | null; net: string | null }>;
+  shares: Record<"declaredProduction" | "normalLoss" | "unpooledLoss" | "undeclared" | "unattributed" | "support", { gross: string | null; net: string | null }>;
   consumptions: string;
   unknownProvenance: string;
 }
@@ -75,6 +81,7 @@ interface DayAcc {
   none: Acc;
   reuse: Acc;
   support: Acc;
+  unattributed: Acc;
   unpooled: Acc;
   undeclared: Acc;
   noneFromRows: Acc;
@@ -84,13 +91,13 @@ interface DayAcc {
 }
 
 const dayAcc = (): DayAcc => ({
-  ledger: acc(), allocated: acc(), loss: acc(), none: acc(), reuse: acc(), support: acc(), unpooled: acc(), undeclared: acc(),
+  ledger: acc(), allocated: acc(), loss: acc(), none: acc(), reuse: acc(), support: acc(), unattributed: acc(), unpooled: acc(), undeclared: acc(),
   noneFromRows: acc(), orgsBalanced: true, consumptions: new D(0), unknown: new D(0),
 });
 
 function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitConsistent: boolean } {
   const declared = minus(a.allocated, a.loss);
-  const differences = minus(sumOf(declared, a.loss, a.unpooled, a.undeclared, a.support), a.ledger);
+  const differences = minus(sumOf(declared, a.loss, a.unpooled, a.undeclared, a.unattributed, a.support), a.ledger);
   // The two stored sources of produced-none (per-org rows vs per-tag rows) must agree.
   const splitConsistent = isZero(minus(a.noneFromRows, a.none));
   return {
@@ -99,6 +106,7 @@ function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitCon
     normalLoss: wire(a.loss),
     unpooledLoss: wire(a.unpooled),
     undeclared: wire(a.undeclared),
+    unattributed: wire(a.unattributed),
     support: wire(a.support),
     reuseGain: wire(a.reuse),
     differences: wire(differences),
@@ -107,6 +115,7 @@ function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitCon
       normalLoss: shareOf(a.loss, a.ledger),
       unpooledLoss: shareOf(a.unpooled, a.ledger),
       undeclared: shareOf(a.undeclared, a.ledger),
+      unattributed: shareOf(a.unattributed, a.ledger),
       support: shareOf(a.support, a.ledger),
     },
     consumptions: a.consumptions.toFixed(10),
@@ -138,7 +147,8 @@ export async function readReconciliation(since: string, until: string, status: D
   // (a pipe), undeclared (neither), per day and per spending service.
   const noneRows = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, service_name,
-           CASE WHEN support_function IS NOT NULL THEN 'support' WHEN workflow_slug IS NOT NULL THEN 'unpooled' ELSE 'undeclared' END AS part,
+           CASE WHEN support_function = ${UNATTRIBUTED} THEN 'unattributed' WHEN support_function IS NOT NULL THEN 'support'
+                WHEN workflow_slug IS NOT NULL THEN 'unpooled' ELSE 'undeclared' END AS part,
            SUM(gross)::text AS gross, SUM(net)::text AS net, SUM(vendor)::text AS vendor, SUM(unpriced_gross)::text AS unpriced, SUM(n)::text AS runs
     FROM outcome_cost_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND kind = 'none' AND day BETWEEN ${since}::date AND ${until}::date
@@ -164,7 +174,7 @@ export async function readReconciliation(since: string, until: string, status: D
     addInto(a.none, m(r, "none"));
     addInto(a.reuse, m(r, "reuse"));
     addInto(a.loss, m(r, "loss"));
-    for (const v of Object.values((r.support_by_function ?? {}) as Record<string, any>)) addInto(a.support, v);
+    for (const [k, v] of Object.entries((r.support_by_function ?? {}) as Record<string, any>)) addInto(k === UNATTRIBUTED ? a.unattributed : a.support, v);
     const check = checkLedgerRow(
       ledgerCheckInputOf({
         ledger: money(fromRow(m(r, "ledger"))),
@@ -175,7 +185,7 @@ export async function readReconciliation(since: string, until: string, status: D
     );
     if (!check.balanced) a.orgsBalanced = false;
   }
-  type Svc = { unpooled: Acc; undeclared: Acc; support: Acc; undeclaredRuns: Decimal; unpooledRuns: Decimal };
+  type Svc = { unpooled: Acc; undeclared: Acc; unattributed: Acc; support: Acc; undeclaredRuns: Decimal; unpooledRuns: Decimal; unattributedRuns: Decimal };
   const services = new Map<string, Svc>();
   for (const r of noneRows) {
     if (missing.has(r.day)) continue;
@@ -184,14 +194,19 @@ export async function readReconciliation(since: string, until: string, status: D
     addInto(a.noneFromRows, money);
     if (r.part === "unpooled") addInto(a.unpooled, money);
     if (r.part === "undeclared") addInto(a.undeclared, money);
+    // support and unattributed come from the per-org ledger rows (support_by_function);
+    // the per-tag rows must sum to the same (noneFromRows vs none, splitConsistent).
     const name = (r.service_name as string | null) ?? "";
-    const s = services.get(name) ?? services.set(name, { unpooled: acc(), undeclared: acc(), support: acc(), undeclaredRuns: new D(0), unpooledRuns: new D(0) }).get(name)!;
+    const s = services.get(name) ?? services.set(name, { unpooled: acc(), undeclared: acc(), unattributed: acc(), support: acc(), undeclaredRuns: new D(0), unpooledRuns: new D(0), unattributedRuns: new D(0) }).get(name)!;
     if (r.part === "unpooled") {
       addInto(s.unpooled, money);
       s.unpooledRuns = s.unpooledRuns.plus(r.runs);
     } else if (r.part === "undeclared") {
       addInto(s.undeclared, money);
       s.undeclaredRuns = s.undeclaredRuns.plus(r.runs);
+    } else if (r.part === "unattributed") {
+      addInto(s.unattributed, money);
+      s.unattributedRuns = s.unattributedRuns.plus(r.runs);
     } else addInto(s.support, money);
   }
   const provenance = new Map<string, { consumedOutcomeKey: string; serviceName: string | null; consumptions: Decimal; unknown: Decimal }>();
@@ -211,7 +226,7 @@ export async function readReconciliation(since: string, until: string, status: D
   for (let d = since; d <= until; d = addDays(d, 1)) {
     const a = days.get(d) ?? dayAcc();
     if (!missing.has(d)) {
-      for (const k of ["ledger", "allocated", "loss", "none", "reuse", "support", "unpooled", "undeclared", "noneFromRows"] as const) total[k] = sumOf(total[k], a[k]);
+      for (const k of ["ledger", "allocated", "loss", "none", "reuse", "support", "unattributed", "unpooled", "undeclared", "noneFromRows"] as const) total[k] = sumOf(total[k], a[k]);
       total.orgsBalanced &&= a.orgsBalanced;
       total.consumptions = total.consumptions.plus(a.consumptions);
       total.unknown = total.unknown.plus(a.unknown);
@@ -224,7 +239,9 @@ export async function readReconciliation(since: string, until: string, status: D
   const balanced = stored.every((r) => r.balanced);
   const complete = status.daysMissing.length === 0 && status.supportDaysMissing.length === 0;
   const unknownTotal = new D(totals.unknownProvenance);
-  const declarationsComplete = new D(totals.undeclared.grossCents).isZero() && unknownTotal.isZero();
+  // Positive evidence only: "nothing undeclared" over days not computed is
+  // vacuous (264 missing days read declarationsComplete=true, 2026-10-24).
+  const declarationsComplete = complete && new D(totals.undeclared.grossCents).isZero() && unknownTotal.isZero();
   return {
     allocationVersion: ALLOCATION_VERSION,
     since,
@@ -245,6 +262,8 @@ export async function readReconciliation(since: string, until: string, status: D
         undeclaredRuns: s.undeclaredRuns.toNumber(),
         unpooledLoss: wire(s.unpooled),
         unpooledLossRuns: s.unpooledRuns.toNumber(),
+        unattributed: wire(s.unattributed),
+        unattributedRuns: s.unattributedRuns.toNumber(),
         support: wire(s.support),
         undeclaredShareOfSpend: frac(s.undeclared.gross, new D(totals.spend.grossCents)),
       }))

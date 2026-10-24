@@ -276,9 +276,10 @@
               "platform_llm",
               "staff_experiment",
               "product_feature",
-              "retired_product"
+              "retired_product",
+              "unattributed_production"
             ],
-            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet."
+            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread."
           },
           "reason": {
             "type": "string",
@@ -4648,7 +4649,8 @@
               "platform_llm",
               "staff_experiment",
               "product_feature",
-              "retired_product"
+              "retired_product",
+              "unattributed_production"
             ],
             "description": "Only marks of this support function."
           },
@@ -4745,7 +4747,8 @@
               "platform_llm",
               "staff_experiment",
               "product_feature",
-              "retired_product"
+              "retired_product",
+              "unattributed_production"
             ],
             "description": "Only marks of this support function."
           },
@@ -4819,9 +4822,10 @@
               "platform_llm",
               "staff_experiment",
               "product_feature",
-              "retired_product"
+              "retired_product",
+              "unattributed_production"
             ],
-            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet."
+            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread."
           },
           "reason": {
             "type": "string",
@@ -4974,9 +4978,10 @@
               "platform_llm",
               "staff_experiment",
               "product_feature",
-              "retired_product"
+              "retired_product",
+              "unattributed_production"
             ],
-            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet."
+            "description": "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread."
           },
           "reason": {
             "type": "string",
@@ -5379,6 +5384,9 @@
               },
               "retired_product": {
                 "type": "string"
+              },
+              "unattributed_production": {
+                "type": "string"
               }
             },
             "description": "What each support function means."
@@ -5689,6 +5697,29 @@
                     ]
                   },
                   "retired_product": {
+                    "type": "object",
+                    "properties": {
+                      "grossCents": {
+                        "type": "string"
+                      },
+                      "netCents": {
+                        "type": "string"
+                      },
+                      "vendorCents": {
+                        "type": "string"
+                      },
+                      "unpricedGrossCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grossCents",
+                      "netCents",
+                      "vendorCents",
+                      "unpricedGrossCents"
+                    ]
+                  },
+                  "unattributed_production": {
                     "type": "object",
                     "properties": {
                       "grossCents": {
@@ -6120,6 +6151,29 @@
                   "vendorCents",
                   "unpricedGrossCents"
                 ]
+              },
+              "unattributed_production": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ]
               }
             },
             "description": "support per support function (a function with no spend is absent)."
@@ -6437,6 +6491,21 @@
                         "grossCents",
                         "netCents"
                       ]
+                    },
+                    "unattributed_production": {
+                      "type": "object",
+                      "properties": {
+                        "grossCents": {
+                          "type": "string"
+                        },
+                        "netCents": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "grossCents",
+                        "netCents"
+                      ]
                     }
                   }
                 },
@@ -6593,6 +6662,21 @@
                       ]
                     },
                     "retired_product": {
+                      "type": "object",
+                      "properties": {
+                        "grossCents": {
+                          "type": "string"
+                        },
+                        "netCents": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "grossCents",
+                        "netCents"
+                      ]
+                    },
+                    "unattributed_production": {
                       "type": "object",
                       "properties": {
                         "grossCents": {
@@ -6765,6 +6849,21 @@
                       ]
                     },
                     "retired_product": {
+                      "type": "object",
+                      "properties": {
+                        "grossCents": {
+                          "type": "string"
+                        },
+                        "netCents": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "grossCents",
+                        "netCents"
+                      ]
+                    },
+                    "unattributed_production": {
                       "type": "object",
                       "properties": {
                         "grossCents": {
@@ -7049,6 +7148,9 @@
                     },
                     "retired_product": {
                       "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    "unattributed_production": {
+                      "$ref": "#/components/schemas/ProductionCost"
                     }
                   }
                 },
@@ -7156,7 +7258,7 @@
           },
           "declarationsComplete": {
             "type": "boolean",
-            "description": "No undeclared spend and no consumption of unknown provenance in the range."
+            "description": "Every day of the range computed (complete) AND no undeclared spend AND no consumption of unknown provenance: never true over days not computed."
           },
           "daysMissing": {
             "type": "array",
@@ -7306,6 +7408,30 @@
                 ],
                 "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
               },
+              "unattributed": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Real production its owner marked unattributed_production (no pipe, subject never recorded, e.g. before campaigns existed): an unabsorbed period cost on its own line, never spread."
+              },
               "support": {
                 "type": "object",
                 "properties": {
@@ -7328,7 +7454,7 @@
                   "vendorCents",
                   "unpricedGrossCents"
                 ],
-                "description": "Spend named support by its owner (support functions)."
+                "description": "Spend named support by its owner (every support function except unattributed_production)."
               },
               "reuseGain": {
                 "type": "object",
@@ -7376,7 +7502,7 @@
                   "vendorCents",
                   "unpricedGrossCents"
                 ],
-                "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled."
+                "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled."
               },
               "shares": {
                 "type": "object",
@@ -7453,6 +7579,24 @@
                     ],
                     "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
                   },
+                  "unattributed": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
                   "support": {
                     "type": "object",
                     "properties": {
@@ -7477,6 +7621,7 @@
                   "normalLoss",
                   "unpooledLoss",
                   "undeclared",
+                  "unattributed",
                   "support"
                 ]
               },
@@ -7505,6 +7650,7 @@
               "normalLoss",
               "unpooledLoss",
               "undeclared",
+              "unattributed",
               "support",
               "reuseGain",
               "differences",
@@ -7578,6 +7724,32 @@
                 "unpooledLossRuns": {
                   "type": "integer"
                 },
+                "unattributed": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ]
+                },
+                "unattributedRuns": {
+                  "type": "integer"
+                },
                 "support": {
                   "type": "object",
                   "properties": {
@@ -7612,6 +7784,8 @@
                 "undeclaredRuns",
                 "unpooledLoss",
                 "unpooledLossRuns",
+                "unattributed",
+                "unattributedRuns",
                 "support",
                 "undeclaredShareOfSpend"
               ]
@@ -7776,6 +7950,30 @@
                   ],
                   "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
                 },
+                "unattributed": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Real production its owner marked unattributed_production (no pipe, subject never recorded, e.g. before campaigns existed): an unabsorbed period cost on its own line, never spread."
+                },
                 "support": {
                   "type": "object",
                   "properties": {
@@ -7798,7 +7996,7 @@
                     "vendorCents",
                     "unpricedGrossCents"
                   ],
-                  "description": "Spend named support by its owner (support functions)."
+                  "description": "Spend named support by its owner (every support function except unattributed_production)."
                 },
                 "reuseGain": {
                   "type": "object",
@@ -7846,7 +8044,7 @@
                     "vendorCents",
                     "unpricedGrossCents"
                   ],
-                  "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled."
+                  "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled."
                 },
                 "shares": {
                   "type": "object",
@@ -7923,6 +8121,24 @@
                       ],
                       "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
                     },
+                    "unattributed": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
                     "support": {
                       "type": "object",
                       "properties": {
@@ -7947,6 +8163,7 @@
                     "normalLoss",
                     "unpooledLoss",
                     "undeclared",
+                    "unattributed",
                     "support"
                   ]
                 },
@@ -7980,6 +8197,7 @@
                 "normalLoss",
                 "unpooledLoss",
                 "undeclared",
+                "unattributed",
                 "support",
                 "reuseGain",
                 "differences",
@@ -14051,8 +14269,8 @@
     },
     "/internal/outcome-costs/reconciliation": {
       "get": {
-        "summary": "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + support, to the cent (service-auth)",
-        "description": "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
+        "summary": "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + unattributed + support, to the cent (service-auth)",
+        "description": "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
         "security": [
           {
             "apiKey": []

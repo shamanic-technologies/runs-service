@@ -37,6 +37,7 @@ export const SUPPORT_FUNCTION_DESCRIPTIONS: Record<SupportFunction, string> = {
   staff_experiment: "a staff probe, test or experiment",
   product_feature: "a product feature or onboarding step (audience suggestions, split confirm...)",
   retired_product: "spend of a product no longer in the fleet",
+  unattributed_production: "production work that belongs to no pipe and whose subject was never recorded (before campaigns existed): an unabsorbed period cost, its own line",
 };
 
 /** Runs one bulk mark may write; a wider selection is narrowed (422), never cut. */

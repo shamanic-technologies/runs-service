@@ -76,11 +76,12 @@ export const SUPPORT_FUNCTIONS = [
   "staff_experiment",
   "product_feature",
   "retired_product",
+  "unattributed_production",
 ] as const;
 
 export const SupportFunctionEnum = z.enum(SUPPORT_FUNCTIONS).openapi({
   description:
-    "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet.",
+    "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread.",
 });
 
 export const RunSupportOnCreateSchema = z
@@ -3370,10 +3371,11 @@ const ReconPartsSchema = z.object({
   normalLoss: LedgerMoneySchema.openapi({ description: "Spend of runs that produced nothing, carried by the units their pipe produced in their campaign that day (rule 2, allocation v3)." }),
   unpooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe's runs (workflow slug) whose campaign produced nothing on that pipe that day: produced none, kept under its own campaign (features pools it on the pipe's output)." }),
   undeclared: LedgerMoneySchema.openapi({ description: "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared." }),
-  support: LedgerMoneySchema.openapi({ description: "Spend named support by its owner (support functions)." }),
+  unattributed: LedgerMoneySchema.openapi({ description: "Real production its owner marked unattributed_production (no pipe, subject never recorded, e.g. before campaigns existed): an unabsorbed period cost on its own line, never spread." }),
+  support: LedgerMoneySchema.openapi({ description: "Spend named support by its owner (every support function except unattributed_production)." }),
   reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges of reuses: no spend behind them, never part of spend." }),
-  differences: LedgerMoneySchema.openapi({ description: "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled." }),
-  shares: z.object({ declaredProduction: ReconShareSchema, normalLoss: ReconShareSchema, unpooledLoss: ReconShareSchema, undeclared: ReconShareSchema, support: ReconShareSchema }),
+  differences: LedgerMoneySchema.openapi({ description: "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled." }),
+  shares: z.object({ declaredProduction: ReconShareSchema, normalLoss: ReconShareSchema, unpooledLoss: ReconShareSchema, undeclared: ReconShareSchema, unattributed: ReconShareSchema, support: ReconShareSchema }),
   consumptions: z.string().openapi({ description: "Consumptions declared (weights, 10 decimals)." }),
   unknownProvenance: z.string().openapi({ description: "Of which no run declared producing the consumed occurrence." }),
 });
@@ -3386,7 +3388,7 @@ export const LedgerReconciliationResponseSchema = z
     reconciled: z.boolean().openapi({ description: "balanced AND complete AND declarationsComplete: the ledger can be read as the whole truth." }),
     balanced: z.boolean().openapi({ description: "Every stored day: the parts sum to spend exactly on every basis, every (day, org) ledger check balances, and the two stored sources of produced-none agree." }),
     complete: z.boolean().openapi({ description: "Every day stored under the current facts (no missing, no stale day) with its support split." }),
-    declarationsComplete: z.boolean().openapi({ description: "No undeclared spend and no consumption of unknown provenance in the range." }),
+    declarationsComplete: z.boolean().openapi({ description: "Every day of the range computed (complete) AND no undeclared spend AND no consumption of unknown provenance: never true over days not computed." }),
     daysMissing: z.array(z.string()).openapi({ description: "Days not stored or stale (their figures are not in totals)." }),
     daysStale: z.array(z.string()),
     supportDaysMissing: z.array(z.string()),
@@ -3399,6 +3401,8 @@ export const LedgerReconciliationResponseSchema = z
         undeclaredRuns: z.number().int().openapi({ description: "Σ per day of the distinct runs with undeclared spend (a run spending on two days counts twice)." }),
         unpooledLoss: LedgerMoneySchema,
         unpooledLossRuns: z.number().int(),
+        unattributed: LedgerMoneySchema,
+        unattributedRuns: z.number().int(),
         support: LedgerMoneySchema,
         undeclaredShareOfSpend: z.string().nullable(),
       }),
@@ -3419,9 +3423,9 @@ export const LedgerReconciliationResponseSchema = z
 registry.registerPath({
   method: "get",
   path: "/internal/outcome-costs/reconciliation",
-  summary: "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + support, to the cent (service-auth)",
+  summary: "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + unattributed + support, to the cent (service-auth)",
   description:
-    "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
+    "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({

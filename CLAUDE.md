@@ -928,6 +928,10 @@ stored produced-none sources agree) AND complete AND declarationsComplete (no un
   outcome-coverage, outcome-costs, reconciliation), so `complete` is false and its figures stay out of the totals until recomputed.
   The full scan runs in the refresher's tick (`persistStaleDays`: `cost_ledger_computed_days.stale` + `cost_ledger_stale_sweeps.swept_at`,
   taken before its reads); a read adds only facts recorded after `swept_at`, never a backfill's whole history.
+- **unattributed** (migration 0071): real production its OWNER marks `unattributed_production` through the support-mark doors (no pipe,
+  subject never recorded, e.g. Feb 2026 runs from before campaigns): its own line on the reconciliation (totals/days/services), never
+  support, never undeclared, never spread; never inferred from a missing campaign. `declarationsComplete` = complete AND no undeclared AND
+  no unknown provenance (never vacuous over missing days).
 - Guard: `tests/integration/ledger-reconciliation.test.ts` (red if the campaign key is dropped from the pool).
 
 ## Taking a declaration back — `POST /v1/runs/:id/outcomes/void` (migration 0059, RUNS-VOID-1023)
