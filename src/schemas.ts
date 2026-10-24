@@ -546,7 +546,7 @@ registry.registerPath({
     },
     401: { description: "Unauthorized" },
     409: {
-      description: "Parent-child field conflict OR idempotencyKey collides with a run of different (serviceName, taskName)",
+      description: "Parent-child field conflict OR idempotencyKey collides with a run of different (serviceName, taskName), OR `run_holds_dated_facts`: the parent run holds an outcome dated before its start (a recorded past fact, MEETING-DATED-OCCURRENCES-1024) and takes no child run",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
   },
@@ -624,6 +624,10 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: {
       description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    409: {
+      description: "`run_holds_dated_facts`: the run holds an outcome dated before its start (a recorded past fact, MEETING-DATED-OCCURRENCES-1024): it takes no cost (spend is never back-dated). Nothing written.",
       content: { "application/json": { schema: ErrorSchema } },
     },
     422: {
@@ -2347,7 +2351,7 @@ registry.registerPath({
     },
     401: { description: "Unauthorized" },
     409: {
-      description: "idempotencyKey collides with a run of different (serviceName, taskName), or `parent_org_mismatch`: x-org-id names another org than the parent run's",
+      description: "idempotencyKey collides with a run of different (serviceName, taskName), or `parent_org_mismatch`: x-org-id names another org than the parent run's, or `run_holds_dated_facts`: the parent run holds an outcome dated before its start and takes no child run",
       content: { "application/json": { schema: ValidationErrorSchema } },
     },
     422: {
@@ -2384,6 +2388,10 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: {
       description: "Run not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    409: {
+      description: "`run_holds_dated_facts`: the run holds an outcome dated before its start (a recorded past fact, MEETING-DATED-OCCURRENCES-1024): it takes no cost (spend is never back-dated). Nothing written.",
       content: { "application/json": { schema: ErrorSchema } },
     },
     422: {
@@ -2637,7 +2645,7 @@ export const OutcomeOccurrenceInputSchema = z
 
 export const OccurredAtSchema = z
   .union([z.literal("run_started_at"), z.string().datetime({ offset: true })])
-  .openapi({ description: "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (every 15 min, a 10-min budget per tick, recent days first, then days never computed, then moved ones; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call).", example: "run_started_at" });
+  .openapi({ description: "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (every 15 min, a 10-min budget per tick, recent days first, then days never computed, then moved ones; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call). RECORDED PAST FACT (MEETING-DATED-OCCURRENCES-1024): on a SPEND-FREE run (no cost row and no child run, e.g. lead-service `outcome-recording`, a production order that only states a fact reached in the past: a meeting booked in May recorded today) the ISO instant may be ANY past time, BEFORE the run's own start: the occurrence then counts on the day the fact happened (outcome-costs `until` includes it). Only the run's own service may (x-service-name = the run's service; else 403 `not_run_owner` on the one-run doors, 422 `not_run_owner` on the batch). From then on the run takes no cost and no child run (409 `run_holds_dated_facts`): spend is never back-dated, and a run with spend keeps the [start, now] bound.", example: "run_started_at" });
 
 const declareRunOutcomesShape = {
   produced: z.array(OutcomeOccurrenceInputSchema).optional().openapi({
@@ -2669,7 +2677,7 @@ export const DeclareOutcomesBatchRequestSchema = z
           ...declareRunOutcomesShape,
           redate: z.boolean().optional().openapi({
             description:
-              "RE-DATE (requires occurredAt; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY recorded with a LATER effective time (declared through today's door before occurredAt existed) moves EARLIER to occurredAt (status `redated`). Never later: an occurrence already at or before occurredAt stays `already_recorded`. Occurrences not yet recorded are recorded at occurredAt as usual. Same quantity rule (another quantity = 409). One bronze `outcomes.redated` event per run keeps the previous time; the refresher recomputes every stored day the move touches. Idempotent: a replay finds nothing to move.",
+              "RE-DATE (requires occurredAt; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY recorded with a LATER effective time (declared through today's door before occurredAt existed) moves EARLIER to occurredAt (status `redated`). Never later: an occurrence already at or before occurredAt stays `already_recorded`. Occurrences not yet recorded are recorded at occurredAt as usual. Only the occurrences listed in this entry move: to give each occurrence of one run its own time, send one batch call per time (a run appears once per call). On a SPEND-FREE run (no cost row, no child run) occurredAt may be before the run's start (see occurredAt: a recorded past fact moved to the day it happened, the SAME occurrence, never a second one). Same quantity rule (another quantity = 409). One bronze `outcomes.redated` event per run keeps the previous time; the refresher recomputes every stored day the move touches. Idempotent: a replay finds nothing to move.",
           }),
         }),
       )
@@ -2754,8 +2762,9 @@ for (const [path, auth] of [
     responses: {
       201: { description: "At least one occurrence recorded", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
       200: { description: "Every occurrence was already recorded (replay)", content: { "application/json": { schema: DeclareRunOutcomesResponseSchema } } },
-      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, `occurredAt` out of bounds (`invalid_occurred_at`: before the run started, or in the future), or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
+      400: { description: "Invalid body (key format, empty, > 1000, duplicate in body), run id, `occurredAt` out of bounds (`invalid_occurred_at`: in the future, or before the run started on a run with a cost row or a child run), or `unknown_outcome_key` (details.unknownKeys: keys features-service's step catalogue does not hold)", content: { "application/json": { schema: ValidationErrorSchema } } },
       401: { description: "Unauthorized" },
+      403: { description: "`not_run_owner`: an occurredAt before the run's start (spend-free run) is stated by the run's own service only (x-service-name = the run's service)", content: { "application/json": { schema: ErrorSchema } } },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
       409: { description: "run_org_mismatch, run_outcomes_voided (declaration taken back: declare on a new run), or an occurrence already recorded with another quantity", content: { "application/json": { schema: OutcomeConflictResponseSchema } } },
       502: { description: "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
@@ -2841,7 +2850,7 @@ registry.registerPath({
   path: "/v1/platform-runs/outcomes/batch",
   summary: "Declare the outcome occurrences of many runs in one call (the backfill door)",
   description:
-    "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. An occurrence declared earlier through today's door (stamped with that day) is moved back to its real time with `redate: true` on its run (owner service only, earlier only). Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
+    "Same contract as POST /v1/platform-runs/{id}/outcomes, for up to 500 runs and 1000 occurrences per call, each run with its own `produced`, `consumed` and `occurredAt`. Made for BACKFILL: a producer re-reads its own history (each past run and the rows it produced) and declares those outcomes on the past runs that paid for them with `occurredAt: \"run_started_at\"` (or its row's own instant, between the run's start and now); they then count as declared at that time for consumption resolution, reuse ranking and every stored day series, and the refresher recomputes each stored day they move. All or nothing: any invalid run (unknown, voided, org mismatch with a stated x-org-id, occurredAt out of bounds) = 422 with the per-run list and NOTHING is written. Idempotent: re-running the same batch returns 200 with every occurrence `already_recorded` and writes nothing, so a backfill can be resumed or replayed safely. An occurrence declared earlier through today's door (stamped with that day) is moved back to its real time with `redate: true` on its run (owner service only, earlier only). A SPEND-FREE run (no cost row, no child run: a recorded past fact) accepts an occurredAt before its own start, owner service only (422 `not_run_owner` otherwise). Auth: x-service-name required (recorded as the declaring service); x-org-id optional (when given, every run must be in that org).",
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: DeclareOutcomesBatchRequestSchema } } } },
   responses: {

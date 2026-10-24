@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isRunHoldsDatedFacts, RUN_HOLDS_DATED_FACTS_BODY } from "../services/outcome-ledger.js";
 import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, readDb } from "../db/index.js";
@@ -293,6 +294,10 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       throw err;
     }
   } catch (err) {
+    if (isRunHoldsDatedFacts(err)) {
+      res.status(409).json(RUN_HOLDS_DATED_FACTS_BODY);
+      return;
+    }
     console.error("[runs-service] Error creating run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
@@ -844,6 +849,10 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
     if (err instanceof UsageDiscountError) {
       console.error(`[runs-service] usage-discount unresolvable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `usage-discount unresolvable: ${err.message}` });
+      return;
+    }
+    if (isRunHoldsDatedFacts(err)) {
+      res.status(409).json(RUN_HOLDS_DATED_FACTS_BODY);
       return;
     }
     console.error("[runs-service] Error adding run costs:", err);

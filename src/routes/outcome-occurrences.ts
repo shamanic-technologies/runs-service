@@ -27,6 +27,7 @@ import {
   supportTotal,
   type SupportByFunction,
   effectiveDeclaredAt,
+  SPEND_FREE_SQL,
   listOccurrences,
   utcDay,
   type Direction,
@@ -89,7 +90,7 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       return;
     }
     const [run] = (await db.execute(sql`
-      SELECT id, organization_id, service_name, started_at FROM runs WHERE id = ${id}::uuid
+      SELECT r.id, r.organization_id, r.service_name, r.started_at, ${SPEND_FREE_SQL} FROM runs r WHERE r.id = ${id}::uuid
     `)) as any[];
     if (!run) {
       res.status(404).json({ error: "Run not found" });
@@ -104,6 +105,14 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
     if ("error" in effective) {
       res.status(400).json({ error: "invalid_occurred_at", details: effective.error });
       return;
+    }
+    // A fact dated before its run's start (spend-free run only): the run's own service only.
+    if (effective.beforeStart) {
+      const caller = req.platformServiceName ?? (req.headers["x-service-name"] as string | undefined)?.trim();
+      if (caller !== run.service_name) {
+        res.status(403).json({ error: "not_run_owner", details: { runServiceName: run.service_name, callerServiceName: caller ?? null } });
+        return;
+      }
     }
     if (await isRunOutcomesVoided(id)) throw new RunOutcomesVoidedError(id);
     const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name, effective.at);
@@ -142,6 +151,11 @@ function declarationError(res: Response, err: unknown) {
     res.status(409).json({ error: "run_outcomes_voided", conflicts: [] });
     return;
   }
+  // Migration 0068: a cost or child run landed between the spend-free check and the write.
+  if (dbMessage.includes("outcome_before_run_start")) {
+    res.status(400).json({ error: "invalid_occurred_at", details: "the run carries spend or child runs: it never dates an outcome before it started" });
+    return;
+  }
   if (dbMessage.includes("run_marked_support")) {
     res.status(409).json({ error: "run_marked_support", conflicts: [] });
     return;
@@ -174,7 +188,7 @@ async function handleDeclareBatch(req: Request, res: Response) {
     }
     const ids = `{${entries.map((r) => r.runId).join(",")}}`;
     const runs = (await db.execute(sql`
-      SELECT r.id, r.organization_id, r.service_name, r.started_at,
+      SELECT r.id, r.organization_id, r.service_name, r.started_at, ${SPEND_FREE_SQL},
              EXISTS (SELECT 1 FROM outcome_declaration_events e WHERE e.run_id = r.id AND e.event_type = 'outcomes.voided') AS voided
       FROM runs r WHERE r.id = ANY(${ids}::uuid[])
     `)) as any[];
@@ -189,6 +203,7 @@ async function handleDeclareBatch(req: Request, res: Response) {
       if (e.redate && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `run belongs to ${run.service_name}` }), null;
       const effective = effectiveDeclaredAt(e.occurredAt, run);
       if ("error" in effective) return invalid.push({ runId: e.runId, reason: "invalid_occurred_at", message: effective.error }), null;
+      if (effective.beforeStart && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `a fact dated before the run started is stated by the run's own service (${run.service_name}) only` }), null;
       return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, declaredAt: effective.at, redate: e.redate === true };
     });
     if (invalid.length > 0) {

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isRunHoldsDatedFacts, RUN_HOLDS_DATED_FACTS_BODY } from "../services/outcome-ledger.js";
 import { eq, and, inArray } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
@@ -158,6 +159,10 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       throw err;
     }
   } catch (err) {
+    if (isRunHoldsDatedFacts(err)) {
+      res.status(409).json(RUN_HOLDS_DATED_FACTS_BODY);
+      return;
+    }
     console.error("[runs-service] Error creating platform run:", err);
     res.status(500).json({ error: "Internal server error" });
   }
@@ -294,6 +299,10 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
     if (err instanceof UsageDiscountError) {
       console.error(`[runs-service] usage-discount unresolvable (${err.statusCode}):`, err.message);
       res.status(502).json({ error: `usage-discount unresolvable: ${err.message}` });
+      return;
+    }
+    if (isRunHoldsDatedFacts(err)) {
+      res.status(409).json(RUN_HOLDS_DATED_FACTS_BODY);
       return;
     }
     console.error("[runs-service] Error adding platform run costs:", err);

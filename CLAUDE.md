@@ -948,6 +948,14 @@ resolution keys on declaration time.
   2026-05-17..10-22 declared through today's door on 2026-10-23 before `occurredAt` existed.
 - **Support marks (migration 0062)**: see "Support spend, named and reported apart" (0064).
 - Guard: `tests/integration/outcome-backfill.test.ts`.
+- **Recorded past facts (migration 0068, MEETING-DATED-OCCURRENCES-1024-RUNS)**: a SPEND-FREE run (no `runs_costs` row, no child
+  run; lead-service's `outcome-recording`: a meeting booked in May recorded today) may state `occurredAt` at ANY past instant, before
+  its own start (`effectiveDeclaredAt` `spend_free` -> `beforeStart`), on both declare doors, the batch and a `redate`; only the run's
+  own service (x-service-name; 403 / 422 `not_run_owner`). A run with spend keeps the [start, now] bound. 0068's triggers hold it
+  whatever the write order: a DATED occurrence (declared_at < recorded_at) before its run's start is refused on a run with a cost or a
+  child (`outcome_before_run_start`), and such a run takes no cost and no child (409 `run_holds_dated_facts` on the cost/run doors).
+  On-time rows (declared_at = recorded_at, or recorded_at NULL) are never caught by a clock difference. Redate moves only the listed
+  occurrences: one batch call per instant. Guard: `tests/integration/outcome-dated-facts.test.ts`.
 
 ## Support spend, named and reported apart (migrations 0062 + 0064 + 0065, COST-SUPPORT-1024-RUNS)
 
