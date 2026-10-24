@@ -2782,7 +2782,7 @@ export const VoidRunOutcomesRequestSchema = z
     scope: z
       .object({ direction: z.enum(["produced", "consumed"]), outcomeKey: z.string().trim().min(1) })
       .optional()
-      .openapi({ description: "Take back ONLY this run's occurrences of this direction x outcome key; the rest of the declaration stays and the run stays OPEN to a corrected declaration (absent = the whole run, final)." }),
+      .openapi({ description: "Take back ONLY the occurrences of this direction x outcome key that the CALLING service declared on this run; the rest of the declaration stays and the run stays OPEN to a corrected declaration (absent = the whole run, final)." }),
   })
   .openapi("VoidRunOutcomesRequest");
 
@@ -2797,7 +2797,7 @@ export const VoidRunOutcomesResponseSchema = z
   .openapi("VoidRunOutcomesResponse");
 
 const voidDescription =
-  "Takes back EVERY outcome occurrence this run declared (produced and consumed), when the declaration was made in error. Only the service that owns the run may (x-service-name must equal the run's serviceName, else 403 `not_run_owner`). From then on they count in no figure (cost per occurrence, outcome-cost totals, ledger check, coverage): the run's spend reads 'produced none', and stored days are recomputed by the next ledger refresh. The run then accepts no new declaration (409 `run_outcomes_voided`): re-declare the right facts on a NEW run. Audit: reason, voidedBy and the removed rows stay in the bronze log. Idempotent: a second call is 200 `already_voided`, nothing written. SCOPED (body `scope: {direction, outcomeKey}`): takes back only those occurrences of the run, keeps the rest, and the run stays open to a corrected declaration; a scope matching nothing is 200 `nothing_to_void`; a run already voided whole is 200 `already_voided`.";
+  "Takes back EVERY outcome occurrence this run declared (produced and consumed), when the declaration was made in error. Only the service that owns the run may (x-service-name must equal the run's serviceName, else 403 `not_run_owner`). From then on they count in no figure (cost per occurrence, outcome-cost totals, ledger check, coverage): the run's spend reads 'produced none', and stored days are recomputed by the next ledger refresh. The run then accepts no new declaration (409 `run_outcomes_voided`): re-declare the right facts on a NEW run. Audit: reason, voidedBy and the removed rows stay in the bronze log. Idempotent: a second call is 200 `already_voided`, nothing written. SCOPED (body `scope: {direction, outcomeKey}`): takes back only those occurrences of the run, keeps the rest, and the run stays open to a corrected declaration; a scope matching nothing is 200 `nothing_to_void`; a run already voided whole is 200 `already_voided`. DECLARER (DECLARER-VOID-1024): a scoped void takes back only the occurrences the CALLING service declared (x-service-name = the declaring service recorded in the bronze log), never another service's rows on the same run, the owner's included; so a service that declared on a run it does NOT own (content-generation-service on workflow's execute-workflow runs) may scoped-void its own rows there and re-declare the corrected facts on the same run (a still-present occurrence replays `already_recorded`). A non-owner that declared nothing on the run is 403 `not_run_declarer`; a whole-run void stays owner-only (403 `not_run_owner`).";
 
 for (const [path, auth] of [
   ["/v1/runs/{id}/outcomes/void", "x-org-id required (must be the run's org) + x-service-name required"],
@@ -2818,7 +2818,7 @@ for (const [path, auth] of [
       200: { description: "Already taken back (replay, nothing written)", content: { "application/json": { schema: VoidRunOutcomesResponseSchema } } },
       400: { description: "Invalid body or run id, or missing x-service-name", content: { "application/json": { schema: ValidationErrorSchema } } },
       401: { description: "Unauthorized" },
-      403: { description: "not_run_owner: the run belongs to another service", content: { "application/json": { schema: ErrorSchema } } },
+      403: { description: "not_run_owner: whole-run void by a service that does not own the run; not_run_declarer: scoped void by a non-owner that declared nothing on the run", content: { "application/json": { schema: ErrorSchema } } },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
       409: { description: "run_org_mismatch", content: { "application/json": { schema: ErrorSchema } } },
     },
