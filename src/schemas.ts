@@ -3386,7 +3386,7 @@ export const LedgerReconciliationResponseSchema = z
     reconciled: z.boolean().openapi({ description: "balanced AND complete AND declarationsComplete: the ledger can be read as the whole truth." }),
     balanced: z.boolean().openapi({ description: "Every stored day: the parts sum to spend exactly on every basis, every (day, org) ledger check balances, and the two stored sources of produced-none agree." }),
     complete: z.boolean().openapi({ description: "Every day stored under the current facts (no missing, no stale day) with its support split." }),
-    declarationsComplete: z.boolean().openapi({ description: "No undeclared spend and no consumption of unknown provenance in the range." }),
+    declarationsComplete: z.boolean().openapi({ description: "Every day of the range computed (complete) AND no undeclared spend AND no consumption of unknown provenance: never true over days not computed." }),
     daysMissing: z.array(z.string()).openapi({ description: "Days not stored or stale (their figures are not in totals)." }),
     daysStale: z.array(z.string()),
     supportDaysMissing: z.array(z.string()),

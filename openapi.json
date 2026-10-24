@@ -7156,7 +7156,7 @@
           },
           "declarationsComplete": {
             "type": "boolean",
-            "description": "No undeclared spend and no consumption of unknown provenance in the range."
+            "description": "Every day of the range computed (complete) AND no undeclared spend AND no consumption of unknown provenance: never true over days not computed."
           },
           "daysMissing": {
             "type": "array",

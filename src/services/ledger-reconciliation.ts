@@ -224,7 +224,9 @@ export async function readReconciliation(since: string, until: string, status: D
   const balanced = stored.every((r) => r.balanced);
   const complete = status.daysMissing.length === 0 && status.supportDaysMissing.length === 0;
   const unknownTotal = new D(totals.unknownProvenance);
-  const declarationsComplete = new D(totals.undeclared.grossCents).isZero() && unknownTotal.isZero();
+  // Positive evidence only: "nothing undeclared" over days not computed is
+  // vacuous (264 missing days read declarationsComplete=true, 2026-10-24).
+  const declarationsComplete = complete && new D(totals.undeclared.grossCents).isZero() && unknownTotal.isZero();
   return {
     allocationVersion: ALLOCATION_VERSION,
     since,
