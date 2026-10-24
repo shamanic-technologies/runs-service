@@ -3073,7 +3073,7 @@ export const OutcomeCostTotalsResponseSchema = z
     daysMissing: z.array(z.string()),
     produced: z.array(
       z.object({
-        dimensions: OutcomeCostDimensionsSchema,
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except the source* ones (consumed section only)." }),
         occurrences: z.number().int().openapi({ description: "Produced occurrences DECLARED in the range (day = their declaration's UTC day), under the declaring run's tags." }),
         quantity: z.string().openapi({ description: "Σ quantity of those occurrences (6 decimals)." }),
         cost: ProductionCostSchema.openapi({ description: "Σ own production cost (allocation v1 shares) of the spend in the range (day = the cost row's UTC day), under the declaring run's tags. = Σ costSlices of /internal/outcome-occurrences." }),
@@ -3081,7 +3081,7 @@ export const OutcomeCostTotalsResponseSchema = z
     ),
     consumed: z.array(
       z.object({
-        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "Always consumingOutcomeKey + consumedOutcomeKey (the requested outcomeKey dimension reads as consumingOutcomeKey), plus the other requested dimensions, under the consuming run's tags; day = the consumption's UTC day." }),
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "Always consumingOutcomeKey + consumedOutcomeKey (the requested outcomeKey dimension reads as consumingOutcomeKey), plus the other requested dimensions, under the consuming run's tags; day = the consumption's UTC day. The source* dimensions are the tags of the run that PRODUCED the consumed occurrence (null on unknown provenance: those consumptions count in unknownProvenance)." }),
         consumptions: z.string().openapi({ description: "Σ weights (10 decimals): a whole number unless a production order makes several outcomes." }),
         reuses: z.string().openapi({ description: "Of which reuses (an earlier consumption already used the occurrence)." }),
         unknownProvenance: z.string().openapi({ description: "Of which no run declared producing the occurrence (no standard cost)." }),
@@ -3091,7 +3091,7 @@ export const OutcomeCostTotalsResponseSchema = z
     ),
     scope: z.array(
       z.object({
-        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except outcomeKey." }),
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except outcomeKey and the source* ones." }),
         spend: ProductionCostSchema.openapi({ description: "Every actual + refunded cost row of the scope in the range = producedCost + producedNone." }),
         producedCost: ProductionCostSchema.openapi({ description: "Part spread on produced occurrences (Σ produced[].cost of the scope)." }),
         producedNone: ProductionCostSchema.openapi({ description: "Part of runs with no declaring run at or above them, under the spending run's tags." }),
@@ -3106,11 +3106,11 @@ registry.registerPath({
   path: "/internal/stats/outcome-costs",
   summary: "The outcome ledger as totals: produced, consumed and produced-none per outcome x day x org x brand x campaign x workflow x feature (service-auth)",
   description:
-    "The per-outcome cost rollup's input (features-service): unit cost of an outcome = own cost per occurrence + Σ over inputs (consumptions per occurrence x the input's unit cost). Read from the per-day rows the ledger refresher stores (every 15 min, same computation as /internal/outcome-costs/ledger-check), never a ledger scan. Exact decimals on billed gross, frozen net and vendor actual (+ unpriced gross). Every figure equals the sum of the matching /internal/outcome-occurrences rows (produced: costSlices; consumed: consumption.consumingOutcomes). Grouped by org (costOrgId) and day, produced cost + producedNone = the ledger check's ledger for that org-day. Dimensions (groupBy, comma list, any subset): outcomeKey, day (UTC), orgId (the declaring / consuming / spending run's org), costOrgId (the cost row's org = the ledger check's org; differs from orgId only for platform-billed spend made for an org's run), brandId (a co-branded run counts under each brand), campaignId, workflowSlug, featureSlug. Filters: the same names (outcomeKey filters produced and consumed by the consuming outcome, not scope). Default range: since the first stored day until today (UTC), <= 400 days. Each section holds at most maxGroups groups: above, 422 `too_many_groups`.",
+    "The per-outcome cost rollup's input (features-service): unit cost of an outcome = own cost per occurrence + Σ over inputs (consumptions per occurrence x the input's unit cost). Read from the per-day rows the ledger refresher stores (every 15 min, same computation as /internal/outcome-costs/ledger-check), never a ledger scan. Exact decimals on billed gross, frozen net and vendor actual (+ unpriced gross). Every figure equals the sum of the matching /internal/outcome-occurrences rows (produced: costSlices; consumed: consumption.consumingOutcomes). Grouped by org (costOrgId) and day, produced cost + producedNone = the ledger check's ledger for that org-day. Dimensions (groupBy, comma list, any subset): outcomeKey, day (UTC), orgId (the declaring / consuming / spending run's org), costOrgId (the cost row's org = the ledger check's org; differs from orgId only for platform-billed spend made for an org's run), brandId (a co-branded run counts under each brand), campaignId, workflowSlug, featureSlug; and, for the CONSUMED section only, the tags of the run that PRODUCED the consumed occurrence: sourceOrgId, sourceBrandId (a co-branded producing run counts under each brand), sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug (e.g. consumed `conversation` grouped by sourceWorkflowSlug = the positive replies per workflow whose send got them, even when the reply run carries no workflow; a null source group holds the unknown-provenance consumptions, counted in unknownProvenance, plus any untagged producing run). Grouped by source dimensions, the consumed groups sum exactly to the same read without them; produced and scope ignore them, and every section then reads only days whose consumed rows carry their source (others listed in daysMissing until the refresher recomputes them). Filters: the same names except source* (outcomeKey filters produced and consumed by the consuming outcome, not scope). Default range: since the first stored day until today (UTC), <= 400 days. Each section holds at most maxGroups groups: above, 422 `too_many_groups`.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug. Empty = one group per section." }),
+      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug (source* = the producing run of the consumed occurrence; consumed section only). Empty = one group per section." }),
       since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: the first stored day)." }),
       until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: today UTC)." }),
       outcomeKey: z.string().optional(),
