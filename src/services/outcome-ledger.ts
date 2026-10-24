@@ -688,11 +688,16 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
       FROM res
     )
     SELECT r.id, r.run_id, r.outcome_key, r.producer_id, r.producer_run_id, (r.producer_id IS NOT NULL AND r.rn > 1) AS reuse,
-           cr.organization_id AS org_id, cr.brand_ids, cr.campaign_id, cr.workflow_slug, cr.feature_slug
+           cr.organization_id AS org_id, cr.brand_ids, cr.campaign_id, cr.workflow_slug, cr.feature_slug,
+           pr.organization_id AS src_org_id, pr.brand_ids AS src_brand_ids, pr.campaign_id AS src_campaign_id,
+           pr.workflow_slug AS src_workflow_slug, pr.feature_slug AS src_feature_slug
     FROM ranked r
     CROSS JOIN LATERAL (
       SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug FROM runs WHERE id = r.run_id OFFSET 0
     ) cr
+    LEFT JOIN LATERAL (
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug FROM runs WHERE id = r.producer_run_id OFFSET 0
+    ) pr ON TRUE
     WHERE r.id IN (SELECT id FROM t)`;
 }
 
@@ -705,6 +710,9 @@ interface ResolvedConsumption {
   reuse: boolean;
   orgId: string | null;
   tags: RunTags;
+  /** The PRODUCING run's org and tags (null when no run declared producing the occurrence). */
+  sourceOrgId: string | null;
+  sourceTags: RunTags | null;
 }
 
 /** The tags a production order carries (org apart). */
@@ -736,6 +744,10 @@ async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promis
     reuse: r.reuse === true,
     orgId: r.org_id ?? null,
     tags: tagsOf(r),
+    sourceOrgId: r.src_org_id ?? null,
+    sourceTags: r.producer_run_id
+      ? { brandIds: r.src_brand_ids ?? null, campaignId: r.src_campaign_id ?? null, workflowSlug: r.src_workflow_slug ?? null, featureSlug: r.src_feature_slug ?? null }
+      : null,
   }));
 }
 
@@ -826,7 +838,8 @@ export function splitConsumption(keys: Array<{ outcomeKey: string; quantity: str
  *  - produced_cost: the v1 shares of the day's spend (UTC day of the cost row, org of the cost row),
  *    per outcome x the declaring run's tags.
  *  - consumed: consumptions DECLARED that UTC day, per (consuming outcome, consumed outcome) x the
- *    consuming run's tags (cost org = its org): weights, reuses, unknown provenance, standard cost, reuse gain.
+ *    consuming run's tags (cost org = its org) x the PRODUCING run's org and tags (source*, null when
+ *    the provenance is unknown): weights, reuses, unknown provenance, standard cost, reuse gain.
  *  - none: the day's spend no declaring run carries, per the spending run's tags x cost org.
  */
 export interface OutcomeCostRow {
@@ -836,6 +849,9 @@ export interface OutcomeCostRow {
   organizationId: string | null;
   costOrganizationId: string | null;
   tags: RunTags;
+  /** consumed only: the run that produced the consumed occurrence (null otherwise, and on unknown provenance). */
+  sourceOrganizationId: string | null;
+  sourceTags: RunTags | null;
   n: string;
   quantity: string;
   reuses: string;
@@ -905,6 +921,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     organizationId: r.org ?? null,
     costOrganizationId: r.cost_org ?? null,
     tags: tagsOf(r),
+    sourceOrganizationId: null,
+    sourceTags: null,
     n: fx(0),
     quantity: fx(0),
     reuses: fx(0),
@@ -934,11 +952,16 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   for (const c of consumptions) {
     const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
     for (const part of splitConsumption(consumingKeys.get(c.runId) ?? [], std)) {
-      const k = JSON.stringify([part.outcomeKey, c.outcomeKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug]);
+      const k = JSON.stringify([
+        part.outcomeKey, c.outcomeKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug,
+        c.sourceOrgId, c.sourceTags,
+      ]);
       if (!consumed.has(k)) {
         consumed.set(k, {
           ...blank("consumed", { outcome_key: part.outcomeKey, org: c.orgId, cost_org: c.orgId, ...{ brand_ids: c.tags.brandIds, campaign_id: c.tags.campaignId, workflow_slug: c.tags.workflowSlug, feature_slug: c.tags.featureSlug } }),
           consumedOutcomeKey: c.outcomeKey,
+          sourceOrganizationId: c.sourceOrgId,
+          sourceTags: c.sourceTags,
           money: ZERO(),
         });
       }
@@ -982,10 +1005,12 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
         INSERT INTO outcome_cost_days (
           day, allocation_version, kind, outcome_key, consumed_outcome_key, organization_id, cost_organization_id,
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
-          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross
+          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
+          source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
-               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup
+               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
+               x.sorg, x.sbrands, x.scmp, x.swf, x.sft
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -993,10 +1018,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             n: o.n, q: o.quantity, ru: o.reuses, up: o.unknown,
             g: o.money.gross, ne: o.money.net, v: o.money.vendor, u: o.money.unpricedGross,
             rg: o.reuseMoney.gross, rn: o.reuseMoney.net, rv: o.reuseMoney.vendor, rup: o.reuseMoney.unpricedGross,
+            sorg: o.sourceOrganizationId, sbrands: o.sourceTags?.brandIds ?? null, scmp: o.sourceTags?.campaignId ?? null,
+            swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
-                        rg numeric, rn numeric, rv numeric, rup numeric)
+                        rg numeric, rn numeric, rv numeric, rup numeric,
+                        sorg uuid, sbrands text[], scmp text, swf text, sft text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -1037,9 +1065,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true
     `);
   });
 }
@@ -1116,6 +1144,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string): Promis
     SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       AND outcome_costs -- a day stored before the outcome totals (0058) is recomputed
+      AND consumed_sources -- ... and one stored before the consumed rows carried their source (0063)
   `)) as any[];
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();
