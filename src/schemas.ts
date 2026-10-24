@@ -2779,6 +2779,10 @@ export const VoidRunOutcomesRequestSchema = z
   .object({
     reason: z.string().trim().min(1).max(2000).openapi({ description: "Why the declaration was wrong (kept in the audit log).", example: "one run declared several produced outcome keys; re-declared one key per run" }),
     voidedBy: z.string().trim().min(1).max(256).openapi({ description: "Who decided it (a person, a ticket, a release).", example: "lead-service COST-ACCOUNTING-1023-LEAD-FIX" }),
+    scope: z
+      .object({ direction: z.enum(["produced", "consumed"]), outcomeKey: z.string().trim().min(1) })
+      .optional()
+      .openapi({ description: "Take back ONLY this run's occurrences of this direction x outcome key; the rest of the declaration stays and the run stays OPEN to a corrected declaration (absent = the whole run, final)." }),
   })
   .openapi("VoidRunOutcomesRequest");
 
@@ -2786,14 +2790,14 @@ export const VoidRunOutcomesResponseSchema = z
   .object({
     runId: z.string().uuid(),
     allocationVersion: z.number().int(),
-    status: z.enum(["voided", "already_voided"]),
+    status: z.enum(["voided", "already_voided", "nothing_to_void"]).openapi({ description: "nothing_to_void: a scoped void matching no occurrence (nothing written)." }),
     voidedCount: z.number().int().openapi({ description: "Occurrences taken back by this call (0 on a replay)." }),
     voidedAt: z.string().datetime(),
   })
   .openapi("VoidRunOutcomesResponse");
 
 const voidDescription =
-  "Takes back EVERY outcome occurrence this run declared (produced and consumed), when the declaration was made in error. Only the service that owns the run may (x-service-name must equal the run's serviceName, else 403 `not_run_owner`). From then on they count in no figure (cost per occurrence, outcome-cost totals, ledger check, coverage): the run's spend reads 'produced none', and stored days are recomputed by the next ledger refresh. The run then accepts no new declaration (409 `run_outcomes_voided`): re-declare the right facts on a NEW run. Audit: reason, voidedBy and the removed rows stay in the bronze log. Idempotent: a second call is 200 `already_voided`, nothing written.";
+  "Takes back EVERY outcome occurrence this run declared (produced and consumed), when the declaration was made in error. Only the service that owns the run may (x-service-name must equal the run's serviceName, else 403 `not_run_owner`). From then on they count in no figure (cost per occurrence, outcome-cost totals, ledger check, coverage): the run's spend reads 'produced none', and stored days are recomputed by the next ledger refresh. The run then accepts no new declaration (409 `run_outcomes_voided`): re-declare the right facts on a NEW run. Audit: reason, voidedBy and the removed rows stay in the bronze log. Idempotent: a second call is 200 `already_voided`, nothing written. SCOPED (body `scope: {direction, outcomeKey}`): takes back only those occurrences of the run, keeps the rest, and the run stays open to a corrected declaration; a scope matching nothing is 200 `nothing_to_void`; a run already voided whole is 200 `already_voided`.";
 
 for (const [path, auth] of [
   ["/v1/runs/{id}/outcomes/void", "x-org-id required (must be the run's org) + x-service-name required"],

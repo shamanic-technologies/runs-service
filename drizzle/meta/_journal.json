@@ -519,6 +519,13 @@
       "when": 1783260200000,
       "tag": "0073_subject_equivalences",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1783270200000,
+      "tag": "0074_scoped_void",
+      "breakpoints": true
     }
   ]
 }

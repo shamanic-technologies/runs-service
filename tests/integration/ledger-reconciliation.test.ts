@@ -27,7 +27,7 @@ vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
 const VERSIONS = [
   { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
 ];
-const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified", "email_checked"]);
+const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified", "email_checked", "email_found"]);
 
 // Days of their own: no other test file writes spend on them (the reconciliation is fleet-wide).
 const DAY = "2024-08-05";
@@ -285,6 +285,35 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect(r.totals.unknownProvenance).toBe("0.0000000000");
     const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${send.id}&direction=consumed&limit=10`).set(getInternalAuthHeaders());
     expect(occ.body.occurrences[0].consumption).toMatchObject({ provenance: "known", sourceRunId: check.id, reuse: false, standardCost: { grossCents: "4.0000000000" } });
+  });
+
+  it("SCOPED-VOID-1024: a void scoped to (direction, outcome key) keeps the rest and leaves the run open", async () => {
+    const day = "2024-08-12";
+    const r1 = await run(day, "09:00", { serviceName: "apollo-service", taskName: "verify-email" });
+    await cost(r1.id, "2", at(day, "09:01"));
+    expect((await declare("apollo-service", [
+      { runId: r1.id, occurredAt: "run_started_at",
+        produced: [{ outcomeKey: "email_checked", subjectService: "lead-service", subjectId: "SV1" }],
+        consumed: [{ outcomeKey: "email_found", subjectService: "lead-service", subjectId: "SV1" }] },
+    ])).status).toBe(201);
+    await refresh(day);
+    const voidIt = (body: unknown, serviceName = "apollo-service") =>
+      request(app).post(`/v1/platform-runs/${r1.id}/outcomes/void`).set(getPlatformAuthHeaders({ serviceName })).send(body);
+    const base = { reason: "wrong input key", voidedBy: "t" };
+    expect((await voidIt({ ...base, scope: { direction: "consumed", outcomeKey: "email_found" } }, "lead-service")).status).toBe(403);
+    const v = await voidIt({ ...base, scope: { direction: "consumed", outcomeKey: "email_found" } });
+    expect(v.status).toBe(201);
+    expect(v.body).toMatchObject({ status: "voided", voidedCount: 1 });
+    expect((await voidIt({ ...base, scope: { direction: "consumed", outcomeKey: "email_found" } })).body.status).toBe("nothing_to_void");
+    const occ = async () =>
+      (await request(app).get(`/internal/outcome-occurrences?runIds=${r1.id}&limit=10`).set(getInternalAuthHeaders())).body.occurrences.map((o: any) => `${o.direction}:${o.outcomeKey}`).sort();
+    expect(await occ()).toEqual(["produced:email_checked"]);
+    // The run stays open: the corrected consumption is declared on the SAME run.
+    expect((await declare("apollo-service", [
+      { runId: r1.id, occurredAt: "run_started_at", consumed: [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: "SV1" }] },
+    ])).status).toBe(201);
+    expect(await occ()).toEqual(["consumed:lead_found", "produced:email_checked"]);
+    expect((await recon(day, day)).daysStale).toEqual([day]);
   });
 
   it("refuses an unknown parameter", async () => {
