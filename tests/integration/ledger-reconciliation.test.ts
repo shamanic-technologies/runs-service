@@ -201,6 +201,30 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect(r.totals.spend.grossCents).toBe("7.0000000000");
   });
 
+  it("production its owner marks unattributed_production is its own line, never undeclared nor support", async () => {
+    const day = "2024-08-08";
+    const old = await run(day, "09:00", { serviceName: "scraping-service", taskName: "scrape" }); // before campaigns: no subject, no pipe
+    await cost(old.id, "8", at(day, "09:01"));
+    const fee = await run(day, "10:00", { serviceName: "stripe-service", taskName: "charge" });
+    await cost(fee.id, "2", at(day, "10:01"));
+    const mark = (kind: string, runId: string) =>
+      request(app).post("/internal/runs/support-marks").set(getInternalAuthHeaders()).send({ kind, reason: "t", markedBy: "t", runIds: [runId] });
+    expect((await mark("unattributed_production", old.id)).status).toBe(200);
+    expect((await mark("payment_fees", fee.id)).status).toBe(200);
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals).toMatchObject({
+      spend: { grossCents: "10.0000000000" },
+      unattributed: { grossCents: "8.0000000000" },
+      support: { grossCents: "2.0000000000" },
+      undeclared: { grossCents: "0.0000000000" },
+      differences: { grossCents: "0.0000000000" },
+    });
+    expect(r.totals.shares.unattributed.gross).toBe("0.8000000000");
+    expect(r).toMatchObject({ balanced: true, complete: true, declarationsComplete: true, reconciled: true });
+    expect(r.services.find((x: any) => x.serviceName === "scraping-service")).toMatchObject({ unattributedRuns: 1, undeclaredRuns: 0 });
+  });
+
   it("refuses an unknown parameter", async () => {
     const res = await request(app).get(`/internal/outcome-costs/reconciliation?since=${DAY}&foo=1`).set(getInternalAuthHeaders());
     expect(res.status).toBe(400);
