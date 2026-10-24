@@ -1411,6 +1411,13 @@ export function ledgerCheckInputOf(r: Pick<LedgerDayOrgRow, "ledger" | "allocate
 export const LEDGER_BACKFILL_DAYS = 60;
 /** Recent days are always recomputed: costs keep landing (holds turn actual, late writes). */
 const RECOMPUTE_RECENT_DAYS = 3;
+/**
+ * Today is recomputed every tick; the other recent days only once their stored
+ * figures are older than this (or stale). At ~3 min a day on the loaded box,
+ * recomputing all three every tick took ~9 of the 10-min budget and the history
+ * never converged while producers backfilled (23 of 264 days stored, 2026-10-24).
+ */
+const RECENT_DAY_MAX_AGE_MS = 60 * 60_000;
 const REFRESH_INTERVAL_MS = 15 * 60_000;
 const FIRST_TICK_MS = 60_000;
 
@@ -1584,6 +1591,17 @@ async function persistStaleDays(stale: Set<string>, sweptAt: Date): Promise<void
   });
 }
 
+/** The recent days a tick recomputes: today always, the others once older than RECENT_DAY_MAX_AGE_MS. */
+export function recentDaysDue(today: string, computed: Map<string, Date>, now: Date): string[] {
+  const out = [today];
+  for (let i = 1; i < RECOMPUTE_RECENT_DAYS; i++) {
+    const d = addDays(today, -i);
+    const at = computed.get(d);
+    if (!at || now.getTime() - at.getTime() > RECENT_DAY_MAX_AGE_MS) out.push(d);
+  }
+  return out;
+}
+
 /** Days the next tick must (re)compute: recent days, then missing or stale days newest first. */
 export async function daysToCompute(now = new Date(), firstDay?: string, persistStale = false): Promise<string[]> {
   const today = utcDay(now);
@@ -1600,7 +1618,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();
   for (let day = first; day <= today; day = addDays(day, 1)) if (!computed.has(day)) out.add(day);
-  for (let i = 0; i < RECOMPUTE_RECENT_DAYS; i++) out.add(addDays(today, -i));
+  for (const d of recentDaysDue(today, computed, now)) out.add(d);
   const stale = await currentStale(rows);
   if (persistStale) await persistStaleDays(stale, sweptAt);
   for (const day of stale) out.add(day);
