@@ -29,6 +29,7 @@ import {
   effectiveDeclaredAt,
   SPEND_FREE_SQL,
   listOccurrences,
+  staleDaysIn,
   utcDay,
   type Direction,
   type Money,
@@ -45,6 +46,7 @@ import {
   type SupportFunction,
 } from "../services/support-marks.js";
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
+import { readReconciliation } from "../services/ledger-reconciliation.js";
 import {
   MAX_OUTCOME_COST_GROUPS,
   OUTCOME_COST_DIMENSIONS,
@@ -610,23 +612,26 @@ async function missingDays(since: string, until: string): Promise<string[]> {
 }
 
 /**
- * Days not stored, and days stored without the support split (before migration
+ * Days not stored or STALE (stored before a fact recorded since: a backfilled
+ * declaration, a mark, a void, spend landing late; listed apart in daysStale),
+ * and days stored without the support split (before migration
  * 0064, until the refresher recomputes them): on those, support reads 0 and
  * the spend sits in undeclared.
  */
-async function dayStatus(since: string, until: string): Promise<{ daysMissing: string[]; supportDaysMissing: string[] }> {
+async function dayStatus(since: string, until: string): Promise<{ daysMissing: string[]; daysStale: string[]; supportDaysMissing: string[] }> {
   const rows = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
   const split = new Map(rows.map((r) => [r.day as string, r.support_split === true]));
+  const stale = new Set(await staleDaysIn(since, until));
   const daysMissing: string[] = [];
   const supportDaysMissing: string[] = [];
   for (let d = since; d <= until; d = addDays(d, 1)) {
-    if (!split.has(d)) daysMissing.push(d);
+    if (!split.has(d) || stale.has(d)) daysMissing.push(d);
     if (!split.get(d)) supportDaysMissing.push(d);
   }
-  return { daysMissing, supportDaysMissing };
+  return { daysMissing, daysStale: [...stale], supportDaysMissing };
 }
 
 /** Money per function of a stored support_by_function jsonb (NULL = before 0064: none stated). */
@@ -738,7 +743,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         unknownProvenanceCount: Number(r.unknown_provenance_count),
       };
     });
-    const { daysMissing, supportDaysMissing } = await dayStatus(range.since, range.until);
+    const { daysMissing, daysStale, supportDaysMissing } = await dayStatus(range.since, range.until);
     const mismatches = rows.filter((r) => !r.balanced);
     const support = supportTotal(totalSupport);
     const outcomeSpend = subMoney(totals.ledger, support);
@@ -750,6 +755,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       balanced: mismatches.length === 0,
       complete: daysMissing.length === 0,
       daysMissing,
+      daysStale,
       supportComplete: supportDaysMissing.length === 0,
       supportDaysMissing,
       supportFunctions: SUPPORT_FUNCTION_DESCRIPTIONS,
@@ -771,6 +777,37 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
     });
   } catch (err) {
     console.error("[Runs Service] ledger check read failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * The reconciliation features-service gates on (LEDGER-HISTORY-1024-RUNS): per UTC
+ * day since the first day of spend (default) to yesterday, fleet-wide, spend =
+ * declared production + normal loss + unpooled loss + undeclared + support to the
+ * cent, the share of each, the services still spending without declaring, and the
+ * consumptions resolving to no producer. `reconciled` = every stored day balances,
+ * every day is stored under the current facts, and nothing is undeclared or of
+ * unknown provenance.
+ */
+router.get("/internal/outcome-costs/reconciliation", requireInternalAuth, async (req, res) => {
+  try {
+    const unknown = Object.keys(req.query).filter((k) => k !== "since" && k !== "until");
+    if (unknown.length > 0) {
+      res.status(400).json({ error: `unknown query parameter(s): ${unknown.join(", ")}; accepted: since, until` });
+      return;
+    }
+    const q = req.query as Record<string, string | undefined>;
+    const until = q.until ?? addDays(utcDay(new Date()), -1);
+    const first = q.since ? null : await firstOutcomeCostDay();
+    const range = parseRange({ since: q.since ?? (first && first <= until ? first : until), until }, until, 1);
+    if (typeof range === "string") {
+      res.status(400).json({ error: range });
+      return;
+    }
+    res.json(await readReconciliation(range.since, range.until, await dayStatus(range.since, range.until)));
+  } catch (err) {
+    console.error("[Runs Service] ledger reconciliation read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -802,7 +839,7 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
       WHERE ${sql.join(filters, sql` AND `)}
       ORDER BY day, service_name, task_name
     `)) as any[];
-    const { daysMissing, supportDaysMissing } = await dayStatus(range.since, range.until);
+    const { daysMissing, daysStale, supportDaysMissing } = await dayStatus(range.since, range.until);
     type Acc = {
       spendGross: Decimal; coveredGross: Decimal; spendNet: Decimal; coveredNet: Decimal;
       support: Partial<Record<SupportFunction, { gross: Decimal; net: Decimal }>>;
@@ -854,6 +891,7 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
       since: range.since,
       until: range.until,
       daysMissing,
+      daysStale,
       supportComplete: supportDaysMissing.length === 0,
       supportDaysMissing,
       fleet: [...fleet.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([day, a]) => point(day, a)),
@@ -869,6 +907,7 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
 /** Every query param the totals read understands: anything else is a 400, never a cut silently dropped. */
 const OUTCOME_COST_QUERY_PARAMS = new Set([
   "groupBy", "since", "until", "outcomeKey", "orgId", "costOrgId", "brandId", "campaignId", "workflowSlug", "featureSlug",
+  "audienceId", "serviceName",
   "runStartUntil", "sourceDayUntil", "sourceRunStartUntil",
 ]);
 
@@ -915,6 +954,8 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         campaignId: q.campaignId,
         workflowSlug: q.workflowSlug,
         featureSlug: q.featureSlug,
+        audienceId: q.audienceId,
+        serviceName: q.serviceName,
         outcomeKey: q.outcomeKey ? normalizeOutcomeKey(q.outcomeKey) : undefined,
         runStartUntil: q.runStartUntil,
         sourceDayUntil: q.sourceDayUntil,
@@ -932,6 +973,7 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
       maxGroups: MAX_OUTCOME_COST_GROUPS,
       complete: totals.daysMissing.length === 0,
       daysMissing: totals.daysMissing,
+      daysStale: totals.daysStale,
       supportComplete: totals.supportDaysMissing.length === 0,
       supportDaysMissing: totals.supportDaysMissing,
       produced: totals.produced.map((g) => ({ ...g, cost: wireMoney(g.cost) })),

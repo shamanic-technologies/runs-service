@@ -34,7 +34,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
-- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
+- `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` (+ `src/services/ledger-reconciliation.ts`, "Ledger reconciliation") — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
 - `src/services/support-marks.ts` — support marks (which support function a run serves), doors + selection. See "Support spend, named and reported apart".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -893,6 +893,11 @@ concept, a value-based joint-cost split.
   stored per day (`cost_loss_pool_days`) so the per-occurrence read adds the same shares (Σ occurrences == allocated);
   `cost_ledger_days.loss_*` = the part of allocated that is loss, served as `normalLoss` on ledger-check. A NULL workflow never
   pools: a declaration gap stays visible as undeclared. v1 rows are kept, every day recomputes under v2.
+- **Allocation v3 = v2 with the loss pool keyed on the CAMPAIGN (migration 0069, LEDGER-HISTORY-1024-RUNS)**: pool = (UTC day, cost org,
+  workflow W, campaign C, NULL = no campaign); v2 moved campaign A's loss onto campaign B's units of the same workflow. A campaign that
+  produced nothing on W that day keeps its loss as produced-none under its own tags (= `unpooledLoss` on the reconciliation; features
+  pools it on the pipe's output). `outcome_cost_days` also carries the row's run's `audience_id` / `service_name` and the producing
+  run's `source_audience_id` (dims `audienceId`, `serviceName`, `sourceAudienceId`); 'none' rows: n = distinct spending runs.
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
@@ -909,6 +914,21 @@ concept, a value-based joint-cost split.
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
+
+## Ledger reconciliation — `GET /internal/outcome-costs/reconciliation` (LEDGER-HISTORY-1024-RUNS)
+
+The gate every ledger reader switches on (owner 2026-10-24: all readers at once, the day it reconciles). Fleet-wide, per UTC day
+from the first day of spend (default) to yesterday: spend = declaredProduction + normalLoss + unpooledLoss + undeclared + support,
+exact on every basis, with shares; `services[]` (per SPENDING service: undeclared + runs, unpooled loss, support), `provenance[]`
+(per consumed key x consuming service: unknown provenance). `reconciled` = balanced (parts == spend, every (day, org) check, the two
+stored produced-none sources agree) AND complete AND declarationsComplete (no undeclared, no unknown provenance). Stored rows only.
+- **Stale days** (`staleComputedDays`): a stored day computed before a fact recorded since (declaration incl. backfill, support mark,
+  void/unmark, spend landing on a past day: a `cost.materialized` or incurred `cost.added` whose row is dated before the event's day,
+  3,255 late materializations in the week to 2026-10-24) is listed in `daysMissing` AND `daysStale` on every ledger read (ledger-check,
+  outcome-coverage, outcome-costs, reconciliation), so `complete` is false and its figures stay out of the totals until recomputed.
+  The full scan runs in the refresher's tick (`persistStaleDays`: `cost_ledger_computed_days.stale` + `cost_ledger_stale_sweeps.swept_at`,
+  taken before its reads); a read adds only facts recorded after `swept_at`, never a backfill's whole history.
+- Guard: `tests/integration/ledger-reconciliation.test.ts` (red if the campaign key is dropped from the pool).
 
 ## Taking a declaration back — `POST /v1/runs/:id/outcomes/void` (migration 0059, RUNS-VOID-1023)
 

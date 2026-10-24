@@ -5338,6 +5338,13 @@
               "type": "string"
             }
           },
+          "daysStale": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Stored days computed before a fact recorded since (also listed in daysMissing)."
+          },
           "supportComplete": {
             "type": "boolean",
             "description": "Every day of the range is stored WITH the support split (supportDaysMissing empty)."
@@ -5808,6 +5815,7 @@
           "balanced",
           "complete",
           "daysMissing",
+          "daysStale",
           "supportComplete",
           "supportDaysMissing",
           "supportFunctions",
@@ -6264,6 +6272,12 @@
             "type": "string"
           },
           "daysMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "daysStale": {
             "type": "array",
             "items": {
               "type": "string"
@@ -6802,6 +6816,7 @@
           "since",
           "until",
           "daysMissing",
+          "daysStale",
           "supportComplete",
           "supportDaysMissing",
           "fleet",
@@ -6836,13 +6851,21 @@
           },
           "complete": {
             "type": "boolean",
-            "description": "Every day of the range holds stored totals (daysMissing empty)."
+            "description": "Every day of the range holds stored totals under the current facts (daysMissing empty)."
           },
           "daysMissing": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Days not stored, or stored but STALE (a declaration, mark, void or late spend recorded after the day was computed): never read as complete."
+          },
+          "daysStale": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The stale part of daysMissing (recomputed by the refresher)."
           },
           "supportComplete": {
             "type": "boolean"
@@ -7099,11 +7122,895 @@
           "maxGroups",
           "complete",
           "daysMissing",
+          "daysStale",
           "supportComplete",
           "supportDaysMissing",
           "produced",
           "consumed",
           "scope"
+        ]
+      },
+      "LedgerReconciliationResponse": {
+        "type": "object",
+        "properties": {
+          "allocationVersion": {
+            "type": "integer"
+          },
+          "since": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string"
+          },
+          "reconciled": {
+            "type": "boolean",
+            "description": "balanced AND complete AND declarationsComplete: the ledger can be read as the whole truth."
+          },
+          "balanced": {
+            "type": "boolean",
+            "description": "Every stored day: the parts sum to spend exactly on every basis, every (day, org) ledger check balances, and the two stored sources of produced-none agree."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Every day stored under the current facts (no missing, no stale day) with its support split."
+          },
+          "declarationsComplete": {
+            "type": "boolean",
+            "description": "No undeclared spend and no consumption of unknown provenance in the range."
+          },
+          "daysMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Days not stored or stale (their figures are not in totals)."
+          },
+          "daysStale": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supportDaysMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unbalancedDays": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "spend": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Every actual + refunded cost row of the day(s) (the runs ledger)."
+              },
+              "declaredProduction": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend carried by the run that declared the outcome (its own subtree, rules 1-3)."
+              },
+              "normalLoss": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend of runs that produced nothing, carried by the units their pipe produced in their campaign that day (rule 2, allocation v3)."
+              },
+              "unpooledLoss": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend of a pipe's runs (workflow slug) whose campaign produced nothing on that pipe that day: produced none, kept under its own campaign (features pools it on the pipe's output)."
+              },
+              "undeclared": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
+              },
+              "support": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend named support by its owner (support functions)."
+              },
+              "reuseGain": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Standard charges of reuses: no spend behind them, never part of spend."
+              },
+              "differences": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled."
+              },
+              "shares": {
+                "type": "object",
+                "properties": {
+                  "declaredProduction": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
+                  "normalLoss": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
+                  "unpooledLoss": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
+                  "undeclared": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
+                  "support": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  }
+                },
+                "required": [
+                  "declaredProduction",
+                  "normalLoss",
+                  "unpooledLoss",
+                  "undeclared",
+                  "support"
+                ]
+              },
+              "consumptions": {
+                "type": "string",
+                "description": "Consumptions declared (weights, 10 decimals)."
+              },
+              "unknownProvenance": {
+                "type": "string",
+                "description": "Of which no run declared producing the consumed occurrence."
+              },
+              "unknownProvenanceShare": {
+                "type": "string",
+                "nullable": true
+              },
+              "balanced": {
+                "type": "boolean"
+              },
+              "splitConsistent": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "spend",
+              "declaredProduction",
+              "normalLoss",
+              "unpooledLoss",
+              "undeclared",
+              "support",
+              "reuseGain",
+              "differences",
+              "shares",
+              "consumptions",
+              "unknownProvenance",
+              "unknownProvenanceShare",
+              "balanced",
+              "splitConsistent"
+            ]
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "serviceName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "undeclared": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ]
+                },
+                "undeclaredRuns": {
+                  "type": "integer",
+                  "description": "Σ per day of the distinct runs with undeclared spend (a run spending on two days counts twice)."
+                },
+                "unpooledLoss": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ]
+                },
+                "unpooledLossRuns": {
+                  "type": "integer"
+                },
+                "support": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ]
+                },
+                "undeclaredShareOfSpend": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "serviceName",
+                "undeclared",
+                "undeclaredRuns",
+                "unpooledLoss",
+                "unpooledLossRuns",
+                "support",
+                "undeclaredShareOfSpend"
+              ]
+            },
+            "description": "Per SPENDING service, undeclared first: who still spends without declaring."
+          },
+          "provenance": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "consumedOutcomeKey": {
+                  "type": "string"
+                },
+                "consumingServiceName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "consumptions": {
+                  "type": "string"
+                },
+                "unknownProvenance": {
+                  "type": "string"
+                },
+                "unknownShare": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "consumedOutcomeKey",
+                "consumingServiceName",
+                "consumptions",
+                "unknownProvenance",
+                "unknownShare"
+              ]
+            },
+            "description": "Per consumed outcome x consuming service, most unknown first: the producer of that outcome key has not declared the occurrence consumed."
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "spend": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Every actual + refunded cost row of the day(s) (the runs ledger)."
+                },
+                "declaredProduction": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend carried by the run that declared the outcome (its own subtree, rules 1-3)."
+                },
+                "normalLoss": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend of runs that produced nothing, carried by the units their pipe produced in their campaign that day (rule 2, allocation v3)."
+                },
+                "unpooledLoss": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend of a pipe's runs (workflow slug) whose campaign produced nothing on that pipe that day: produced none, kept under its own campaign (features pools it on the pipe's output)."
+                },
+                "undeclared": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
+                },
+                "support": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend named support by its owner (support functions)."
+                },
+                "reuseGain": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Standard charges of reuses: no spend behind them, never part of spend."
+                },
+                "differences": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled."
+                },
+                "shares": {
+                  "type": "object",
+                  "properties": {
+                    "declaredProduction": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
+                    "normalLoss": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
+                    "unpooledLoss": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
+                    "undeclared": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
+                    "support": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    }
+                  },
+                  "required": [
+                    "declaredProduction",
+                    "normalLoss",
+                    "unpooledLoss",
+                    "undeclared",
+                    "support"
+                  ]
+                },
+                "consumptions": {
+                  "type": "string",
+                  "description": "Consumptions declared (weights, 10 decimals)."
+                },
+                "unknownProvenance": {
+                  "type": "string",
+                  "description": "Of which no run declared producing the consumed occurrence."
+                },
+                "day": {
+                  "type": "string"
+                },
+                "stored": {
+                  "type": "boolean"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "balanced": {
+                  "type": "boolean"
+                },
+                "splitConsistent": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "spend",
+                "declaredProduction",
+                "normalLoss",
+                "unpooledLoss",
+                "undeclared",
+                "support",
+                "reuseGain",
+                "differences",
+                "shares",
+                "consumptions",
+                "unknownProvenance",
+                "day",
+                "stored",
+                "stale",
+                "balanced",
+                "splitConsistent"
+              ]
+            }
+          }
+        },
+        "required": [
+          "allocationVersion",
+          "since",
+          "until",
+          "reconciled",
+          "balanced",
+          "complete",
+          "declarationsComplete",
+          "daysMissing",
+          "daysStale",
+          "supportDaysMissing",
+          "unbalancedDays",
+          "totals",
+          "services",
+          "provenance",
+          "days"
         ]
       }
     },
@@ -12969,10 +13876,10 @@
           {
             "schema": {
               "type": "string",
-              "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section."
+              "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section."
             },
             "required": false,
-            "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section.",
+            "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section.",
             "name": "groupBy",
             "in": "query"
           },
@@ -13057,6 +13964,26 @@
           {
             "schema": {
               "type": "string",
+              "description": "The row's run's audience (the one its lead was served under)."
+            },
+            "required": false,
+            "description": "The row's run's audience (the one its lead was served under).",
+            "name": "audienceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The row's run's service (declaring / consuming / spending run)."
+            },
+            "required": false,
+            "description": "The row's run's service (declaring / consuming / spending run).",
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "description": "YYYY-MM-DD inclusive: only rows whose run started on or before this UTC day (every section)."
             },
             "required": false,
@@ -13118,6 +14045,64 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/outcome-costs/reconciliation": {
+      "get": {
+        "summary": "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + support, to the cent (service-auth)",
+        "description": "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "YYYY-MM-DD (default: the first day of spend, capped to 400 days)."
+            },
+            "required": false,
+            "description": "YYYY-MM-DD (default: the first day of spend, capped to 400 days).",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "YYYY-MM-DD inclusive (default: yesterday UTC)."
+            },
+            "required": false,
+            "description": "YYYY-MM-DD inclusive (default: yesterday UTC).",
+            "name": "until",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LedgerReconciliationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range or unknown parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }
