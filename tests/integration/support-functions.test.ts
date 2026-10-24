@@ -342,4 +342,24 @@ describe("Support functions: support spend named and reported apart", () => {
     expect(sent.cost.grossCents).toBe("10.0000000000");
     expect(oc.body.scope[0].undeclared.grossCents).toBe("2.0000000000");
   });
+
+  it("offAncestorMarkOnly leaves out runs whose cost already stops on an ancestor's mark, counted", async () => {
+    const DAY5 = "2025-04-19";
+    const mk = (taskName: string, hour: string, parentRunId?: string) =>
+      insertTestRun({ organizationId: ORG, serviceName: "postmark-service", taskName, status: "completed", parentRunId, startedAt: new Date(`${DAY5}T${hour}:00Z`) });
+    const parent = await insertTestRun({ organizationId: ORG, serviceName: "lifecycle-service", taskName: "lifecycle-email", status: "completed", startedAt: new Date(`${DAY5}T08:00:00Z`) });
+    expect((await staffMark({ kind: "retired_product", reason: "retired", markedBy: "t", runIds: [parent.id] })).status).toBe(200);
+    const underMark = await mk("email-send", "09:00", parent.id);
+    await cost(underMark.id, "1", new Date(`${DAY5}T09:01:00Z`));
+    const free = await mk("email-send", "10:00");
+    await cost(free.id, "1", new Date(`${DAY5}T10:01:00Z`));
+    const body = { kind: "product_feature", reason: "t", markedBy: "t", taskNames: ["email-send"], startedAfter: `${DAY5}T00:00:00Z`, startedBefore: `${DAY5}T23:59:59Z`, withSpendOnly: true };
+    const plain = await ownerMark("preview", body, "postmark-service");
+    expect(plain.body).toMatchObject({ toMarkCount: 2, onAncestorMarkNowCount: 1, leftOnAncestorMarkCount: 0 });
+    const skip = await ownerMark("preview", { ...body, offAncestorMarkOnly: true }, "postmark-service");
+    expect(skip.body).toMatchObject({ toMarkCount: 1, onAncestorMarkNowCount: 0, leftOnAncestorMarkCount: 1 });
+    expect((await ownerMark("apply", { ...body, offAncestorMarkOnly: true }, "postmark-service")).body).toMatchObject({ markedCount: 1 });
+    const marks = (await db.execute(sql`SELECT run_id, kind FROM run_support_marks WHERE run_id = ANY(${`{${[underMark.id, free.id].join(",")}}`}::uuid[])`)) as any[];
+    expect(marks).toEqual([{ run_id: free.id, kind: "product_feature" }]);
+  });
 });

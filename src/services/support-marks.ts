@@ -92,6 +92,8 @@ export interface SupportSelection {
   withSpendOnly?: boolean;
   /** Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there). */
   offOutcomeOnly?: boolean;
+  /** Leave out runs whose cost already stops on an ANCESTOR's support mark (marking them would relabel that owner's decision). */
+  offAncestorMarkOnly?: boolean;
 }
 
 export interface SupportSelectionResult {
@@ -107,7 +109,41 @@ export interface SupportSelectionResult {
   onOutcomeNowCount: number | null;
   /** offOutcomeOnly: runs left out because their cost rides an ancestor's outcome today (0 without it). Null = not computed (tooMany). */
   leftOnOutcomeCount: number | null;
+  /** Runs to mark whose cost stops on an ancestor's support mark today: the mark relabels it (0 with offAncestorMarkOnly). Null = not computed (tooMany). */
+  onAncestorMarkNowCount: number | null;
+  /** offAncestorMarkOnly: runs left out because their cost stops on an ancestor's support mark (0 without it). Null = not computed (tooMany). */
+  leftOnAncestorMarkCount: number | null;
   tooMany: boolean;
+}
+
+/**
+ * Runs (of `runIds`, each unmarked and declaring nothing) whose walk up the
+ * parent chain stops on a SUPPORT MARK before any declaring run: their cost is
+ * already stated support under an ancestor's function. Same walk as the ledger
+ * (nearest declaring or marked ancestor wins).
+ */
+async function onAncestorMark(runIds: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let i = 0; i < runIds.length; i += 5000) {
+    const ids = runIds.slice(i, i + 5000);
+    const rows = (await db.execute(sql`
+      WITH RECURSIVE walk(run_id, parent_id, depth, stop) AS (
+        SELECT r.id, r.parent_run_id, 0, NULL::text
+        FROM unnest(${`{${ids.join(",")}}`}::uuid[]) AS i(id)
+        CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = i.id OFFSET 0) r
+        UNION ALL
+        SELECT w.run_id, p.parent_run_id, w.depth + 1,
+               CASE WHEN EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = p.id AND o.direction = 'produced') THEN 'outcome'
+                    WHEN EXISTS (SELECT 1 FROM run_support_marks m WHERE m.run_id = p.id) THEN 'mark' END
+        FROM walk w
+        CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = w.parent_id OFFSET 0) p
+        WHERE w.stop IS NULL AND w.parent_id IS NOT NULL AND w.depth < 1000
+      )
+      SELECT run_id FROM walk WHERE stop = 'mark'
+    `)) as any[];
+    for (const r of rows) out.add(r.run_id);
+  }
+  return out;
 }
 
 /**
@@ -154,10 +190,15 @@ export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPO
     const keys = await anchorKeysOf(withParent.slice(i, i + 5000), db);
     for (const [id, k] of keys) if (k.length > 0) onOutcome.add(id);
   }
-  const toMarkRows = s.offOutcomeOnly ? candidates.filter((r) => !onOutcome.has(r.id)) : candidates;
+  const onMark = tooMany ? new Set<string>() : await onAncestorMark(withParent);
+  const toMarkRows = candidates
+    .filter((r) => !(s.offOutcomeOnly && onOutcome.has(r.id)))
+    .filter((r) => !(s.offAncestorMarkOnly && onMark.has(r.id)));
   // Over the cap the walk is not run: the count is unknown, never a reassuring 0.
   const onOutcomeNowCount = tooMany ? null : s.offOutcomeOnly ? 0 : onOutcome.size;
   const leftOnOutcomeCount = tooMany ? null : s.offOutcomeOnly ? onOutcome.size : 0;
+  const onAncestorMarkNowCount = tooMany ? null : s.offAncestorMarkOnly ? 0 : onMark.size;
+  const leftOnAncestorMarkCount = tooMany ? null : s.offAncestorMarkOnly ? onMark.size : 0;
   return {
     toMark: toMarkRows.map((r) => r.id as string),
     matchedRunCount: rows.length,
@@ -169,6 +210,8 @@ export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPO
     },
     onOutcomeNowCount,
     leftOnOutcomeCount,
+    onAncestorMarkNowCount,
+    leftOnAncestorMarkCount,
     tooMany,
   };
 }
@@ -193,7 +236,7 @@ export interface MarkedSelectionResult {
  * function to remove). Preview and apply share it.
  */
 export async function selectMarkedRuns(
-  s: Omit<SupportSelection, "withSpendOnly" | "offOutcomeOnly"> & { kind?: SupportFunction },
+  s: Omit<SupportSelection, "withSpendOnly" | "offOutcomeOnly" | "offAncestorMarkOnly"> & { kind?: SupportFunction },
   maxRuns = MAX_SUPPORT_MARK_RUNS,
 ): Promise<MarkedSelectionResult> {
   const where: SQL[] = s.runIds ? [sql`r.id = ANY(${`{${s.runIds.join(",")}}`}::uuid[])`] : [];
