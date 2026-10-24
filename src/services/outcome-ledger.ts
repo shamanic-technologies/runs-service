@@ -790,7 +790,16 @@ export interface LedgerDay {
   coverage: CoverageDayRow[];
   /** Rule 4b pools of the day: loss of pipe W in a cost org, carried by `units` occurrences W produced there that day. */
   lossPools: LossPool[];
+  /** Each produced occurrence's share of its pool's loss (0075): what the occurrence read serves for this day. */
+  lossOccurrences: LossOccurrenceShare[];
   unplacedRuns: number;
+}
+
+export interface LossOccurrenceShare {
+  occurrenceId: string;
+  /** Org of the pool (= cost org of the lost rows). */
+  organizationId: string | null;
+  loss: Money;
 }
 
 export interface LossPool {
@@ -1100,6 +1109,10 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
         'gross', l.gross::text, 'net', l.net::text, 'vendor', l.vendor::text, 'unpriced', l.unpriced::text))
         FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.pool_key = l.pool_key
                                   AND p.campaign_id IS NOT DISTINCT FROM l.campaign_id)), '[]'::json) AS loss_pools,
+      COALESCE((SELECT json_agg(json_build_object(
+        'id', x.occurrence_id, 'org_id', x.org_key,
+        'gross', x.gross::text, 'net', x.net::text, 'vendor', x.vendor::text, 'unpriced', x.unpriced::text) ORDER BY x.occurrence_id)
+        FROM loss_shares x), '[]'::json) AS loss_occurrences,
       (SELECT COUNT(*) FROM walked WHERE NOT found AND parent_id IS NOT NULL AND depth >= ${MAX_WALK_DEPTH}) AS unplaced_runs
   `;
 }
@@ -1552,6 +1565,11 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
           .map((x) => [x.kind, { gross: fx(x.gross), net: fx(x.net) }]),
       ),
     })),
+    lossOccurrences: (row.loss_occurrences as any[]).map((r) => ({
+      occurrenceId: r.id,
+      organizationId: r.org_id ?? null,
+      loss: { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) },
+    })),
     lossPools: (row.loss_pools as any[]).map((r) => ({
       organizationId: r.org_id ?? null,
       poolKey: r.pool_key,
@@ -1572,6 +1590,16 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
     await tx.execute(sql`DELETE FROM outcome_coverage_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     await tx.execute(sql`DELETE FROM outcome_cost_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     await tx.execute(sql`DELETE FROM cost_loss_pool_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    await tx.execute(sql`DELETE FROM cost_loss_occurrence_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    if (d.lossOccurrences.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO cost_loss_occurrence_days (day, allocation_version, occurrence_id, organization_id, gross, net, vendor, unpriced_gross)
+        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.id, x.org, x.g, x.n, x.v, x.u
+        FROM jsonb_to_recordset(${JSON.stringify(
+          d.lossOccurrences.map((o) => ({ id: o.occurrenceId, org: o.organizationId, g: o.loss.gross, n: o.loss.net, v: o.loss.vendor, u: o.loss.unpricedGross })),
+        )}::jsonb) AS x(id uuid, org uuid, g numeric, n numeric, v numeric, u numeric)
+      `);
+    }
     if (d.lossPools.length > 0) {
       await tx.execute(sql`
         INSERT INTO cost_loss_pool_days (day, allocation_version, organization_id, pool_key, workflow_slug, campaign_id, units, gross, net, vendor, unpriced_gross)
@@ -1659,9 +1687,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, stale = false
     `);
   });
 }
@@ -1713,6 +1741,13 @@ export function ledgerCheckInputOf(r: Pick<LedgerDayOrgRow, "ledger" | "allocate
 export const LEDGER_BACKFILL_DAYS = 60;
 /** Recent days are always recomputed: costs keep landing (holds turn actual, late writes). */
 const RECOMPUTE_RECENT_DAYS = 3;
+/**
+ * Today is recomputed every tick; the other recent days only once their stored
+ * figures are older than this (or stale). At ~3 min a day on the loaded box,
+ * recomputing all three every tick took ~9 of the 10-min budget and the history
+ * never converged while producers backfilled (23 of 264 days stored, 2026-10-24).
+ */
+const RECENT_DAY_MAX_AGE_MS = 60 * 60_000;
 const REFRESH_INTERVAL_MS = 15 * 60_000;
 const FIRST_TICK_MS = 60_000;
 
@@ -1907,6 +1942,17 @@ async function persistStaleDays(stale: Set<string>, sweptAt: Date): Promise<void
   });
 }
 
+/** The recent days a tick recomputes: today always, the others once older than RECENT_DAY_MAX_AGE_MS. */
+export function recentDaysDue(today: string, computed: Map<string, Date>, now: Date): string[] {
+  const out = [today];
+  for (let i = 1; i < RECOMPUTE_RECENT_DAYS; i++) {
+    const d = addDays(today, -i);
+    const at = computed.get(d);
+    if (!at || now.getTime() - at.getTime() > RECENT_DAY_MAX_AGE_MS) out.push(d);
+  }
+  return out;
+}
+
 /** Days the next tick must (re)compute: recent days, then missing or stale days newest first. */
 export async function daysToCompute(now = new Date(), firstDay?: string, persistStale = false): Promise<string[]> {
   const today = utcDay(now);
@@ -1914,7 +1960,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -1923,17 +1969,22 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();
   for (let day = first; day <= today; day = addDays(day, 1)) if (!computed.has(day)) out.add(day);
-  for (let i = 0; i < RECOMPUTE_RECENT_DAYS; i++) out.add(addDays(today, -i));
+  for (const d of recentDaysDue(today, computed, now)) out.add(d);
   const stale = await currentStale(rows);
   if (persistStale) await persistStaleDays(stale, sweptAt);
   for (const day of stale) out.add(day);
+  // Days stored before 0075 (no per-occurrence loss shares) come LAST: they are
+  // complete for every ledger read, only the occurrence read stays live on them.
+  const noLossShares = new Set(rows.filter((r) => !r.loss_occurrences).map((r) => r.day as string));
+  for (const day of noLossShares) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers
   // backfill, the newest days stay stale on every tick, and ranked by date alone
   // they took every slot and the older missing days were never reached (2026-10-23:
   // 8 days stored out of 265).
   const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(today, -i)));
-  const rank = (d: string) => (recent.has(d) ? 0 : computed.has(d) ? 2 : 1);
+  const staleSet = new Set(stale);
+  const rank = (d: string) => (recent.has(d) ? 0 : !computed.has(d) ? 1 : staleSet.has(d) || !noLossShares.has(d) ? 2 : 3);
   return [...out].sort((a, b) => rank(a) - rank(b) || (a < b ? 1 : -1));
 }
 
@@ -2119,14 +2170,28 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
     ORDER BY o.id, g.day, g.org_key NULLS FIRST
   `)) as any[];
   // Rule 4b: each occurrence's share of the loss pool of (its declaration's UTC
-  // day, its run's org, its run's pool key and campaign), as the day stored it. Units = the
-  // pipeUnitsSql definition (same predicate, same order).
-  const loss = (await exec.execute(sql`
+  // day, its run's org, its run's pool key and campaign), as the day stored it.
+  // A day stored since 0075 holds the shares themselves (read by occurrence id);
+  // an older day is ranked live below. Units = the pipeUnitsSql definition (same
+  // predicate, same order), so both give the same shares.
+  const stored = (await exec.execute(sql`
+    SELECT s.occurrence_id AS id, to_char(s.day, 'YYYY-MM-DD') AS day, s.organization_id::text AS org_key,
+           s.gross::text AS gross, s.net::text AS net, s.vendor::text AS vendor, s.unpriced_gross::text AS unpriced
+    FROM run_outcomes o
+    JOIN cost_ledger_computed_days c
+      ON c.day = (o.declared_at AT TIME ZONE 'UTC')::date AND c.allocation_version = ${ALLOCATION_VERSION} AND c.loss_occurrences
+    JOIN cost_loss_occurrence_days s
+      ON s.allocation_version = ${ALLOCATION_VERSION} AND s.occurrence_id = o.id AND s.day = c.day
+    WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[])
+  `)) as any[];
+  const live = (await exec.execute(sql`
     WITH lo AS MATERIALIZED (
       SELECT o.id, (o.declared_at AT TIME ZONE 'UTC')::date AS day, r.org_key, r.pool_key, r.campaign_id
       FROM run_outcomes o
       CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, ${poolKeySql("")} AS pool_key, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
       WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[])
+        AND NOT EXISTS (SELECT 1 FROM cost_ledger_computed_days c
+                        WHERE c.day = (o.declared_at AT TIME ZONE 'UTC')::date AND c.allocation_version = ${ALLOCATION_VERSION} AND c.loss_occurrences)
     ),
     g AS MATERIALIZED (
       SELECT p.day, p.organization_id::text AS org_key, p.pool_key, p.campaign_id,
@@ -2158,6 +2223,7 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
     ) o
     WHERE o.id IN (SELECT id FROM lo)
   `)) as any[];
+  const loss = [...stored, ...live];
   const out = new Map<string, { total: Money; slices: CostSlice[] }>();
   for (const r of rows) {
     if (!out.has(r.id)) out.set(r.id, { total: ZERO(), slices: [] });

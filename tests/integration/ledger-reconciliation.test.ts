@@ -250,6 +250,23 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     });
     const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id}&limit=10`).set(getInternalAuthHeaders());
     expect(occ.body.occurrences[0].cost.grossCents).toBe("8.0000000000");
+
+    // LOSS-SHARE-STORED-1024: the day stored each occurrence's loss share; the read serves it,
+    // and a day stored before 0075 (flag off) ranks it live to the same body.
+    const [st] = (await db.execute(sql`SELECT count(*)::int AS n, sum(gross)::text AS g FROM cost_loss_occurrence_days WHERE day = ${day}::date`)) as any[];
+    expect(st).toMatchObject({ n: 1, g: "5.0000000000" });
+    await db.execute(sql`UPDATE cost_ledger_computed_days SET loss_occurrences = false WHERE day = ${day}::date`);
+    const liveOcc = await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id}&limit=10`).set(getInternalAuthHeaders());
+    expect(liveOcc.body).toEqual(occ.body);
+    // A day without stored shares is queued for a recompute, after a far later day (old days come last).
+    const queue = await daysToCompute(new Date("2024-08-20T12:00:00Z"), day);
+    expect(queue).toContain(day);
+    expect(queue.indexOf(day)).toBeGreaterThan(queue.indexOf("2024-08-12"));
+    await db.execute(sql`DELETE FROM cost_loss_occurrence_days WHERE day = ${day}::date`);
+    expect((await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id}&limit=10`).set(getInternalAuthHeaders())).body).toEqual(occ.body);
+    await refresh(day);
+    const [flag] = (await db.execute(sql`SELECT loss_occurrences FROM cost_ledger_computed_days WHERE day = ${day}::date`)) as any[];
+    expect(flag.loss_occurrences).toBe(true);
   });
 
   it("SUBJECT-EQUIVALENCE-1024: the owner states subscriber S == lead L, a consumption under S places on the check under L", async () => {

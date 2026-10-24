@@ -291,7 +291,8 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     expect(partial.computed).toEqual(["2025-01-20", "2025-01-19", "2025-01-18", "2025-01-17", "2025-01-16", "2025-01-15", "2025-01-14", "2025-01-13"]);
     const { computed, failed } = await refreshLedgerDays(new Date("2025-01-20T12:00:00Z"), Infinity, "2024-11-22");
     expect(failed).toEqual([]);
-    expect(computed).toHaveLength(52 + 3);
+    // 52 missing days + today; the two other recent days were just computed by the partial run (fresh < 1 h).
+    expect(computed).toHaveLength(52 + 1);
     expect(computed).toContain(DAY);
     const after = await request(app).get(`/internal/outcome-costs/ledger-check?since=2024-11-22&until=2025-01-19`).set(getInternalAuthHeaders());
     expect(after.body.complete).toBe(true);

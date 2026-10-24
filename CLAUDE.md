@@ -873,6 +873,12 @@ concept, a value-based joint-cost split.
   `workflow:<slug>`, else `task:<service>/<task>`; per (UTC day, cost org, pool key, campaign). A crm judging run that kept nothing
   (no workflow, no campaign) rides the same task's lead_identified that org-day; only a pool that produced nothing that day stays
   produced-none (`unpooledLoss` when it carries a workflow, else `undeclared`). `cost_loss_pool_days.pool_key`.
+- **Loss shares stored per occurrence (migration 0075, LOSS-SHARE-STORED-1024)**: the day statement also stores each produced
+  occurrence's share of its pool (`cost_loss_occurrence_days`, flag `cost_ledger_computed_days.loss_occurrences`), and the
+  per-occurrence read (`occurrenceCostSlices`) serves it by occurrence id. A day without the flag (stored before 0075) is ranked
+  live (one runs PK probe per produced occurrence of the day: 64k probes for 150 runs, 35 s at load ~50, a 500 on the 30 s timeout,
+  2026-10-24) and recomputed by the refresher AFTER every missing / stale day; the flag is not part of day completeness, so no other
+  read moves. Guard: `tests/integration/ledger-reconciliation.test.ts` (v4 test: stored == live body).
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
@@ -883,14 +889,15 @@ concept, a value-based joint-cost split.
   series, fleet / service / task: the dashboard v2 Monitoring chart reads it).
 - **Stored days** (`cost_ledger_days`, `outcome_coverage_days`, `cost_ledger_computed_days`): in-process refresher
   (`startCostLedgerRefresh`, first tick ~60 s after boot, every 15 min, single flight), days one by one within a 10-min budget
-  per tick: the last 3 days always, then days NEVER computed back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an
+  per tick: today always and the 2 days before once their figures are > 1 h old (`recentDaysDue`: all 3 every tick ate ~9 of the 10
+  min at ~3 min/day and the history never converged, 2026-10-24), then days NEVER computed back to the FIRST DAY OF SPEND (2026-02-02 in prod; 60 days on an
   empty db), then days a declaration RECORDED after them moved (see "Backfill"), each newest first. Missing before stale: during
   backfills the newest days are stale every tick, and a date-only order starved the history (8 of 265 days stored, 2026-10-23). `computed_at` = the read transaction's now(). A day is
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
 
-## Lead states — allocation v5 (migration 0075, LEAD-STATES-1024-RUNS)
+## Lead states — allocation v5 (migration 0076, LEAD-STATES-1024-RUNS)
 
 Owner 2026-10-24 (doctrine rules 2 and 3, skill cost-accounting): a lead outcome is a STATE reached once per lead x brand;
 a run acting on a lead pays the NEXT state that lead had not reached at the run's START, in each family (interest:
