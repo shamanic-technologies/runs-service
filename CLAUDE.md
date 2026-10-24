@@ -36,6 +36,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` (+ `src/services/ledger-reconciliation.ts`, "Ledger reconciliation") — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
 - `src/services/support-marks.ts` — support marks (which support function a run serves), doors + selection. See "Support spend, named and reported apart".
+- `src/services/lead-states.ts` — allocation v5 inputs (catalogue lead states, pipe targets, lead-service first reaches -> `lead_state_reaches`). See "Lead states — allocation v5".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -888,6 +889,41 @@ concept, a value-based joint-cost split.
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
+
+## Lead states — allocation v5 (migration 0075, LEAD-STATES-1024-RUNS)
+
+Owner 2026-10-24 (doctrine rules 2 and 3, skill cost-accounting): a lead outcome is a STATE reached once per lead x brand;
+a run acting on a lead pays the NEXT state that lead had not reached at the run's START, in each family (interest:
+lead_interested < meeting_booked < meeting_attended < paid_client; visit: lead_visited, never summed); spend past the target
+is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.ts` (inputs) + `stateRoutingSql` (day statement).
+- **Inputs, never re-typed**: step -> state from features-service `/public/catalogue/steps` (`leadState`, `leadStateFamily`,
+  `leadStateRank`; conversation/form/signup/booking_call -> lead_interested, website_visit -> lead_visited); a run's pipe target =
+  its channel (feature slug) x the leg its workflow dynasty is assigned to (features `/internal/workflow-leg-assignments`, active
+  else latest; dynasty from workflow-service `/public/workflows`, a merged dynasty on its survivor's leg) -> the leg's `to` step
+  on `/public/channels` -> its state. First reaches from lead-service `GET /internal/lead-states` (real instants), synced each
+  refresher tick into **`lead_state_reaches`** (brand x lead x state; a changed/removed reach stamps `changed_at`, removed =
+  `removed_at`, never deleted; `reached_at` NULL = reached, date unknown: no unit, no reach). Unreadable input = the tick fails
+  (no day computed on a guess). Catalogue/pipe changes are not staleness-tracked (like the vendor catalogue); reach changes are:
+  a day >= the lead's first declared occurrence (or its run's start) computed before `changed_at` is stale.
+- **Routing (per v4 share, own and 4b loss shares alike)**: an occurrence whose subject is a lead (`lead-service`), whose key
+  reaches no state (message_sent, lead_found, message_written...) and whose anchor run's (workflow slug, feature slug) has a
+  target leaves the occurrence ($0 by-product) and goes, per family, to the next state the lead had not reached at the anchor's
+  `started_at` (reaches at ANY of the run's `brand_ids`): PRIMARY family (the target's) = the ledger: target already reached ->
+  abnormal `target_already_reached`; else the lead's later reach of the next state (the UNIT, `lead_state_reaches.id`); else
+  STATE LOSS of (cost org, pool key, campaign, state), split equally over that day's units of the same key (unit-id order,
+  cumulative rounding); no unit -> produced none under the paying run's tags (reads as unpooled loss). Other family =
+  `parallel_cost` / `parallel_none` rows (a state's own price = produced_cost + parallel_cost of its key). A share of an
+  occurrence a run of the same (service, task, campaign) already produced for the same subject = abnormal `repeat_production`,
+  whatever the pipe. Everything else = v4 byte for byte.
+- **Check**: allocated + producedNone + abnormal = ledger (per (day, org), every basis). `cost_ledger_days.abnormal_*` +
+  `abnormal_by_reason`; ledger-check rows/totals `abnormal`, `abnormalByReason`, `outcomeSpendCoverage` = (allocated + abnormal)
+  / (ledger - support); reconciliation part `abnormalLoss` (+ `abnormalByReason`); outcome-costs `scope[].abnormal`, sections
+  `abnormal` (dimensions + `abnormalReason`) and `parallel`. produced_count rows for states = reaches dated that UTC day.
+- **Per-occurrence read**: a re-routed occurrence reads cost $0 (its share is on the state, stored days only); a consumption by
+  a re-routed run counts under the state it rides (`consumingOutcomes`), null when abnormal.
+- Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
+  `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
+  visit priced apart, a moved reach stales the day).
 
 ## Ledger reconciliation — `GET /internal/outcome-costs/reconciliation` (LEDGER-HISTORY-1024-RUNS)
 

@@ -6,9 +6,10 @@
 // reached by one subject, named by the service that owns it (lead-service lead id,
 // social-service post id…). Nothing else carries a cost.
 //
-// ALLOCATION RULE v2 (versioned: a stored day names the version it was computed
+// ALLOCATION RULE (versioned: a stored day names the version it was computed
 // under, and a past day recomputes byte for byte from the same rows; v2 = v1 +
-// rule 4b, cross-run normal loss, 2026-10-24):
+// rule 4b, cross-run normal loss; v3/v4 pool keys; v5 = lead states, rule 6 below
+// and stateRoutingSql, LEAD-STATES-1024, 2026-10-24):
 //   1. Every `actual` or `refunded` cost row (spend that happened, whoever pays:
 //      production cost is never imputation) goes to its ANCHOR: the nearest run,
 //      itself or an ancestor, that declared >= 1 PRODUCED occurrence. No anchor =
@@ -47,8 +48,12 @@
 //   "Declared" everywhere = run_outcomes.declared_at, the EFFECTIVE declaration
 //   time: the recording instant, or the past instant a BACKFILL stated
 //   (`occurredAt`, migration 0060). A backfill adds facts, not a rule: v1 holds.
+//   6. LEAD STATES (v5, doctrine rules 2 and 3): a run acting on a lead pays the
+//      NEXT state that lead had not reached at the run's start, in each family;
+//      a pipe acting on a lead past its target, or a run re-buying the same lead,
+//      is ABNORMAL loss, in no unit cost (see stateRoutingSql).
 //   Check, per (UTC day, org), exact on every basis:
-//      standard (spread + reuse charges) - reuse gain + produced none = ledger.
+//      standard (spread + reuse charges) - reuse gain + produced none + abnormal = ledger.
 
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
@@ -58,10 +63,11 @@ import { outcomeDeclarationEvents } from "../db/schema.js";
 import { fetchVendorCostCatalog, type VendorCostVersion } from "./vendor-costs.js";
 import { versionWindowsSql } from "../routes/vendor-costs.js";
 import type { SupportFunction } from "./support-marks.js";
+import { fetchAllocationInputs, syncLeadStates, type AllocationInputs } from "./lead-states.js";
 
-export const ALLOCATION_VERSION = 4;
+export const ALLOCATION_VERSION = 5;
 export const ALLOCATION_RULE =
-  "v4: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2; keyed on the campaign since v3; on the task when there is no workflow since v4): a cost row with no such run and no support mark on its walk is loss of its run's POOL KEY P (its workflow slug, else its own task = service + task name) in its run's campaign C (null = no campaign); per (UTC day of the cost row, org of the cost row, P, C) it is split the same way over the occurrences produced that day by runs of the same P and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags.";
+  "v5: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2; keyed on the campaign since v3; on the task when there is no workflow since v4): a cost row with no such run and no support mark on its walk is loss of its run's POOL KEY P (its workflow slug, else its own task = service + task name) in its run's campaign C (null = no campaign); per (UTC day of the cost row, org of the cost row, P, C) it is split the same way over the occurrences produced that day by runs of the same P and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags. Lead states (v5, LEAD-STATES-1024): a share of an occurrence whose subject is a lead (lead-service) and whose outcome reaches no lead state, when its run's pipe (channel x the leg its workflow is assigned to, features-service) targets a lead state, leaves that occurrence (a by-product at $0) and goes, in each family (interest: lead_interested < meeting_booked < meeting_attended < paid_client; visit: lead_visited), to the next state the lead had not reached at that run's start (lead-service first reaches, at any of the run's brands): in the pipe's own family, the target already reached = ABNORMAL loss (target_already_reached, in no unit cost), else the lead's later reach of that state (the unit), else loss of (cost org, pool key, campaign, state) split equally over that day's units of the same key in unit-id order (none = produced none); in the other family the same is stated apart (parallel), never summed. A share of an occurrence a run of the same service, task and campaign already produced for the same subject is ABNORMAL loss (repeat_production). Check: allocated + produced none + abnormal = ledger.";
 
 /** Legacy keys accepted on input and stored under their successor (never emitted). */
 export const LEGACY_OUTCOME_KEYS: Readonly<Record<string, string>> = { email_sent: "message_sent" };
@@ -487,6 +493,209 @@ const stopsWalkSql = (runIdCol: SQL) =>
   sql`(${hasProducedSql(runIdCol)} OR EXISTS (SELECT 1 FROM run_support_marks m WHERE m.run_id = ${runIdCol}))`;
 
 // ---------------------------------------------------------------------------
+// v5: the lead's next state (LEAD-STATES-1024-RUNS)
+// ---------------------------------------------------------------------------
+
+/** The catalogue inputs as two CTEs: `st` (step -> state) and `pt` (workflow x channel -> target state). */
+function allocationInputsCtes(inputs: AllocationInputs): SQL {
+  return sql`
+    st AS MATERIALIZED (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(inputs.stepStates.map((s) => ({ step_key: s.stepKey, state: s.state, family: s.family, rank: s.rank })))}::jsonb)
+        AS x(step_key text, state text, family text, rank integer)
+    ),
+    pt AS MATERIALIZED (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(inputs.pipeTargets.map((p) => ({ workflow_slug: p.workflowSlug, feature_slug: p.featureSlug, state: p.state, family: p.family, rank: p.rank })))}::jsonb)
+        AS x(workflow_slug text, feature_slug text, state text, family text, rank integer)
+    ),
+    st_states AS MATERIALIZED (SELECT DISTINCT state, family, rank FROM st WHERE step_key = state),
+    fam AS MATERIALIZED (SELECT DISTINCT family FROM st_states)`;
+}
+
+/**
+ * Re-routes the v4 shares (`base_shares`) by the lead's state (rules 2 and 3,
+ * owner 2026-10-24). Defines `shares` (the final primary allocation) plus
+ * `abnormal_rows`, `state_unpooled`, `parallel_shares`, `atags` and `routed`.
+ *
+ *  - A share of an occurrence whose subject is a LEAD (lead-service) and whose
+ *    outcome reaches no state (message_sent, lead_found...) is PRODUCTION toward a
+ *    state when its anchor run's pipe targets one (`pt`). It leaves that occurrence
+ *    (a by-product, $0) and goes, in EACH family, to the next state that lead had
+ *    not reached at the anchor run's START (reaches dated <= start count, at any of
+ *    the run's brands):
+ *      - the pipe's own family (PRIMARY: the ledger check): its target already
+ *        reached = ABNORMAL loss `target_already_reached` (a cold email after the
+ *        yes), in no unit; else the lead's reach of that next state, if it ever
+ *        came (the unit), else STATE LOSS of (cost org, pool key, campaign, next
+ *        state), split equally over that day's units of the same key (rule 2),
+ *        none = produced none (unpooled, under the paying run's tags);
+ *      - the other family (PARALLEL, never summed with the primary): the same, in
+ *        `parallel_shares` / unpooled; a lead that reached it all adds nothing.
+ *  - A share of an occurrence a run of the same (service, task, campaign) already
+ *    produced for the same subject is ABNORMAL `repeat_production` (re-buying the
+ *    same lead), whatever the pipe.
+ *  - Every other share is unchanged (v4).
+ */
+function stateRoutingSql(inputs: AllocationInputs): SQL {
+  return sql`
+    ${allocationInputsCtes(inputs)},
+    bs_info AS MATERIALIZED (
+      SELECT s.*, o.subject_service, o.subject_id, o.declared_at AS occ_declared_at,
+             ar.organization_id AS a_org, ar.service_name AS a_service, ar.task_name AS a_task, ar.campaign_id AS a_campaign,
+             ar.workflow_slug AS a_workflow, ar.feature_slug AS a_feature, ar.brand_ids AS a_brands, ar.audience_id AS a_audience,
+             ar.started_at AS a_started, to_char((ar.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS a_start_day, ar.pool_key AS a_pool,
+             EXISTS (SELECT 1 FROM st WHERE st.step_key = s.outcome_key) AS reaches_state
+      FROM base_shares s
+      CROSS JOIN LATERAL (SELECT subject_service, subject_id, declared_at FROM run_outcomes WHERE id = s.occurrence_id OFFSET 0) o
+      CROSS JOIN LATERAL (
+        SELECT organization_id, service_name, task_name, campaign_id, workflow_slug, feature_slug, brand_ids, audience_id, started_at,
+               ${poolKeySql("")} AS pool_key
+        FROM runs WHERE id = s.anchor_id OFFSET 0
+      ) ar
+    ),
+    atags AS MATERIALIZED (SELECT DISTINCT ON (anchor_id) * FROM bs_info ORDER BY anchor_id),
+    repeated AS MATERIALIZED (
+      SELECT DISTINCT b.occurrence_id
+      FROM (SELECT DISTINCT occurrence_id, outcome_key, subject_service, subject_id, occ_declared_at, a_service, a_task, a_campaign
+            FROM bs_info WHERE subject_service = 'lead-service' AND NOT reaches_state) b
+      WHERE ${repeatedSql}
+    ),
+    routable AS MATERIALIZED (
+      SELECT b.*, pt.family AS t_family, pt.rank AS t_rank
+      FROM bs_info b
+      JOIN pt ON pt.workflow_slug = b.a_workflow AND pt.feature_slug = b.a_feature
+      WHERE b.subject_service = 'lead-service' AND NOT b.reaches_state
+        AND NOT EXISTS (SELECT 1 FROM repeated r WHERE r.occurrence_id = b.occurrence_id)
+    ),
+    routed AS MATERIALIZED (
+      SELECT r.*, f.family, (f.family = r.t_family) AS is_primary, rr.reached_rank, ns.state AS next_state,
+             (f.family = r.t_family AND r.t_rank <= rr.reached_rank) AS abnormal, u.unit_id
+      FROM routable r
+      CROSS JOIN fam f
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(MAX(l.rank), 0) AS reached_rank FROM lead_state_reaches l
+        WHERE l.lead_id = r.subject_id AND l.brand_id = ANY(r.a_brands) AND l.family = f.family
+          AND l.removed_at IS NULL AND l.reached_at <= r.a_started
+      ) rr
+      LEFT JOIN st_states ns ON ns.family = f.family AND ns.rank = rr.reached_rank + 1
+      LEFT JOIN LATERAL (
+        SELECT l.id AS unit_id FROM lead_state_reaches l
+        WHERE l.lead_id = r.subject_id AND l.brand_id = ANY(r.a_brands) AND l.state = ns.state
+          AND l.removed_at IS NULL AND l.reached_at > r.a_started
+        ORDER BY l.reached_at, l.brand_id, l.id LIMIT 1
+      ) u ON TRUE
+    ),
+    abnormal_rows AS MATERIALIZED (
+      SELECT b.org_key, b.anchor_id, b.outcome_key, 'repeat_production'::text AS reason, b.gross, b.net, b.vendor, b.unpriced
+      FROM bs_info b WHERE EXISTS (SELECT 1 FROM repeated r WHERE r.occurrence_id = b.occurrence_id)
+      UNION ALL
+      SELECT r.org_key, r.anchor_id, r.outcome_key, 'target_already_reached', r.gross, r.net, r.vendor, r.unpriced
+      FROM routed r WHERE r.abnormal
+    ),
+    -- Toward a state the lead reached later: that reach is the unit.
+    unit_rows AS MATERIALIZED (
+      SELECT r.org_key, r.unit_id AS occurrence_id, r.anchor_id, r.next_state AS outcome_key, r.is_loss, r.is_primary,
+             r.a_pool, r.a_campaign, r.gross, r.net, r.vendor, r.unpriced
+      FROM routed r WHERE NOT r.abnormal AND r.next_state IS NOT NULL AND r.unit_id IS NOT NULL
+    ),
+    -- Toward a state the lead never reached: loss of the pipe's units of that state that day (rule 2).
+    state_lost_rows AS MATERIALIZED (
+      SELECT r.org_key, r.anchor_id, r.next_state, r.is_primary, r.a_pool, r.a_campaign, r.gross, r.net, r.vendor, r.unpriced
+      FROM routed r WHERE NOT r.abnormal AND r.next_state IS NOT NULL AND r.unit_id IS NULL
+    ),
+    state_units AS MATERIALIZED (
+      SELECT u.*, 1::numeric AS quantity,
+             ROW_NUMBER() OVER (PARTITION BY u.org_key, u.a_pool, u.a_campaign, u.outcome_key, u.is_primary ORDER BY u.occurrence_id)::numeric AS cum_q,
+             COUNT(*) OVER (PARTITION BY u.org_key, u.a_pool, u.a_campaign, u.outcome_key, u.is_primary)::numeric AS q_total
+      FROM (SELECT DISTINCT org_key, a_pool, a_campaign, outcome_key, is_primary, occurrence_id FROM unit_rows) u
+    ),
+    state_lost AS MATERIALIZED (
+      SELECT l.org_key, l.a_pool, l.a_campaign, l.next_state, l.is_primary,
+             (MIN(l.anchor_id::text))::uuid AS anchor_id,
+             SUM(l.gross) AS gross, SUM(l.net) AS net, SUM(l.vendor) AS vendor, SUM(l.unpriced) AS unpriced
+      FROM state_lost_rows l GROUP BY 1, 2, 3, 4, 5
+    ),
+    state_loss_shares AS MATERIALIZED (
+      SELECT g.org_key, o.occurrence_id, g.anchor_id, o.outcome_key, true AS is_loss, g.is_primary,
+             ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
+             ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
+      FROM state_lost g JOIN state_units o
+        ON o.org_key IS NOT DISTINCT FROM g.org_key AND o.a_pool = g.a_pool AND o.a_campaign IS NOT DISTINCT FROM g.a_campaign
+       AND o.outcome_key = g.next_state AND o.is_primary = g.is_primary
+    ),
+    -- Unpooled: kept per paying run so its tags survive (produced none / parallel_none).
+    state_unpooled AS MATERIALIZED (
+      SELECT l.* FROM state_lost_rows l
+      WHERE NOT EXISTS (SELECT 1 FROM state_units o WHERE o.org_key IS NOT DISTINCT FROM l.org_key AND o.a_pool = l.a_pool
+                        AND o.a_campaign IS NOT DISTINCT FROM l.a_campaign AND o.outcome_key = l.next_state AND o.is_primary = l.is_primary)
+    ),
+    shares AS MATERIALIZED (
+      SELECT b.org_key, b.occurrence_id, b.anchor_id, b.outcome_key, b.is_loss, b.gross, b.net, b.vendor, b.unpriced
+      FROM base_shares b
+      WHERE NOT EXISTS (SELECT 1 FROM repeated r WHERE r.occurrence_id = b.occurrence_id)
+        AND NOT EXISTS (SELECT 1 FROM routable r WHERE r.share_id = b.share_id)
+      UNION ALL
+      SELECT org_key, occurrence_id, anchor_id, outcome_key, is_loss, gross, net, vendor, unpriced FROM unit_rows WHERE is_primary
+      UNION ALL
+      SELECT org_key, occurrence_id, anchor_id, outcome_key, is_loss, gross, net, vendor, unpriced FROM state_loss_shares WHERE is_primary
+    ),
+    parallel_shares AS MATERIALIZED (
+      SELECT org_key, occurrence_id, anchor_id, outcome_key, gross, net, vendor, unpriced FROM unit_rows WHERE NOT is_primary
+      UNION ALL
+      SELECT org_key, occurrence_id, anchor_id, outcome_key, gross, net, vendor, unpriced FROM state_loss_shares WHERE NOT is_primary
+    )`;
+}
+
+/** The repeat predicate (abnormal `repeat_production`) on alias `b` (outcome_key, subject_service, subject_id, occ_declared_at, occurrence_id, a_service, a_task, a_campaign). */
+const repeatedSql = sql`EXISTS (
+        SELECT 1 FROM run_outcomes p
+        CROSS JOIN LATERAL (SELECT service_name, task_name, campaign_id FROM runs WHERE id = p.run_id OFFSET 0) pr
+        WHERE p.subject_service = b.subject_service AND p.subject_id = b.subject_id AND p.outcome_key = b.outcome_key
+          AND p.direction = 'produced'
+          AND (p.declared_at < b.occ_declared_at OR (p.declared_at = b.occ_declared_at AND p.id < b.occurrence_id))
+          AND pr.service_name = b.a_service AND pr.task_name = b.a_task AND pr.campaign_id IS NOT DISTINCT FROM b.a_campaign
+      )`;
+
+/**
+ * Where each produced occurrence of CTE `occCte` (columns occurrence_id, anchor_id =
+ * its run) sends its cost under v5, on the PRIMARY family (the ledger check's):
+ * `dest_key` = its own key (not re-routed), the next lead state (re-routed), or
+ * NULL (abnormal); `rerouted` = it leaves the occurrence. The day statement's
+ * stateRoutingSql decides the same, share by share. Needs allocationInputsCtes.
+ */
+function occurrenceRoutesSql(occCte: string): SQL {
+  return sql`
+    oinfo AS MATERIALIZED (
+      SELECT x.occurrence_id, x.anchor_id, o.outcome_key, o.subject_service, o.subject_id, o.declared_at AS occ_declared_at,
+             ar.service_name AS a_service, ar.task_name AS a_task, ar.campaign_id AS a_campaign, ar.workflow_slug AS a_workflow,
+             ar.feature_slug AS a_feature, ar.brand_ids AS a_brands, ar.started_at AS a_started,
+             EXISTS (SELECT 1 FROM st WHERE st.step_key = o.outcome_key) AS reaches_state
+      FROM (SELECT DISTINCT occurrence_id, anchor_id FROM ${sql.raw(occCte)}) x
+      CROSS JOIN LATERAL (SELECT outcome_key, subject_service, subject_id, declared_at FROM run_outcomes WHERE id = x.occurrence_id OFFSET 0) o
+      CROSS JOIN LATERAL (
+        SELECT service_name, task_name, campaign_id, workflow_slug, feature_slug, brand_ids, started_at FROM runs WHERE id = x.anchor_id OFFSET 0
+      ) ar
+    ),
+    oroute AS MATERIALIZED (
+      SELECT b.occurrence_id, b.outcome_key,
+             CASE WHEN rep.yes THEN NULL
+                  WHEN pt.state IS NULL THEN b.outcome_key
+                  WHEN pt.rank <= rr.reached_rank THEN NULL
+                  ELSE ns.state END AS dest_key,
+             (rep.yes OR pt.state IS NOT NULL) AS rerouted
+      FROM oinfo b
+      CROSS JOIN LATERAL (SELECT (b.subject_service = 'lead-service' AND NOT b.reaches_state AND ${repeatedSql}) AS yes) rep
+      LEFT JOIN pt ON pt.workflow_slug = b.a_workflow AND pt.feature_slug = b.a_feature
+                  AND b.subject_service = 'lead-service' AND NOT b.reaches_state
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(MAX(l.rank), 0) AS reached_rank FROM lead_state_reaches l
+        WHERE l.lead_id = b.subject_id AND l.brand_id = ANY(b.a_brands) AND l.family = pt.family
+          AND l.removed_at IS NULL AND l.reached_at <= b.a_started
+      ) rr ON pt.state IS NOT NULL
+      LEFT JOIN st_states ns ON ns.family = pt.family AND ns.rank = rr.reached_rank + 1
+    )`;
+}
+
+// ---------------------------------------------------------------------------
 // One UTC day: ledger vs spread vs produced none, and coverage
 // ---------------------------------------------------------------------------
 
@@ -508,8 +717,15 @@ export interface LedgerDayOrgRow {
    * producedNone - Σ support = undeclared spend.
    */
   supportByFunction: SupportByFunction;
-  /** Part of `allocated` that is cross-run normal loss (rule 4b): spend of runs that produced nothing, carried by their pipe's units. */
+  /** Part of `allocated` that is normal loss (rule 4b pools, v5 state pools): spend carried by units of the same pipe. */
   normalLoss: Money;
+  /**
+   * ABNORMAL loss (v5, IAS 2 section 16): spend in NO unit cost, a line apart beside
+   * support (a send after the lead already reached the pipe's target state, a run
+   * re-buying the same lead). ledger = allocated + producedNone + abnormal.
+   */
+  abnormal: Money;
+  abnormalByReason: AbnormalByReason;
   /** Standard charges of the day's reuses = the reuse gain (no spend behind them). */
   reuse: Money;
   reuseCount: number;
@@ -531,6 +747,11 @@ export interface CoverageDayRow {
 
 /** Support money per support function (absent function = 0). */
 export type SupportByFunction = Partial<Record<SupportFunction, Money>>;
+
+/** Why spend is abnormal loss (v5): a pipe acting on a lead past its target state, or a run re-buying the same lead. */
+export const ABNORMAL_REASONS = ["target_already_reached", "repeat_production"] as const;
+export type AbnormalReason = (typeof ABNORMAL_REASONS)[number];
+export type AbnormalByReason = Partial<Record<AbnormalReason, Money>>;
 
 /** Σ of a support split. */
 export function supportTotal(s: SupportByFunction): Money {
@@ -575,7 +796,7 @@ const money = (r: any, p: string): Money => ({
 });
 
 /** The statement computing one UTC day (exported for the prod parity probe). */
-export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
+export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs: AllocationInputs): SQL {
   const dayStart = sql`(${day}::date)::timestamp AT TIME ZONE 'UTC'`;
   const dayEnd = sql`(${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`;
   const vj = vendorJoinSql("b");
@@ -654,7 +875,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     own_anchors AS MATERIALIZED (SELECT DISTINCT anchor_id FROM g),
     o AS MATERIALIZED (${occurrencesOfAnchorsSql("own_anchors")}),
     own_shares AS MATERIALIZED (
-      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key,
+      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key, false AS is_loss,
              ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
       FROM g JOIN o ON o.anchor_id = g.anchor_id
@@ -672,13 +893,17 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     pipe_units AS MATERIALIZED (${pipeUnitsSql(day, "lost")}),
     pooled AS MATERIALIZED (SELECT DISTINCT org_key, pool_key, campaign_id FROM pipe_units),
     loss_shares AS MATERIALIZED (
-      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key,
+      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key, true AS is_loss,
              ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
       FROM lost g JOIN pipe_units o ON o.org_key IS NOT DISTINCT FROM g.org_key AND o.pool_key = g.pool_key
                                     AND o.campaign_id IS NOT DISTINCT FROM g.campaign_id
     ),
-    shares AS MATERIALIZED (SELECT * FROM own_shares UNION ALL SELECT * FROM loss_shares),
+    -- The v4 shares (rules 1-4b), each one row: what v5 re-routes.
+    base_shares AS MATERIALIZED (
+      SELECT ROW_NUMBER() OVER () AS share_id, x.* FROM (SELECT * FROM own_shares UNION ALL SELECT * FROM loss_shares) x
+    ),
+    ${stateRoutingSql(inputs)},
     anchors AS MATERIALIZED (SELECT DISTINCT anchor_id FROM shares),
     -- A costed row is CARRIED when anchored, or loss of a pipe that produced that day.
     carried AS MATERIALIZED (
@@ -692,17 +917,32 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
       SELECT org_key, MIN(org_id::text) AS org_id, COUNT(*) AS cost_rows, ${sums("costed", "ledger")}
       FROM costed GROUP BY org_key
     ),
+    -- Produced none: cost rows nothing carries (v4), plus the spend of leads whose
+    -- next state no lead of the pipe reached that day (v5 unpooled state loss).
     unanchored AS (
-      SELECT c.org_key, ${sums("c", "none")}
-      FROM costed c
-      WHERE NOT EXISTS (SELECT 1 FROM carried k WHERE k.run_id = c.run_id AND k.org_key IS NOT DISTINCT FROM c.org_key)
-      GROUP BY c.org_key
+      SELECT x.org_key, ${sums("x", "none")}
+      FROM (
+        SELECT c.org_key, c.gross, c.net, c.vendor, c.unpriced
+        FROM costed c
+        WHERE NOT EXISTS (SELECT 1 FROM carried k WHERE k.run_id = c.run_id AND k.org_key IS NOT DISTINCT FROM c.org_key)
+        UNION ALL
+        SELECT u.org_key, u.gross, u.net, u.vendor, u.unpriced FROM state_unpooled u WHERE u.is_primary
+      ) x
+      GROUP BY x.org_key
     ),
+    -- Normal loss = the part of allocated carried as loss (rule 4b pools, v5 state pools).
     loss_by_org AS (
-      SELECT l.org_key, ${sums("l", "loss")}
-      FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.pool_key = l.pool_key
-                                AND p.campaign_id IS NOT DISTINCT FROM l.campaign_id)
-      GROUP BY l.org_key
+      SELECT s.org_key, ${sums("s", "loss")}
+      FROM shares s WHERE s.is_loss
+      GROUP BY s.org_key
+    ),
+    abnormal_by_org AS (
+      SELECT a.org_key, ${sums("a", "abn")}
+      FROM abnormal_rows a GROUP BY a.org_key
+    ),
+    abnormal_split AS (
+      SELECT a.org_key, a.reason, ${sums("a", "s")}
+      FROM abnormal_rows a GROUP BY 1, 2
     ),
     alloc AS (
       SELECT s.org_key, COUNT(DISTINCT s.occurrence_id) AS occurrences, ${sums("s", "allocated")}
@@ -727,13 +967,42 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
       GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
     ),
     none_cost AS (
-      SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
-             sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name,
-             COUNT(DISTINCT c.run_id) AS runs, ${sums("c", "m")}
-      FROM costed c
-      LEFT JOIN support_of sp ON sp.run_id = c.run_id
-      WHERE NOT EXISTS (SELECT 1 FROM carried k WHERE k.run_id = c.run_id AND k.org_key IS NOT DISTINCT FROM c.org_key)
+      SELECT x.org, x.cost_org, x.brand_ids, x.campaign_id, x.workflow_slug, x.feature_slug, x.support_function,
+             x.run_start_day, x.audience_id, x.service_name, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
+      FROM (
+        SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
+               sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name, c.run_id,
+               c.gross, c.net, c.vendor, c.unpriced
+        FROM costed c
+        LEFT JOIN support_of sp ON sp.run_id = c.run_id
+        WHERE NOT EXISTS (SELECT 1 FROM carried k WHERE k.run_id = c.run_id AND k.org_key IS NOT DISTINCT FROM c.org_key)
+        UNION ALL
+        -- v5 unpooled state loss: under the paying (anchor) run's tags; it carries a workflow, so it reads as unpooled loss.
+        SELECT t.a_org::text, u.org_key, t.a_brands, t.a_campaign, t.a_workflow, t.a_feature, NULL::text, t.a_start_day,
+               t.a_audience, t.a_service, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
+        FROM state_unpooled u JOIN atags t ON t.anchor_id = u.anchor_id
+        WHERE u.is_primary
+      ) x
       GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+    ),
+    -- v5: abnormal loss (in no unit cost) and the other family's view of the routed spend, under the paying run's tags.
+    abnormal_cost AS (
+      SELECT a.reason, a.outcome_key, t.a_org::text AS org, a.org_key AS cost_org, t.a_brands AS brand_ids, t.a_campaign AS campaign_id,
+             t.a_workflow AS workflow_slug, t.a_feature AS feature_slug, t.a_start_day AS run_start_day, t.a_audience AS audience_id,
+             t.a_service AS service_name, COUNT(DISTINCT a.anchor_id) AS runs, ${sums("a", "m")}
+      FROM abnormal_rows a JOIN atags t ON t.anchor_id = a.anchor_id
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+    ),
+    parallel_cost AS (
+      SELECT p.kind, p.outcome_key, t.a_org::text AS org, p.org_key AS cost_org, t.a_brands AS brand_ids, t.a_campaign AS campaign_id,
+             t.a_workflow AS workflow_slug, t.a_feature AS feature_slug, t.a_start_day AS run_start_day, t.a_audience AS audience_id,
+             t.a_service AS service_name, COUNT(DISTINCT p.anchor_id) AS runs, ${sums("p", "m")}
+      FROM (
+        SELECT 'parallel_cost' AS kind, s.outcome_key, s.org_key, s.anchor_id, s.gross, s.net, s.vendor, s.unpriced FROM parallel_shares s
+        UNION ALL
+        SELECT 'parallel_none', u.next_state, u.org_key, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced FROM state_unpooled u WHERE NOT u.is_primary
+      ) p JOIN atags t ON t.anchor_id = p.anchor_id
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
     ),
     support_split AS (
       SELECT c.org_key, sp.kind, ${sums("c", "s")}
@@ -766,13 +1035,30 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
           'none_gross', COALESCE(n.none_gross, 0)::text, 'none_net', COALESCE(n.none_net, 0)::text,
           'none_vendor', COALESCE(n.none_vendor, 0)::text, 'none_unpriced', COALESCE(n.none_unpriced, 0)::text,
           'loss_gross', COALESCE(lo.loss_gross, 0)::text, 'loss_net', COALESCE(lo.loss_net, 0)::text,
-          'loss_vendor', COALESCE(lo.loss_vendor, 0)::text, 'loss_unpriced', COALESCE(lo.loss_unpriced, 0)::text
+          'loss_vendor', COALESCE(lo.loss_vendor, 0)::text, 'loss_unpriced', COALESCE(lo.loss_unpriced, 0)::text,
+          'abn_gross', COALESCE(ab.abn_gross, 0)::text, 'abn_net', COALESCE(ab.abn_net, 0)::text,
+          'abn_vendor', COALESCE(ab.abn_vendor, 0)::text, 'abn_unpriced', COALESCE(ab.abn_unpriced, 0)::text
         ) ORDER BY l.org_key NULLS FIRST)
         FROM ledger l
         LEFT JOIN alloc al ON al.org_key IS NOT DISTINCT FROM l.org_key
         LEFT JOIN unanchored n ON n.org_key IS NOT DISTINCT FROM l.org_key
         LEFT JOIN loss_by_org lo ON lo.org_key IS NOT DISTINCT FROM l.org_key
+        LEFT JOIN abnormal_by_org ab ON ab.org_key IS NOT DISTINCT FROM l.org_key
       ), '[]'::json) AS orgs,
+      COALESCE((SELECT json_agg(json_build_object(
+        'org_id', x.org_key, 'reason', x.reason,
+        's_gross', x.s_gross::text, 's_net', x.s_net::text, 's_vendor', x.s_vendor::text, 's_unpriced', x.s_unpriced::text)) FROM abnormal_split x), '[]'::json) AS abnormal,
+      COALESCE((SELECT json_agg(json_build_object(
+        'kind', 'abnormal', 'abnormal_reason', a.reason, 'outcome_key', a.outcome_key, 'org', a.org, 'cost_org', a.cost_org, 'brand_ids', a.brand_ids,
+        'campaign_id', a.campaign_id, 'workflow_slug', a.workflow_slug, 'feature_slug', a.feature_slug, 'run_start_day', a.run_start_day,
+        'audience_id', a.audience_id, 'service_name', a.service_name, 'runs', a.runs,
+        'gross', a.m_gross::text, 'net', a.m_net::text, 'vendor', a.m_vendor::text, 'unpriced', a.m_unpriced::text)) FROM abnormal_cost a), '[]'::json) AS abnormal_cost,
+      COALESCE((SELECT json_agg(json_build_object(
+        'kind', p.kind, 'outcome_key', p.outcome_key, 'org', p.org, 'cost_org', p.cost_org, 'brand_ids', p.brand_ids,
+        'campaign_id', p.campaign_id, 'workflow_slug', p.workflow_slug, 'feature_slug', p.feature_slug, 'run_start_day', p.run_start_day,
+        'audience_id', p.audience_id, 'service_name', p.service_name, 'runs', p.runs,
+        'gross', p.m_gross::text, 'net', p.m_net::text, 'vendor', p.m_vendor::text, 'unpriced', p.m_unpriced::text)) FROM parallel_cost p), '[]'::json) AS parallel_cost,
+      (SELECT COUNT(*) FROM routed WHERE is_primary) AS routed_shares,
       COALESCE((SELECT json_agg(row_to_json(cov) ORDER BY cov.service_name, cov.task_name) FROM cov), '[]'::json) AS coverage,
       COALESCE((SELECT json_agg(json_build_object(
         'org_id', x.org_key, 'kind', x.kind,
@@ -942,9 +1228,9 @@ async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promis
 }
 
 /** Standard (production) cost of each producing occurrence named, live (rule 1-3). */
-async function standardCostsOf(consumptions: ResolvedConsumption[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, Money>> {
+async function standardCostsOf(consumptions: ResolvedConsumption[], versions: VendorCostVersion[], inputs: AllocationInputs, exec: Exec = statsDb): Promise<Map<string, Money>> {
   const anchors = [...new Set(consumptions.filter((c) => c.producerRunId).map((c) => c.producerRunId!))];
-  return occurrenceCosts(anchors, versions, exec);
+  return occurrenceCosts(anchors, versions, inputs, exec);
 }
 
 const ZERO = (): Money => ({ gross: fx(0), net: fx(0), vendor: fx(0), unpricedGross: fx(0) });
@@ -962,10 +1248,13 @@ const round10 = (x: Decimal.Value) => new D(x).toDecimalPlaces(10, Decimal.ROUND
 /**
  * The produced outcome keys of each run's ANCHOR (itself or its nearest ancestor
  * declaring a produced occurrence, rule 1), with the Σ quantity per key. A run
- * without an anchor maps to []. Keys ordered by key.
+ * without an anchor maps to []. Keys ordered by key (null last). v5: an occurrence
+ * whose cost is re-routed to a lead state counts under that state (its inputs ride
+ * the state), or under null when that cost is abnormal (its inputs ride no unit).
+ * `inputs` null = the declared keys as stated (a caller asking only WHETHER a run rides an outcome).
  */
-export async function anchorKeysOf(runIds: string[], exec: Exec = statsDb): Promise<Map<string, Array<{ outcomeKey: string; quantity: string }>>> {
-  const out = new Map<string, Array<{ outcomeKey: string; quantity: string }>>();
+export async function anchorKeysOf(runIds: string[], inputs: AllocationInputs | null, exec: Exec = statsDb): Promise<Map<string, Array<{ outcomeKey: string | null; quantity: string }>>> {
+  const out = new Map<string, Array<{ outcomeKey: string | null; quantity: string }>>();
   if (runIds.length === 0) return out;
   const ids = [...new Set(runIds)];
   for (const id of ids) out.set(id, []);
@@ -980,19 +1269,25 @@ export async function anchorKeysOf(runIds: string[], exec: Exec = statsDb): Prom
       FROM walk w
       CROSS JOIN LATERAL (SELECT id, parent_run_id FROM runs WHERE id = w.parent_id OFFSET 0) p
       WHERE NOT w.found AND w.parent_id IS NOT NULL AND w.depth < ${MAX_WALK_DEPTH}
-    )
-    SELECT w.run_id, o.outcome_key, SUM(o.quantity)::text AS quantity
-    FROM walk w JOIN run_outcomes o ON o.run_id = w.cur_id AND o.direction = 'produced'
-    WHERE w.found
-    GROUP BY w.run_id, o.outcome_key
-    ORDER BY w.run_id, o.outcome_key
+    ),
+    ${allocationInputsCtes(inputs ?? { stepStates: [], pipeTargets: [] })},
+    anchored AS MATERIALIZED (
+      SELECT w.run_id, o.id AS occurrence_id, o.run_id AS anchor_id, o.quantity, o.outcome_key
+      FROM walk w JOIN run_outcomes o ON o.run_id = w.cur_id AND o.direction = 'produced'
+      WHERE w.found
+    ),
+    ${inputs ? occurrenceRoutesSql("anchored") : sql`oroute AS (SELECT occurrence_id, outcome_key AS dest_key FROM anchored)`}
+    SELECT a.run_id, r.dest_key AS outcome_key, SUM(a.quantity)::text AS quantity
+    FROM anchored a JOIN oroute r ON r.occurrence_id = a.occurrence_id
+    GROUP BY a.run_id, r.dest_key
+    ORDER BY a.run_id, r.dest_key NULLS LAST
   `)) as any[];
   for (const r of rows) out.get(r.run_id)!.push({ outcomeKey: r.outcome_key, quantity: r.quantity });
   return out;
 }
 
 export interface ConsumptionPart {
-  /** The outcome the consuming production order makes (its anchor's produced key). Null = its run produced nothing. */
+  /** The outcome the consuming production order makes (its anchor's produced key; v5: the lead state its cost rides). Null = its run produced nothing, or its cost is abnormal loss. */
   outcomeKey: string | null;
   /** Share of this consumption going to that outcome: 1 for a single-outcome order, quantity-weighted otherwise. */
   weight: string;
@@ -1004,7 +1299,7 @@ export interface ConsumptionPart {
  * proportion to the quantities, by the v1 cumulative rounding at 10 decimals:
  * the weights sum to exactly 1 and the standard costs to exactly the consumption's.
  */
-export function splitConsumption(keys: Array<{ outcomeKey: string; quantity: string }>, standard: Money | null): ConsumptionPart[] {
+export function splitConsumption(keys: Array<{ outcomeKey: string | null; quantity: string }>, standard: Money | null): ConsumptionPart[] {
   if (keys.length === 0) return [{ outcomeKey: null, weight: "1.0000000000", standardCost: standard }];
   const total = keys.reduce((s, k) => s.plus(k.quantity), new D(0));
   let cum = new D(0);
@@ -1033,13 +1328,20 @@ export function splitConsumption(keys: Array<{ outcomeKey: string; quantity: str
  *  - none: the day's spend no declaring run carries, per the spending run's tags x cost org.
  */
 export interface OutcomeCostRow {
-  kind: "produced_count" | "produced_cost" | "consumed" | "none";
+  /**
+   * v5 kinds: abnormal (spend in no unit cost, per reason, the paying run's tags);
+   * parallel_cost / parallel_none (the routed spend priced in the OTHER state family:
+   * a lead state's price is produced_cost + parallel_cost of its key, never summed across keys).
+   */
+  kind: "produced_count" | "produced_cost" | "consumed" | "none" | "abnormal" | "parallel_cost" | "parallel_none";
   outcomeKey: string | null;
   consumedOutcomeKey: string | null;
   organizationId: string | null;
   costOrganizationId: string | null;
   /** kind 'none' only: the support function of that spend (null = undeclared spend). Null on every other kind. */
   supportFunction: SupportFunction | null;
+  /** kind 'abnormal' only: why. */
+  abnormalReason: AbnormalReason | null;
   tags: RunTags;
   /** Service of the run whose tags the row carries (declaring / consuming / spending run). */
   serviceName: string | null;
@@ -1059,7 +1361,8 @@ export interface OutcomeCostRow {
   reuseMoney: Money;
 }
 
-export async function computeLedgerDay(day: string, versions: VendorCostVersion[]): Promise<LedgerDay> {
+export async function computeLedgerDay(day: string, versions: VendorCostVersion[], inputs?: AllocationInputs): Promise<LedgerDay> {
+  const allocationInputs = inputs ?? (await fetchAllocationInputs());
   // Background work: EVERY read of the day runs in one read-only transaction on
   // the stats pool with its own timeout (the pool's 30 s is for request reads; on
   // a cold, loaded box a day's ~25k run lookups took minutes, and the consumption
@@ -1068,12 +1371,12 @@ export async function computeLedgerDay(day: string, versions: VendorCostVersion[
     await tx.execute(sql`SET TRANSACTION READ ONLY`);
     await tx.execute(sql`SET LOCAL statement_timeout = '900s'`);
     const [t] = (await tx.execute(sql`SELECT now() AS at`)) as any[];
-    return computeLedgerDayIn(tx, day, versions, new Date(t.at));
+    return computeLedgerDayIn(tx, day, versions, allocationInputs, new Date(t.at));
   });
 }
 
-async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVersion[], computedAt: Date): Promise<LedgerDay> {
-  const [row] = (await tx.execute(ledgerDaySql(day, versions))) as any[];
+async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVersion[], inputs: AllocationInputs, computedAt: Date): Promise<LedgerDay> {
+  const [row] = (await tx.execute(ledgerDaySql(day, versions, inputs))) as any[];
   const orgs = new Map<string, LedgerDayOrgRow>();
   for (const r of row.orgs as any[]) {
     orgs.set(r.org_id ?? "", {
@@ -1083,6 +1386,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
       producedNone: money(r, "none"),
       supportByFunction: {},
       normalLoss: money(r, "loss"),
+      abnormal: money(r, "abn"),
+      abnormalByReason: {},
       reuse: ZERO(),
       reuseCount: 0,
       unknownProvenance: 0,
@@ -1094,19 +1399,23 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     // Every support row's org has ledger spend that day: its row exists.
     orgs.get(r.org_id ?? "")!.supportByFunction[r.kind as SupportFunction] = money(r, "s");
   }
+  for (const r of row.abnormal as any[]) {
+    orgs.get(r.org_id ?? "")!.abnormalByReason[r.reason as AbnormalReason] = money(r, "s");
+  }
   // Reuse charges of the day's consumptions (rule 5), on the consuming run's org.
   const consumptions = await resolveConsumptions(sql`
     SELECT id FROM run_outcomes
     WHERE direction = 'consumed'
       AND declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`, tx);
-  const standard = consumptions.some((c) => c.producerId) ? await standardCostsOf(consumptions, versions, tx) : new Map<string, Money>();
+  const standard = consumptions.some((c) => c.producerId) ? await standardCostsOf(consumptions, versions, inputs, tx) : new Map<string, Money>();
   for (const c of consumptions) {
     if (c.producerId && !c.reuse) continue;
     const key = c.orgId ?? "";
     if (!orgs.has(key)) {
       orgs.set(key, {
-        organizationId: c.orgId, ledger: ZERO(), allocated: ZERO(), producedNone: ZERO(), supportByFunction: {}, normalLoss: ZERO(), reuse: ZERO(),
+        organizationId: c.orgId, ledger: ZERO(), allocated: ZERO(), producedNone: ZERO(), supportByFunction: {}, normalLoss: ZERO(),
+        abnormal: ZERO(), abnormalByReason: {}, reuse: ZERO(),
         reuseCount: 0, unknownProvenance: 0, costRows: 0, occurrences: 0,
       });
     }
@@ -1126,6 +1435,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     organizationId: r.org ?? null,
     costOrganizationId: r.cost_org ?? null,
     supportFunction: r.support_function ?? null,
+    abnormalReason: r.abnormal_reason ?? null,
     tags: tagsOf(r),
     serviceName: r.service_name ?? null,
     sourceOrganizationId: null,
@@ -1143,6 +1453,20 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   for (const r of row.produced_cost as any[]) outcomeCosts.push(blank("produced_cost", r));
   // 'none' rows: n = distinct spending runs (the reconciliation's undeclared run count).
   for (const r of row.none_cost as any[]) outcomeCosts.push({ ...blank("none", r), n: fx(r.runs) });
+  // v5: abnormal loss per reason and the parallel family, under the paying run's tags (n = distinct paying runs).
+  for (const r of [...(row.abnormal_cost as any[]), ...(row.parallel_cost as any[])]) outcomeCosts.push({ ...blank(r.kind, r), n: fx(r.runs) });
+  // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state.
+  const reached = (await tx.execute(sql`
+    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids, COUNT(*)::text AS n
+    FROM lead_state_reaches
+    WHERE removed_at IS NULL
+      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3
+  `)) as any[];
+  for (const r of reached) {
+    outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
+  }
   const declared = (await tx.execute(sql`
     SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
            r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
@@ -1160,7 +1484,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   for (const r of declared) {
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
   }
-  const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId), tx);
+  const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId), inputs, tx);
   const consumed = new Map<string, OutcomeCostRow>();
   for (const c of consumptions) {
     const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
@@ -1248,11 +1572,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
           gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
           source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name
+          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
                x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc
+               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -1264,13 +1588,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
             sf: o.supportFunction,
             rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
-            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName,
+            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
                         rg numeric, rn numeric, rv numeric, rup numeric,
                         sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                        aud text, saud text, svc text)
+                        aud text, saud text, svc text, ar text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -1281,11 +1605,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           allocated_gross, allocated_net, allocated_vendor, allocated_unpriced_gross,
           none_gross, none_net, none_vendor, none_unpriced_gross,
           reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross, reuse_count, unknown_provenance_count,
-          cost_rows, occurrences, support_by_function, loss_gross, loss_net, loss_vendor, loss_unpriced_gross
+          cost_rows, occurrences, support_by_function, loss_gross, loss_net, loss_vendor, loss_unpriced_gross,
+          abnormal_gross, abnormal_net, abnormal_vendor, abnormal_unpriced_gross, abnormal_by_reason
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.org,
                x.lg, x.ln, x.lv, x.lu, x.ag, x.an, x.av, x.au, x.ng, x.nn, x.nv, x.nu,
-               x.rg, x.rn, x.rv, x.ru, x.rc, x.up, x.rows, x.occ, x.sbf, x.wg, x.wn, x.wv, x.wu
+               x.rg, x.rn, x.rv, x.ru, x.rc, x.up, x.rows, x.occ, x.sbf, x.wg, x.wn, x.wv, x.wu,
+               x.xg, x.xn, x.xv, x.xu, x.abr
         FROM jsonb_to_recordset(${JSON.stringify(
           d.orgs.map((o) => ({
             org: o.organizationId,
@@ -1296,10 +1622,12 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             rc: o.reuseCount, up: o.unknownProvenance,
             rows: o.costRows, occ: o.occurrences, sbf: o.supportByFunction,
             wg: o.normalLoss.gross, wn: o.normalLoss.net, wv: o.normalLoss.vendor, wu: o.normalLoss.unpricedGross,
+            xg: o.abnormal.gross, xn: o.abnormal.net, xv: o.abnormal.vendor, xu: o.abnormal.unpricedGross, abr: o.abnormalByReason,
           })),
         )}::jsonb) AS x(org uuid, lg numeric, ln numeric, lv numeric, lu numeric, ag numeric, an numeric, av numeric, au numeric,
                         ng numeric, nn numeric, nv numeric, nu numeric, rg numeric, rn numeric, rv numeric, ru numeric,
-                        rc bigint, up bigint, rows bigint, occ bigint, sbf jsonb, wg numeric, wn numeric, wv numeric, wu numeric)
+                        rc bigint, up bigint, rows bigint, occ bigint, sbf jsonb, wg numeric, wn numeric, wv numeric, wu numeric,
+                        xg numeric, xn numeric, xv numeric, xu numeric, abr jsonb)
       `);
     }
     if (d.coverage.length > 0) {
@@ -1325,6 +1653,8 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
 
 export interface LedgerCheckInput {
   ledger: Money;
+  /** v5: spend in no unit cost (a line apart). */
+  abnormal: Money;
   /** Σ standard cost charged on occurrences: production spread + reuse charges. */
   standard: Money;
   reuseGain: Money;
@@ -1333,18 +1663,18 @@ export interface LedgerCheckInput {
 
 export interface LedgerCheckResult {
   balanced: boolean;
-  /** standard - reuseGain + producedNone - ledger, per basis, 10-decimal strings ("0.0000000000" when balanced). */
+  /** standard - reuseGain + producedNone + abnormal - ledger, per basis, 10-decimal strings ("0.0000000000" when balanced). */
   differences: Money;
 }
 
 const BASES: Array<keyof Money> = ["gross", "net", "vendor", "unpricedGross"];
 
-/** standard - reuseGain + producedNone == ledger, EXACTLY, on every basis. No tolerance. */
+/** standard - reuseGain + producedNone + abnormal == ledger, EXACTLY, on every basis. No tolerance. */
 export function checkLedgerRow(row: LedgerCheckInput): LedgerCheckResult {
   const differences = {} as Money;
   let balanced = true;
   for (const k of BASES) {
-    const diff = new Decimal(row.standard[k]).minus(row.reuseGain[k]).plus(row.producedNone[k]).minus(row.ledger[k]);
+    const diff = new Decimal(row.standard[k]).minus(row.reuseGain[k]).plus(row.producedNone[k]).plus(row.abnormal[k]).minus(row.ledger[k]);
     if (!diff.isZero()) balanced = false;
     differences[k] = diff.toFixed(10);
   }
@@ -1352,8 +1682,8 @@ export function checkLedgerRow(row: LedgerCheckInput): LedgerCheckResult {
 }
 
 /** The check input of a stored (day, org) row: standard = spread + reuse charges, gain = reuse charges. */
-export function ledgerCheckInputOf(r: Pick<LedgerDayOrgRow, "ledger" | "allocated" | "producedNone" | "reuse">): LedgerCheckInput {
-  return { ledger: r.ledger, standard: plus(r.allocated, r.reuse), reuseGain: r.reuse, producedNone: r.producedNone };
+export function ledgerCheckInputOf(r: Pick<LedgerDayOrgRow, "ledger" | "allocated" | "producedNone" | "reuse" | "abnormal">): LedgerCheckInput {
+  return { ledger: r.ledger, standard: plus(r.allocated, r.reuse), reuseGain: r.reuse, producedNone: r.producedNone, abnormal: r.abnormal };
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,6 +1788,27 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   `)) as any[];
   for (const [day, at] of computed) {
     if (equated.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
+  }
+  // v5: a lead state reached, re-dated or removed after a day was computed moves the
+  // routing of every run that acted on that lead: from the first day anything was
+  // declared on the lead (its earliest occurrence or its anchor run's start).
+  const reaches = (await db.execute(sql`
+    WITH l AS MATERIALIZED (
+      SELECT lead_id, MAX(changed_at) AS changed_at FROM lead_state_reaches
+      WHERE changed_at > ${oldest}::timestamptz GROUP BY lead_id
+    )
+    SELECT to_char(MIN(LEAST(o.declared_at, r.started_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(l.changed_at) AS last_recorded
+    FROM l
+    CROSS JOIN LATERAL (
+      SELECT o.declared_at, o.run_id FROM run_outcomes o
+      WHERE o.subject_service = 'lead-service' AND o.subject_id = l.lead_id AND o.direction = 'produced'
+      OFFSET 0
+    ) o
+    CROSS JOIN LATERAL (SELECT started_at FROM runs WHERE id = o.run_id OFFSET 0) r
+    GROUP BY l.lead_id
+  `)) as any[];
+  for (const [day, at] of computed) {
+    if (reaches.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
   }
   // Spend that landed on an EARLIER day than the one it was recorded on: only those
   // rows can move a stored day (a cost row written on time lands on today).
@@ -1582,6 +1933,13 @@ export async function refreshLedgerDays(
 ): Promise<{ computed: string[]; failed: string[] }> {
   const started = Date.now();
   const versions = await fetchVendorCostCatalog();
+  // v5 inputs: the catalogue's lead states and pipe targets, then lead-service's
+  // first reaches synced BEFORE the stale sweep (a changed reach stales its days).
+  const inputs = await fetchAllocationInputs();
+  const sync = await syncLeadStates(inputs.stepStates);
+  if (sync.changed + sync.removed > 0) {
+    console.log(`[Runs Service] lead states synced: ${sync.upserted} reaches, ${sync.changed} new or changed, ${sync.removed} removed`);
+  }
   const days = (await daysToCompute(now, firstDay, true)).slice(0, maxDays);
   const computed: string[] = [];
   const failed: string[] = [];
@@ -1589,7 +1947,7 @@ export async function refreshLedgerDays(
     if (Date.now() - started >= budgetMs) break;
     const t0 = Date.now();
     try {
-      const d = await computeLedgerDay(day, versions);
+      const d = await computeLedgerDay(day, versions, inputs);
       await storeLedgerDay(d);
       computed.push(day);
       const unbalanced = d.orgs.filter((o) => !checkLedgerRow(ledgerCheckInputOf(o)).balanced).length;
@@ -1688,8 +2046,8 @@ export interface OccurrenceWithCost {
  * excluded with their subtrees), summed over its (UTC day, org) groups — the same
  * groups the stored days split, so Σ occurrences of a day = that day's allocated.
  */
-export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, Money>> {
-  const slices = await occurrenceCostSlices(anchorIds, versions, exec);
+export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[], inputs: AllocationInputs, exec: Exec = statsDb): Promise<Map<string, Money>> {
+  const slices = await occurrenceCostSlices(anchorIds, versions, inputs, exec);
   return new Map([...slices].map(([id, c]) => [id, c.total]));
 }
 
@@ -1702,7 +2060,7 @@ export interface CostSlice {
 }
 
 /** Per produced occurrence: its cost and the (UTC day, cost org) slices it sums, day then org order. */
-export async function occurrenceCostSlices(anchorIds: string[], versions: VendorCostVersion[], exec: Exec = statsDb): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
+export async function occurrenceCostSlices(anchorIds: string[], versions: VendorCostVersion[], inputs: AllocationInputs, exec: Exec = statsDb): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
   if (anchorIds.length === 0) return new Map();
   const vj = vendorJoinSql("b");
   const rows = (await exec.execute(sql`
@@ -1802,13 +2160,27 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
   for (const c of out.values()) {
     c.slices.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : (a.costOrganizationId ?? "").localeCompare(b.costOrganizationId ?? "")));
   }
+  // v5: an occurrence whose cost is re-routed (to a lead state, or abnormal) is a
+  // by-product: it carries $0 here, its share is on the state (stored days).
+  if (out.size > 0) {
+    const rerouted = (await exec.execute(sql`
+      WITH ${allocationInputsCtes(inputs)},
+      occ AS MATERIALIZED (
+        SELECT id AS occurrence_id, run_id AS anchor_id FROM run_outcomes
+        WHERE id = ANY(${`{${[...out.keys()].join(",")}}`}::uuid[])
+      ),
+      ${occurrenceRoutesSql("occ")}
+      SELECT occurrence_id FROM oroute WHERE rerouted
+    `)) as any[];
+    for (const r of rerouted) out.set(r.occurrence_id, { total: ZERO(), slices: [] });
+  }
   return out;
 }
 
 function consumptionOf(
   c: ResolvedConsumption | undefined,
   costs: Map<string, Money>,
-  keys: Array<{ outcomeKey: string; quantity: string }>,
+  keys: Array<{ outcomeKey: string | null; quantity: string }>,
 ): OccurrenceWithCost["consumption"] {
   if (!c || !c.producerId) {
     return { sourceOccurrenceId: null, sourceRunId: null, reuse: false, provenance: "unknown", standardCost: null, consumingOutcomes: splitConsumption(keys, null) };
@@ -1857,9 +2229,10 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
       ...resolved.filter((c) => c.producerRunId).map((c) => c.producerRunId!),
     ]),
   ];
-  const sliced = anchors.length > 0 ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog()) : new Map<string, { total: Money; slices: CostSlice[] }>();
+  const inputs = await fetchAllocationInputs();
+  const sliced = anchors.length > 0 ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog(), inputs) : new Map<string, { total: Money; slices: CostSlice[] }>();
   const costs = new Map([...sliced].map(([id, c]) => [id, c.total]));
-  const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string));
+  const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string), inputs);
   return {
     occurrences: page.map((r) => ({
       id: r.id,

@@ -105,7 +105,7 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     const res = await declare(r.id, { produced: leads(50) });
     expect(res.status).toBe(201);
     expect(res.body.recordedCount).toBe(50);
-    expect(res.body.allocationVersion).toBe(4);
+    expect(res.body.allocationVersion).toBe(5);
 
     const occ = await occurrencesOf(r.id);
     expect(occ).toHaveLength(50);
@@ -368,8 +368,8 @@ describe("Outcome occurrences: the production-cost ledger", () => {
 
   it("checkLedgerRow is exact: one cent off is unbalanced", () => {
     const m = (g: string) => ({ gross: g, net: g, vendor: g, unpricedGross: "0" });
-    expect(checkLedgerRow({ ledger: m("100"), standard: m("70"), reuseGain: m("10"), producedNone: m("40") }).balanced).toBe(true);
-    const off = checkLedgerRow({ ledger: m("100"), standard: m("70"), reuseGain: m("10"), producedNone: { ...m("40"), gross: "39" } });
+    expect(checkLedgerRow({ abnormal: m("0"), ledger: m("100"), standard: m("70"), reuseGain: m("10"), producedNone: m("40") }).balanced).toBe(true);
+    const off = checkLedgerRow({ abnormal: m("0"), ledger: m("100"), standard: m("70"), reuseGain: m("10"), producedNone: { ...m("40"), gross: "39" } });
     expect(off.balanced).toBe(false);
     expect(off.differences.gross).toBe("-1.0000000000");
   });
@@ -415,7 +415,7 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     // The owner takes it back.
     const v = await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set(orgHeaders("lead-service")).send(body);
     expect(v.status).toBe(201);
-    expect(v.body).toMatchObject({ runId: wrong.id, status: "voided", voidedCount: 4, allocationVersion: 4 });
+    expect(v.body).toMatchObject({ runId: wrong.id, status: "voided", voidedCount: 4, allocationVersion: 5 });
     const again = await request(app).post(`/v1/platform-runs/${wrong.id}/outcomes/void`).set(getPlatformAuthHeaders({ serviceName: "lead-service" })).send(body);
     expect(again.status).toBe(200);
     expect(again.body).toMatchObject({ status: "already_voided", voidedCount: 0, voidedAt: v.body.voidedAt });
