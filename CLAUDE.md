@@ -912,7 +912,7 @@ resolution keys on declaration time.
 - **Support marks (migration 0062)**: see "Support spend, named and reported apart" (0064).
 - Guard: `tests/integration/outcome-backfill.test.ts`.
 
-## Support spend, named and reported apart (migrations 0062 + 0064, COST-SUPPORT-1024-RUNS)
+## Support spend, named and reported apart (migrations 0062 + 0064 + 0065, COST-SUPPORT-1024-RUNS)
 
 Doctrine (cost-accounting skill "Not outcomes ... Support functions, reported apart"): spend that produces no outcome BY DESIGN
 is named and stated apart, so coverage reads on outcome spend only: declared / (ledger - support). Never inferred from a cost name.
@@ -920,13 +920,19 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
   `brand_setup`, `copilot`, `platform_llm` (judgments / LLM calls made for no caller run), `staff_experiment`, `product_feature`
   (onboarding, product reads), `retired_product`. The anchor walk stops at a marked run: its cost and its non-declaring subtree's
   never ride an outcome (a judgment made FOR a caller's run is that run's child and rides its outcome: never mark it).
-  Bronze `run.support_marked` -> `run_support_marks`; final, idempotent (first function stays); a marked run produces nothing (409
-  `run_marked_support`); a declaring run is never support.
+  Bronze `run.support_marked` -> `run_support_marks`; idempotent (first function stays until undone); a marked run produces nothing
+  (409 `run_marked_support`); a declaring run is never support.
+- **A mark can be undone (0065, owner 2026-10-24: a retired product may come back)**: staff `POST /internal/runs/support-marks/unmark{,/preview}`
+  (runIds, or serviceName and/or featureSlugs + kind/tasks/window/topLevelOnly), owner `POST /v1/platform-runs/support-marks/unmark/{preview,apply}`.
+  One bronze `run.support_unmarked` per marked run (kind removed, reason, unmarkedBy, `affectedFromDay` = run start day); the projection
+  DELETEs the silver mark, the run declares again and can be re-marked. Bronze keeps both events. The refresher reads unmark events
+  like voids (every stored day >= affectedFromDay computed before the event is stale).
 - **Doors** (`src/services/support-marks.ts`): at creation, body `support: {kind, reason}` on POST /v1/runs + /v1/platform-runs (same
   transaction, markedBy = serviceName); owner bulk `POST /v1/platform-runs/support-marks/{preview,apply}` (x-service-name = owner: its
   own runs only, by runIds (all or nothing, 422 `not_run_owner`) or selection: taskNames, start window, topLevelOnly, withSpendOnly;
   declaring runs left out and counted; preview shows `onOutcomeNowCount` = runs whose cost rides an ancestor's outcome today); staff
-  `POST /internal/runs/support-marks{,/preview}` (any service, `serviceName` selection or runIds). <= 50,000 runs per apply (422
+  `POST /internal/runs/support-marks{,/preview}` (any service: runIds, or `serviceName` and/or `featureSlugs` = a product whatever
+  service ran it; `offOutcomeOnly` leaves out runs whose cost rides an ancestor's outcome today, counted in `leftOnOutcomeCount`). <= 50,000 runs per apply (422
   `too_many_runs`). The selection seq-scans `runs` (no service-first index, ~9 s), own 300 s timeout.
 - **Reads**: produced none = support + undeclared. ledger-check rows + totals: `support`, `supportByFunction`, `undeclared`
   (+ totals `outcomeSpend`, `outcomeSpendCoverage`); outcome-coverage points: `support*Cents`, `supportByFunction`,
@@ -937,6 +943,12 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
 - **Retired products** (no owning repo): marked by staff as `retired_product` through the staff door (legacy `google` serper
   queries Mar..Jul 2026, 51,464 runs $213.50; `emailgeneration-service`, 330 runs $2.55); `apollo/angel-round-enrich` (2026-10-01, one
   staff run, $148.21) = `staff_experiment`. All marked 2026-10-24. Preview `onOutcomeNowCount` is null when `tooMany` (not computed).
+  Owner-deprecated products (2026-10-24, may come back): features `pr-cold-email-outreach`, `pr-expert-quote-outreach`,
+  `pr-expert-quote-opportunities` (featured publishing), `ai-visibility-scoring`, marked `retired_product` by featureSlugs +
+  withSpendOnly + offOutcomeOnly (spend already on an outcome stays). Press kits are NOT retired. Never mark live production.
+- **One answer on every read**: ledger-check, outcome-coverage and outcome-costs read the same stored day rows, so at one instant they
+  agree to the cent (prod 2026-10-24). Two figures captured minutes apart while marks are applied (`supportComplete: false`, days
+  recomputing) differ: compare reads taken together, after `supportComplete`.
 - Guard: `tests/integration/support-functions.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)

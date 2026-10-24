@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
+import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -38,7 +38,9 @@ import {
   SUPPORT_FUNCTIONS,
   SUPPORT_FUNCTION_DESCRIPTIONS,
   markRunsSupport,
+  selectMarkedRuns,
   selectSupportRuns,
+  unmarkRunsSupport,
   type SupportFunction,
 } from "../services/support-marks.js";
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
@@ -272,11 +274,13 @@ type MarkBody = {
   markedBy: string;
   runIds?: string[];
   serviceName?: string;
+  featureSlugs?: string[];
   taskNames?: string[];
   startedAfter?: string;
   startedBefore?: string;
   topLevelOnly?: boolean;
   withSpendOnly?: boolean;
+  offOutcomeOnly?: boolean;
 };
 
 /** runIds mode: every run must exist, belong to `owner` (owner door) and declare no produced outcome; all or nothing. */
@@ -298,10 +302,10 @@ async function checkSupportRunIds(runIds: string[], owner: string | null) {
 /** Preview or apply one mark request; `owner` = the calling service on the owner door, null on the staff door. */
 async function handleSupportMark(res: Response, body: MarkBody, owner: string | null, apply: boolean) {
   const mark = { kind: body.kind, reason: body.reason, markedBy: body.markedBy };
-  const selection = [body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly, body.withSpendOnly].some((v) => v !== undefined);
+  const selection = [body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly, body.withSpendOnly, body.offOutcomeOnly].some((v) => v !== undefined);
   if (body.runIds) {
-    if (selection || body.serviceName) {
-      res.status(400).json({ error: "runIds and a selection (serviceName, taskNames, start window, topLevelOnly, withSpendOnly) are exclusive" });
+    if (selection || body.serviceName || body.featureSlugs) {
+      res.status(400).json({ error: "runIds and a selection (serviceName, featureSlugs, taskNames, start window, topLevelOnly, withSpendOnly, offOutcomeOnly) are exclusive" });
       return;
     }
     const runIds = [...new Set(body.runIds.map((id) => id.toLowerCase()))];
@@ -319,17 +323,20 @@ async function handleSupportMark(res: Response, body: MarkBody, owner: string | 
     return;
   }
   const serviceName = owner ?? body.serviceName;
-  if (!serviceName) {
-    res.status(400).json({ error: "state runIds or serviceName (+ optional selection)" });
+  const featureSlugs = owner ? undefined : body.featureSlugs;
+  if (!serviceName && !featureSlugs) {
+    res.status(400).json({ error: "state runIds, or serviceName and/or featureSlugs (+ optional selection)" });
     return;
   }
   const sel = await selectSupportRuns({
     serviceName,
+    featureSlugs,
     taskNames: body.taskNames,
     startedAfter: body.startedAfter,
     startedBefore: body.startedBefore,
     topLevelOnly: body.topLevelOnly,
     withSpendOnly: body.withSpendOnly,
+    offOutcomeOnly: body.offOutcomeOnly,
   });
   if (!apply) {
     res.json(wireSelection(sel));
@@ -349,6 +356,7 @@ const wireSelection = (sel: Awaited<ReturnType<typeof selectSupportRuns>>) => ({
   alreadyMarkedCount: sel.alreadyMarkedCount,
   declaresOutcomesCount: sel.declaresOutcomesCount,
   onOutcomeNowCount: sel.onOutcomeNowCount,
+  leftOnOutcomeCount: sel.leftOnOutcomeCount,
   spend: sel.spend,
   maxRuns: MAX_SUPPORT_MARK_RUNS,
   tooMany: sel.tooMany,
@@ -387,6 +395,96 @@ const ownerSupportMark = (apply: boolean) => async (req: Request, res: Response)
   }
 };
 
+type UnmarkBody = {
+  reason: string;
+  unmarkedBy: string;
+  kind?: SupportFunction;
+  runIds?: string[];
+  serviceName?: string;
+  featureSlugs?: string[];
+  taskNames?: string[];
+  startedAfter?: string;
+  startedBefore?: string;
+  topLevelOnly?: boolean;
+};
+
+/** Preview or apply undoing support marks (migration 0065); `owner` = the calling service on the owner door, null on the staff door. */
+async function handleSupportUnmark(res: Response, body: UnmarkBody, owner: string | null, apply: boolean) {
+  const selection = [body.kind, body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly].some((v) => v !== undefined);
+  let runIds: string[] | undefined;
+  if (body.runIds) {
+    if (selection || body.serviceName || body.featureSlugs) {
+      res.status(400).json({ error: "runIds and a selection (serviceName, featureSlugs, kind, taskNames, start window, topLevelOnly) are exclusive" });
+      return;
+    }
+    runIds = [...new Set(body.runIds.map((id) => id.toLowerCase()))];
+    // An unmark is never refused for a run that declares (a marked run cannot): only unknown / foreign runs.
+    const invalid = (await checkSupportRunIds(runIds, owner)).filter((x) => x.reason !== "run_declares_outcomes");
+    if (invalid.length > 0) {
+      res.status(422).json({ error: "invalid_runs", details: { invalid } });
+      return;
+    }
+  }
+  const serviceName = owner ?? body.serviceName;
+  const featureSlugs = owner ? undefined : body.featureSlugs;
+  if (!runIds && !serviceName && !featureSlugs) {
+    res.status(400).json({ error: "state runIds, or serviceName and/or featureSlugs (+ optional selection)" });
+    return;
+  }
+  const sel = await selectMarkedRuns(
+    runIds
+      ? { runIds }
+      : { serviceName, featureSlugs, kind: body.kind, taskNames: body.taskNames, startedAfter: body.startedAfter, startedBefore: body.startedBefore, topLevelOnly: body.topLevelOnly },
+  );
+  if (!apply) {
+    res.json({ toUnmarkCount: sel.toUnmark.length, byFunction: sel.byFunction, spend: sel.spend, maxRuns: MAX_SUPPORT_MARK_RUNS, tooMany: sel.tooMany });
+    return;
+  }
+  if (sel.tooMany) {
+    res.status(422).json({ error: "too_many_runs", details: { toUnmarkCount: sel.toUnmark.length, maxRuns: MAX_SUPPORT_MARK_RUNS } });
+    return;
+  }
+  const out = await unmarkRunsSupport(sel.toUnmark, { reason: body.reason, unmarkedBy: body.unmarkedBy });
+  res.json({ unmarkedCount: out.unmarked.length, notMarkedCount: (runIds ? runIds.length - sel.toUnmark.length : 0) + out.notMarked.length });
+}
+
+const staffSupportUnmark = (apply: boolean) => async (req: Request, res: Response) => {
+  try {
+    const parsed = UnmarkRunsSupportRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    await handleSupportUnmark(res, parsed.data, null, apply);
+  } catch (err) {
+    console.error("[Runs Service] support unmark failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const ownerSupportUnmark = (apply: boolean) => async (req: Request, res: Response) => {
+  try {
+    const owner = req.platformServiceName ?? (req.headers["x-service-name"] as string | undefined)?.trim();
+    if (!owner) {
+      res.status(400).json({ error: "x-service-name header is required (the service that owns the runs)" });
+      return;
+    }
+    const parsed = OwnerUnmarkRunsSupportRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    await handleSupportUnmark(res, parsed.data, owner, apply);
+  } catch (err) {
+    console.error("[Runs Service] owner support unmark failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+router.post("/internal/runs/support-marks/unmark/preview", requireInternalAuth, staffSupportUnmark(false));
+router.post("/internal/runs/support-marks/unmark", requireInternalAuth, staffSupportUnmark(true));
+router.post("/v1/platform-runs/support-marks/unmark/preview", requirePlatformAuth, ownerSupportUnmark(false));
+router.post("/v1/platform-runs/support-marks/unmark/apply", requirePlatformAuth, ownerSupportUnmark(true));
 router.post("/internal/runs/support-marks/preview", requireInternalAuth, staffSupportMark(false));
 router.post("/internal/runs/support-marks", requireInternalAuth, staffSupportMark(true));
 router.post("/v1/platform-runs/support-marks/preview", requirePlatformAuth, ownerSupportMark(false));
