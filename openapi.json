@@ -8250,6 +8250,58 @@
           "provenance",
           "days"
         ]
+      },
+      "StateSubjectEquivalencesRequest": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "subjectService": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Your subject space (must be the calling service, x-service-name)."
+                },
+                "subjectId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "targetService": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The subject space it is the same subject as (e.g. lead-service)."
+                },
+                "targetId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "subjectService",
+                "subjectId",
+                "targetService",
+                "targetId"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statedBy": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "items",
+          "reason",
+          "statedBy"
+        ]
       }
     },
     "parameters": {}
@@ -14341,6 +14393,73 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/platform-runs/subject-equivalences": {
+      "post": {
+        "summary": "State that subjects you own are the same subjects as subjects of another space (owner door)",
+        "description": "One occurrence, two subject spaces: the service that OWNS a subject states \"my subject X is the same subject as Y\" (e.g. transactional-email-service: mailing-list subscriber S == lead-service lead L), so a consumption declared under S places on a production declared under L (and the reverse) without declaring twice. The ledger never infers it. x-service-name must equal every item's subjectService (else 422 not_subject_owner). One hop: a target is never itself a source and a source never a target (422 target_is_a_source / source_is_a_target). Rows are immutable: a replay with the same target is already_recorded, another target is 422 conflicting_target. All or nothing. Every stored day from the first day either subject was declared is recomputed by the refresher (listed in daysMissing until then).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateSubjectEquivalencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "recordedCount": {
+                      "type": "integer"
+                    },
+                    "alreadyRecordedCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "recordedCount",
+                    "alreadyRecordedCount"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or missing x-service-name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_equivalences: per-item reasons; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

@@ -793,23 +793,34 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
  * Consumptions of `targetSql` (a SELECT of run_outcomes ids, direction consumed),
  * each resolved to its producing occurrence (rule 5) and flagged reuse when an
  * earlier consumption resolved to the same producer. The history read is every
- * consumption of the targets' subjects: a row's rank depends only on rows
+ * consumption of the targets' subjects (each subject with every subject its
+ * owner stated equivalent, migration 0073): a row's rank depends only on rows
  * declared before it, so later rows never move it.
  */
 function resolvedConsumptionsSql(targetSql: SQL): SQL {
   return sql`
     WITH t AS MATERIALIZED (${targetSql}),
+    -- One subject = its CANONICAL subject (an owner-stated equivalence's target,
+    -- else itself, migration 0073) and every subject stated equivalent to it.
     subj AS MATERIALIZED (
-      SELECT DISTINCT c.outcome_key, c.subject_service, c.subject_id
-      FROM run_outcomes c WHERE c.id IN (SELECT id FROM t)
+      SELECT DISTINCT c.outcome_key, COALESCE(e.target_service, c.subject_service) AS cs, COALESCE(e.target_id, c.subject_id) AS cid
+      FROM run_outcomes c
+      LEFT JOIN subject_equivalences e ON e.subject_service = c.subject_service AND e.subject_id = c.subject_id
+      WHERE c.id IN (SELECT id FROM t)
+    ),
+    members AS MATERIALIZED (
+      SELECT s.outcome_key, s.cs, s.cid, s.cs AS ms, s.cid AS mid FROM subj s
+      UNION
+      SELECT s.outcome_key, s.cs, s.cid, e.subject_service, e.subject_id
+      FROM subj s JOIN subject_equivalences e ON e.target_service = s.cs AND e.target_id = s.cid
     ),
     cons AS MATERIALIZED (
-      SELECT c.id, c.run_id, c.declared_at, c.outcome_key, c.subject_service, c.subject_id
-      FROM subj s
+      SELECT c.id, c.run_id, c.declared_at, c.outcome_key, m.cs, m.cid
+      FROM members m
       CROSS JOIN LATERAL (
         SELECT * FROM run_outcomes c
-        WHERE c.direction = 'consumed' AND c.subject_service = s.subject_service
-          AND c.subject_id = s.subject_id AND c.outcome_key = s.outcome_key
+        WHERE c.direction = 'consumed' AND c.subject_service = m.ms
+          AND c.subject_id = m.mid AND c.outcome_key = m.outcome_key
         OFFSET 0
       ) c
     ),
@@ -817,9 +828,14 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
       SELECT c.*, p.id AS producer_id, p.run_id AS producer_run_id, p.declared_at AS producer_declared_at
       FROM cons c
       LEFT JOIN LATERAL (
-        SELECT p.id, p.run_id, p.declared_at FROM run_outcomes p
-        WHERE p.direction = 'produced' AND p.subject_service = c.subject_service
-          AND p.subject_id = c.subject_id AND p.outcome_key = c.outcome_key
+        SELECT p.id, p.run_id, p.declared_at
+        FROM members m
+        CROSS JOIN LATERAL (
+          SELECT * FROM run_outcomes p
+          WHERE p.direction = 'produced' AND p.subject_service = m.ms AND p.subject_id = m.mid AND p.outcome_key = m.outcome_key
+          OFFSET 0
+        ) p
+        WHERE m.outcome_key = c.outcome_key AND m.cs = c.cs AND m.cid = c.cid
           AND p.declared_at < (date_trunc('day', c.declared_at AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
         ORDER BY (p.declared_at <= c.declared_at) DESC,
                  CASE WHEN p.declared_at <= c.declared_at THEN -extract(epoch FROM p.declared_at) ELSE extract(epoch FROM p.declared_at) END,
@@ -1416,6 +1432,22 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   for (const v of voids) {
     const at = new Date(v.occurred_at);
     for (const [day, computedAt] of computed) if (day >= v.from_day && computedAt < at) out.add(day);
+  }
+  // An equivalence stated after a day was computed re-resolves every consumption
+  // of its two subjects: from the first day either subject was declared.
+  const equated = (await db.execute(sql`
+    WITH e AS MATERIALIZED (SELECT * FROM subject_equivalences WHERE stated_at > ${oldest}::timestamptz)
+    SELECT to_char(MIN(o.declared_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(e.stated_at) AS last_recorded
+    FROM e
+    CROSS JOIN LATERAL (
+      SELECT o.declared_at FROM run_outcomes o WHERE o.subject_service = e.subject_service AND o.subject_id = e.subject_id
+      UNION ALL
+      SELECT o.declared_at FROM run_outcomes o WHERE o.subject_service = e.target_service AND o.subject_id = e.target_id
+    ) o
+    GROUP BY e.subject_service, e.subject_id
+  `)) as any[];
+  for (const [day, at] of computed) {
+    if (equated.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
   }
   // Spend that landed on an EARLIER day than the one it was recorded on: only those
   // rows can move a stored day (a cost row written on time lands on today).

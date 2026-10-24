@@ -27,7 +27,7 @@ vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
 const VERSIONS = [
   { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
 ];
-const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified"]);
+const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified", "email_checked"]);
 
 // Days of their own: no other test file writes spend on them (the reconciliation is fleet-wide).
 const DAY = "2024-08-05";
@@ -250,6 +250,41 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     });
     const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id}&limit=10`).set(getInternalAuthHeaders());
     expect(occ.body.occurrences[0].cost.grossCents).toBe("8.0000000000");
+  });
+
+  it("SUBJECT-EQUIVALENCE-1024: the owner states subscriber S == lead L, a consumption under S places on the check under L", async () => {
+    const day = "2024-08-11";
+    const check = await run(day, "09:00", { serviceName: "apollo-service", taskName: "verify-email" });
+    await cost(check.id, "4", at(day, "09:01"));
+    const send = await run(day, "10:00", { serviceName: "transactional-email-service", taskName: "newsletter-send" });
+    expect((await declare("apollo-service", [
+      { runId: check.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "email_checked", subjectService: "lead-service", subjectId: "LEAD-EQ-1" }] },
+    ])).status).toBe(201);
+    expect((await declare("transactional-email-service", [
+      { runId: send.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "transactional-email-service", subjectId: "SUB-EQ-1" }],
+        consumed: [{ outcomeKey: "email_checked", subjectService: "transactional-email-service", subjectId: "SUB-EQ-1" }] },
+    ])).status).toBe(201);
+    await refresh(day);
+    expect((await recon(day, day)).totals.unknownProvenance).toBe("1.0000000000");
+
+    const equate = (serviceName: string, items: unknown[]) =>
+      request(app).post("/v1/platform-runs/subject-equivalences").set(getPlatformAuthHeaders({ serviceName })).send({ items, reason: "subscriber email resolved to its lead", statedBy: "t" });
+    const item = { subjectService: "transactional-email-service", subjectId: "SUB-EQ-1", targetService: "lead-service", targetId: "LEAD-EQ-1" };
+    // Only the owner of the source subject may state it.
+    expect((await equate("lead-service", [item])).status).toBe(422);
+    expect((await equate("transactional-email-service", [item])).body).toEqual({ recordedCount: 1, alreadyRecordedCount: 0 });
+    expect((await equate("transactional-email-service", [item])).body).toEqual({ recordedCount: 0, alreadyRecordedCount: 1 });
+    // Immutable: another target is refused; one hop: a chain is refused.
+    expect((await equate("transactional-email-service", [{ ...item, targetId: "LEAD-OTHER" }])).body.details.refusals[0].reason).toBe("conflicting_target");
+    expect((await equate("lead-service", [{ subjectService: "lead-service", subjectId: "LEAD-EQ-1", targetService: "x", targetId: "y" }])).body.details.refusals[0].reason).toBe("source_is_a_target");
+
+    // The stored day is stale until recomputed, then the consumption has its producer.
+    expect((await recon(day, day)).daysStale).toEqual([day]);
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals.unknownProvenance).toBe("0.0000000000");
+    const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${send.id}&direction=consumed&limit=10`).set(getInternalAuthHeaders());
+    expect(occ.body.occurrences[0].consumption).toMatchObject({ provenance: "known", sourceRunId: check.id, reuse: false, standardCost: { grossCents: "4.0000000000" } });
   });
 
   it("refuses an unknown parameter", async () => {

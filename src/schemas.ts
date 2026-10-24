@@ -3443,4 +3443,41 @@ registry.registerPath({
   },
 });
 
+export const StateSubjectEquivalencesRequestSchema = z
+  .object({
+    items: z
+      .array(
+        z.object({
+          subjectService: z.string().min(1).openapi({ description: "Your subject space (must be the calling service, x-service-name)." }),
+          subjectId: z.string().min(1),
+          targetService: z.string().min(1).openapi({ description: "The subject space it is the same subject as (e.g. lead-service)." }),
+          targetId: z.string().min(1),
+        }),
+      )
+      .min(1)
+      .max(1000),
+    reason: z.string().min(1),
+    statedBy: z.string().min(1),
+  })
+  .openapi("StateSubjectEquivalencesRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/platform-runs/subject-equivalences",
+  summary: "State that subjects you own are the same subjects as subjects of another space (owner door)",
+  description:
+    "One occurrence, two subject spaces: the service that OWNS a subject states \"my subject X is the same subject as Y\" (e.g. transactional-email-service: mailing-list subscriber S == lead-service lead L), so a consumption declared under S places on a production declared under L (and the reverse) without declaring twice. The ledger never infers it. x-service-name must equal every item's subjectService (else 422 not_subject_owner). One hop: a target is never itself a source and a source never a target (422 target_is_a_source / source_is_a_target). Rows are immutable: a replay with the same target is already_recorded, another target is 422 conflicting_target. All or nothing. Every stored day from the first day either subject was declared is recomputed by the refresher (listed in daysMissing until then).",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: StateSubjectEquivalencesRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Recorded",
+      content: { "application/json": { schema: z.object({ recordedCount: z.number().int(), alreadyRecordedCount: z.number().int() }) } },
+    },
+    400: { description: "Invalid body or missing x-service-name", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "invalid_equivalences: per-item reasons; nothing written", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 export { UUID_STRING_RE as OUTCOME_UUID_RE };
