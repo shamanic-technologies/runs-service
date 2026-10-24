@@ -498,7 +498,7 @@ async function missingDays(since: string, until: string): Promise<string[]> {
 
 /**
  * Days not stored, and days stored without the support split (before migration
- * 0063, until the refresher recomputes them): on those, support reads 0 and
+ * 0064, until the refresher recomputes them): on those, support reads 0 and
  * the spend sits in undeclared.
  */
 async function dayStatus(since: string, until: string): Promise<{ daysMissing: string[]; supportDaysMissing: string[] }> {

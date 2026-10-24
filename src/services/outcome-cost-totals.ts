@@ -21,8 +21,19 @@ export const OUTCOME_COST_DIMENSIONS = [
   "campaignId",
   "workflowSlug",
   "featureSlug",
+  // The run that PRODUCED the consumed occurrence (consumed section only): a reply
+  // declared on an untagged reply-judging run is grouped by the send's workflow,
+  // campaign, brand. Null = no run declared producing it (unknownProvenance) or an
+  // untagged producing run.
+  "sourceOrgId",
+  "sourceBrandId",
+  "sourceCampaignId",
+  "sourceWorkflowSlug",
+  "sourceFeatureSlug",
 ] as const;
 export type OutcomeCostDimension = (typeof OUTCOME_COST_DIMENSIONS)[number];
+
+const isSource = (d: OutcomeCostDimension) => d.startsWith("source");
 
 /** Groups per section above which the read refuses (422) instead of truncating. */
 export const MAX_OUTCOME_COST_GROUPS = 5000;
@@ -43,7 +54,7 @@ export interface OutcomeCostFilters {
   outcomeKey?: string;
 }
 
-const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId">, string> = {
+const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId" | "sourceBrandId">, string> = {
   outcomeKey: "outcome_key",
   day: "day",
   orgId: "organization_id",
@@ -51,10 +62,20 @@ const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId">, string> = {
   campaignId: "campaign_id",
   workflowSlug: "workflow_slug",
   featureSlug: "feature_slug",
+  sourceOrgId: "source_organization_id",
+  sourceCampaignId: "source_campaign_id",
+  sourceWorkflowSlug: "source_workflow_slug",
+  sourceFeatureSlug: "source_feature_slug",
 };
 
 const dimExpr = (d: OutcomeCostDimension): string =>
-  d === "brandId" ? "x.brand_id" : d === "day" ? "to_char(x.day, 'YYYY-MM-DD')" : `x.${COLUMN[d]}::text`;
+  d === "brandId"
+    ? "x.brand_id"
+    : d === "sourceBrandId"
+      ? "x.source_brand_id"
+      : d === "day"
+        ? "to_char(x.day, 'YYYY-MM-DD')"
+        : `x.${COLUMN[d]}::text`;
 
 const fx = (v: unknown) => new Decimal((v as string | null) ?? "0").toFixed(10);
 const moneyOf = (r: any, p = ""): Money => ({
@@ -70,9 +91,20 @@ const MONEY_SUMS = (p = "", col = "") =>
  * Rows of outcome_cost_days in range, with filters applied. A co-branded run is
  * unnested to one row per brand only when the read groups by brand (then counted
  * under EACH brand, as every other brand read here); a brand filter alone keeps
- * one row per stored row.
+ * one row per stored row. Same for the producing run's brands (sourceBrandId).
+ * `sourced`: only days whose consumed rows carry their source (0063); the
+ * others are reported in daysMissing.
  */
-function baseSql(kinds: string[], groupsByBrand: boolean, f: OutcomeCostFilters, since: string, until: string, outcomeCol: string | null): SQL {
+function baseSql(
+  kinds: string[],
+  groupsByBrand: boolean,
+  f: OutcomeCostFilters,
+  since: string,
+  until: string,
+  outcomeCol: string | null,
+  sourced: boolean,
+  groupsBySourceBrand = false,
+): SQL {
   const where: SQL[] = [
     sql`d.allocation_version = ${ALLOCATION_VERSION}`,
     sql`d.day BETWEEN ${since}::date AND ${until}::date`,
@@ -85,11 +117,18 @@ function baseSql(kinds: string[], groupsByBrand: boolean, f: OutcomeCostFilters,
   if (f.featureSlug) where.push(sql`d.feature_slug = ${f.featureSlug}`);
   if (f.outcomeKey && outcomeCol) where.push(sql`${sql.raw(`d.${outcomeCol}`)} = ${f.outcomeKey}`);
   if (f.brandId && !groupsByBrand) where.push(sql`${f.brandId} = ANY(d.brand_ids)`);
+  if (sourced) {
+    where.push(sql`EXISTS (SELECT 1 FROM cost_ledger_computed_days c
+      WHERE c.day = d.day AND c.allocation_version = d.allocation_version AND c.consumed_sources)`);
+  }
   const brand = groupsByBrand
     ? sql`CROSS JOIN LATERAL unnest(CASE WHEN cardinality(d.brand_ids) > 0 THEN d.brand_ids ELSE ARRAY[NULL]::text[] END) AS b(brand_id)`
     : sql`CROSS JOIN LATERAL (SELECT NULL::text AS brand_id) b`;
+  const sourceBrand = groupsBySourceBrand
+    ? sql`CROSS JOIN LATERAL unnest(CASE WHEN cardinality(d.source_brand_ids) > 0 THEN d.source_brand_ids ELSE ARRAY[NULL]::text[] END) AS sb(source_brand_id)`
+    : sql`CROSS JOIN LATERAL (SELECT NULL::text AS source_brand_id) sb`;
   const brandWhere = f.brandId && groupsByBrand ? sql` AND b.brand_id = ${f.brandId}` : sql``;
-  return sql`(SELECT d.*, b.brand_id FROM outcome_cost_days d ${brand} WHERE ${sql.join(where, sql` AND `)}${brandWhere}) x`;
+  return sql`(SELECT d.*, b.brand_id, sb.source_brand_id FROM outcome_cost_days d ${brand} ${sourceBrand} WHERE ${sql.join(where, sql` AND `)}${brandWhere}) x`;
 }
 
 /** Per support function: the 'none' rows' money carrying it (NULL when the group has none). */
@@ -163,7 +202,10 @@ export async function firstOutcomeCostDay(): Promise<string | null> {
 
 export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: OutcomeCostFilters, since: string, until: string): Promise<OutcomeCostTotals> {
   const byBrand = groupBy.includes("brandId");
-  const dims = groupBy.map((name) => ({ name, expr: dimExpr(name) }));
+  // Source dimensions group the consumed section only (produced and scope have no consumed occurrence).
+  const sourced = groupBy.some(isSource);
+  const all = groupBy.map((name) => ({ name, expr: dimExpr(name) }));
+  const dims = all.filter((d) => !isSource(d.name as OutcomeCostDimension));
   const nonOutcome = dims.filter((d) => d.name !== "outcomeKey");
 
   const produced = await grouped(
@@ -171,21 +213,21 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
     dims,
     sql`SUM(x.n) FILTER (WHERE x.kind = 'produced_count')::text AS n,
         SUM(x.quantity) FILTER (WHERE x.kind = 'produced_count')::text AS quantity, ${MONEY_SUMS()}`,
-    baseSql(["produced_count", "produced_cost"], byBrand, f, since, until, "outcome_key"),
+    baseSql(["produced_count", "produced_cost"], byBrand, f, since, until, "outcome_key", sourced),
   );
 
   // Consumptions are always per (consuming outcome, consumed outcome): the inputs of each outcome.
   const consumedDims = [
     { name: "consumingOutcomeKey", expr: "x.outcome_key" },
     { name: "consumedOutcomeKey", expr: "x.consumed_outcome_key" },
-    ...nonOutcome,
+    ...all.filter((d) => d.name !== "outcomeKey"),
   ];
   const consumed = await grouped(
     "consumed",
     consumedDims,
     sql`SUM(x.n)::text AS n, SUM(x.reuses)::text AS reuses, SUM(x.unknown_provenance)::text AS unknown,
         ${MONEY_SUMS()}, ${MONEY_SUMS("r_", "reuse_")}`,
-    baseSql(["consumed"], byBrand, f, since, until, "outcome_key"),
+    baseSql(["consumed"], byBrand, f, since, until, "outcome_key", sourced, groupBy.includes("sourceBrandId")),
   );
 
   // The scope's money, whatever outcome it bought: what the figures above stand on.
@@ -198,12 +240,13 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
         SUM(x.vendor) FILTER (WHERE x.kind = 'none')::text AS z_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'none')::text AS z_unpriced,
         ${MONEY_SUMS()}, SUM(x.n)::text AS n,
         ${supportSums()}`,
-    baseSql(["produced_cost", "none"], byBrand, f, since, until, null),
+    baseSql(["produced_cost", "none"], byBrand, f, since, until, null, sourced),
   );
 
   const computed = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs AND day BETWEEN ${since}::date AND ${until}::date
+      AND (consumed_sources OR NOT ${sourced})
   `)) as any[];
   const split = new Map(computed.map((r) => [r.day as string, r.support_split === true]));
   const daysMissing: string[] = [];

@@ -953,6 +953,12 @@ reads TOTALS, never pages occurrences. Stored per UTC day by the ledger refreshe
 - **Dimensions**: outcomeKey, day, orgId (run's org), costOrgId (cost row's org = ledger check's), brandId (unnested: each brand),
   campaignId, workflowSlug, featureSlug. `costOrgId,day`: produced + none == ledger check `ledger`. Cap 5000 groups per section
   -> 422 `too_many_groups`, never truncated. Consumed standard cost = live production cost at compute time (recent 3 days recomputed).
+- **Source dimensions (migration 0063, P4)**: `sourceOrgId|sourceBrandId|sourceCampaignId|sourceWorkflowSlug|sourceFeatureSlug`
+  group the CONSUMED section by the run that PRODUCED the consumed occurrence (a positive reply declared on an untagged
+  per-org-day reply-judging run is priced per the send's workflow / campaign / brand). Stored on each consumed row
+  (`source_*`, NULL = unknown provenance, still counted in unknownProvenance); produced/scope ignore them. Days computed
+  before 0063 (`cost_ledger_computed_days.consumed_sources = false`) are recomputed by the refresher and listed in
+  daysMissing for a source read until then. Sums over source groups == the read without them (tested).
 - Guard: `tests/integration/outcome-cost-totals.test.ts` (red if a cost-org or split is wrong; writers shard).
 
 ## A platform run made on behalf of a caller's run (`body.parentRunId`, COST-ACCOUNTING-1023-P1)
