@@ -9,7 +9,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { statsDb } from "../db/index.js";
-import { ALLOCATION_VERSION, addDays, firstLedgerDay, supportTotal, utcDay, type Money, type SupportByFunction } from "./outcome-ledger.js";
+import { ALLOCATION_VERSION, addDays, firstLedgerDay, staleDaysIn, supportTotal, utcDay, type Money, type SupportByFunction } from "./outcome-ledger.js";
 
 /** Longest since..until range of the totals read (= the route's parseRange cap). */
 export const MAX_RANGE_DAYS = 400;
@@ -24,6 +24,10 @@ export const OUTCOME_COST_DIMENSIONS = [
   "campaignId",
   "workflowSlug",
   "featureSlug",
+  // The run's audience (the one its lead was served under) and its service: the
+  // declaring run (produced), the consuming run (consumed), the spending run (none).
+  "audienceId",
+  "serviceName",
   // UTC day the row's run STARTED: the declaring run (produced), the consuming run
   // (consumed), the spending run (scope's produced-none part).
   "runStartDay",
@@ -36,6 +40,7 @@ export const OUTCOME_COST_DIMENSIONS = [
   "sourceCampaignId",
   "sourceWorkflowSlug",
   "sourceFeatureSlug",
+  "sourceAudienceId",
   // WHEN the consumed occurrence was produced: its declaration's UTC day, and the
   // UTC day its producing run started (a reply grouped by the day of the send it answers).
   "sourceDay",
@@ -63,6 +68,8 @@ export interface OutcomeCostFilters {
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  audienceId?: string;
+  serviceName?: string;
   outcomeKey?: string;
   /** Inclusive UTC day: only rows whose run started on or before it (every section). */
   runStartUntil?: string;
@@ -83,6 +90,9 @@ const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId" | "sourceBrandId">,
   campaignId: "campaign_id",
   workflowSlug: "workflow_slug",
   featureSlug: "feature_slug",
+  audienceId: "audience_id",
+  serviceName: "service_name",
+  sourceAudienceId: "source_audience_id",
   sourceOrgId: "source_organization_id",
   sourceCampaignId: "source_campaign_id",
   sourceWorkflowSlug: "source_workflow_slug",
@@ -143,6 +153,8 @@ function baseSql(
   if (f.campaignId) where.push(sql`d.campaign_id = ${f.campaignId}`);
   if (f.workflowSlug) where.push(sql`d.workflow_slug = ${f.workflowSlug}`);
   if (f.featureSlug) where.push(sql`d.feature_slug = ${f.featureSlug}`);
+  if (f.audienceId) where.push(sql`d.audience_id = ${f.audienceId}`);
+  if (f.serviceName) where.push(sql`d.service_name = ${f.serviceName}`);
   if (f.outcomeKey && outcomeCol) where.push(sql`${sql.raw(`d.${outcomeCol}`)} = ${f.outcomeKey}`);
   if (f.brandId && !groupsByBrand) where.push(sql`${f.brandId} = ANY(d.brand_ids)`);
   if (f.runStartUntil) where.push(sql`d.run_start_day <= ${f.runStartUntil}::date`);
@@ -199,7 +211,9 @@ const share = (part: string, whole: string) => {
 export interface OutcomeCostTotals {
   since: string;
   until: string;
+  /** Days not stored, or stored but STALE (listed apart in daysStale). */
   daysMissing: string[];
+  daysStale: string[];
   produced: Array<{ dimensions: Record<string, string | null>; occurrences: number; quantity: string; cost: Money }>;
   consumed: Array<{
     dimensions: Record<string, string | null>;
@@ -293,10 +307,12 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
       AND (start_days OR NOT ${startDays})
   `)) as any[];
   const split = new Map(computed.map((r) => [r.day as string, r.support_split === true]));
+  const daysStale = await staleDaysIn(since, until);
+  const stale = new Set(daysStale);
   const daysMissing: string[] = [];
   const supportDaysMissing: string[] = [];
   for (let d = since; d <= until; d = addDays(d, 1)) {
-    if (!split.has(d)) daysMissing.push(d);
+    if (!split.has(d) || stale.has(d)) daysMissing.push(d);
     if (!split.get(d)) supportDaysMissing.push(d);
   }
 
@@ -305,6 +321,7 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
     since,
     until,
     daysMissing,
+    daysStale,
     supportDaysMissing,
     produced: produced.map((r) => ({
       dimensions: dimensionsOf(r, names),

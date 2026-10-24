@@ -1,0 +1,206 @@
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import request from "supertest";
+import { Decimal } from "decimal.js";
+import { createTestApp, getInternalAuthHeaders, getPlatformAuthHeaders } from "../helpers/test-app.js";
+import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
+import { db } from "../../src/db/index.js";
+import { sql } from "drizzle-orm";
+import { computeLedgerDay, daysToCompute, storeLedgerDay } from "../../src/services/outcome-ledger.js";
+
+// LEDGER-HISTORY-1024-RUNS: allocation v3 (cross-run loss pooled per campaign),
+// the reconciliation readers gate on, and stale days (a fact recorded after a day
+// was computed) never read as complete.
+
+const ORG = "0c05acc0-1024-4c0a-8b1e-0000000000d7";
+
+const catalog = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock("../../src/services/vendor-costs.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/vendor-costs.js")>();
+  return { ...actual, fetchVendorCostCatalog: catalog.fn };
+});
+const stepCatalogue = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/outcome-catalogue.js")>();
+  return { ...actual, unknownOutcomeKeys: stepCatalogue.fn };
+});
+
+const VERSIONS = [
+  { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
+];
+const CATALOGUE = new Set(["lead_found", "message_sent", "conversation"]);
+
+// Days of their own: no other test file writes spend on them (the reconciliation is fleet-wide).
+const DAY = "2024-08-05";
+const DAY2 = "2024-08-06";
+const app = createTestApp();
+
+const at = (day: string, hour: string) => new Date(`${day}T${hour}:00Z`);
+const run = (day: string, hour: string, extra: Partial<Parameters<typeof insertTestRun>[0]> = {}) =>
+  insertTestRun({ organizationId: ORG, serviceName: "workflow-service", taskName: "execute-workflow", status: "completed", startedAt: at(day, hour), ...extra });
+const cost = (runId: string, cents: string, createdAt: Date, status = "actual") =>
+  insertTestRunCost({
+    runId,
+    costName: "tok",
+    quantity: new Decimal(cents).div(5).toString(),
+    unitCostInUsdCents: "5",
+    totalCostInUsdCents: new Decimal(cents).toFixed(10),
+    status,
+    createdAt,
+  });
+const refresh = async (day: string) => storeLedgerDay(await computeLedgerDay(day, VERSIONS as any));
+const declare = (serviceName: string, runs: unknown[]) =>
+  request(app).post("/v1/platform-runs/outcomes/batch").set(getPlatformAuthHeaders({ serviceName })).send({ runs });
+const recon = async (since: string, until: string) => {
+  const res = await request(app).get(`/internal/outcome-costs/reconciliation?since=${since}&until=${until}`).set(getInternalAuthHeaders());
+  expect(res.status).toBe(200);
+  return res.body;
+};
+
+describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
+  beforeAll(async () => {
+    catalog.fn.mockResolvedValue(VERSIONS);
+    stepCatalogue.fn.mockImplementation(async (keys: string[]) => keys.filter((k) => !CATALOGUE.has(k)));
+    await cleanTestData([ORG]);
+  });
+  afterAll(async () => {
+    await cleanTestData([ORG]);
+    await closeDb();
+  });
+
+  it("v3: a run that produced nothing rides its OWN campaign's units; a campaign with none keeps its loss, attributable to it", async () => {
+    // Campaign A: one send (unit) + one run judged "later" (loss). Campaign B, same
+    // workflow, same org: only a loss run. v2 moved B's loss onto A's unit.
+    const sendA = await run(DAY, "09:00", { campaignId: "cmp-A", workflowSlug: "w-follow", audienceId: "aud-1" });
+    await cost(sendA.id, "4", at(DAY, "09:01"));
+    const lostA = await run(DAY, "10:00", { campaignId: "cmp-A", workflowSlug: "w-follow", audienceId: "aud-1" });
+    await cost(lostA.id, "6", at(DAY, "10:01"));
+    const lostB = await run(DAY, "10:30", { campaignId: "cmp-B", workflowSlug: "w-follow", audienceId: "aud-2" });
+    await cost(lostB.id, "3", at(DAY, "10:31"));
+    // Undeclared: a run of a producer that has not declared (no pipe, no mark).
+    const silent = await run(DAY, "11:00", { serviceName: "apollo-service", taskName: "enrich" });
+    await cost(silent.id, "2", at(DAY, "11:01"));
+    // Support.
+    const fee = await run(DAY, "11:30", { serviceName: "stripe-service", taskName: "charge" });
+    await cost(fee.id, "1", at(DAY, "11:31"));
+    expect(
+      (await request(app).post("/internal/runs/support-marks").set(getInternalAuthHeaders())
+        .send({ kind: "payment_fees", reason: "processor fee", markedBy: "t", runIds: [fee.id] })).status,
+    ).toBe(200);
+    // A reply judged on a run consuming a send nobody declared producing (unknown provenance).
+    const reply = await run(DAY, "12:00", { serviceName: "instantly-service", taskName: "judge-replies" });
+    expect(
+      (await declare("workflow-service", [
+        { runId: sendA.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "L1" }] },
+      ])).status,
+    ).toBe(201);
+    expect(
+      (await declare("instantly-service", [
+        {
+          runId: reply.id,
+          occurredAt: "run_started_at",
+          produced: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: "L9" }],
+          consumed: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "L9" }],
+        },
+      ])).status,
+    ).toBe(201);
+    await refresh(DAY);
+
+    const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY}&until=${DAY}`).set(getInternalAuthHeaders());
+    expect(check.body.allocationVersion).toBe(3);
+    expect(check.body.balanced).toBe(true);
+    const row = check.body.rows.find((r: any) => r.organizationId === ORG);
+    expect(row.ledger.grossCents).toBe("16.0000000000");
+    expect(row.allocated.grossCents).toBe("10.0000000000"); // send 4 + A's loss 6, never B's 3
+    expect(row.normalLoss.grossCents).toBe("6.0000000000");
+
+    // B's loss stays produced-none under campaign B and its audience.
+    const oc = await request(app)
+      .get(`/internal/stats/outcome-costs?since=${DAY}&until=${DAY}&orgId=${ORG}&groupBy=campaignId,audienceId`)
+      .set(getInternalAuthHeaders());
+    expect(oc.status).toBe(200);
+    const scopeB = oc.body.scope.find((s: any) => s.dimensions.campaignId === "cmp-B");
+    expect(scopeB.dimensions.audienceId).toBe("aud-2");
+    expect(scopeB.producedNone.grossCents).toBe("3.0000000000");
+    expect(scopeB.producedCost.grossCents).toBe("0.0000000000");
+    const prodA = oc.body.produced.find((p: any) => p.dimensions.campaignId === "cmp-A");
+    expect(prodA).toMatchObject({ dimensions: { audienceId: "aud-1" }, cost: { grossCents: "10.0000000000" } });
+
+    const r = await recon(DAY, DAY);
+    expect(r).toMatchObject({ balanced: true, complete: true, declarationsComplete: false, reconciled: false, daysMissing: [] });
+    const t = r.totals;
+    expect(t.spend.grossCents).toBe("16.0000000000");
+    expect(t.declaredProduction.grossCents).toBe("4.0000000000");
+    expect(t.normalLoss.grossCents).toBe("6.0000000000");
+    expect(t.unpooledLoss.grossCents).toBe("3.0000000000");
+    expect(t.undeclared.grossCents).toBe("2.0000000000");
+    expect(t.support.grossCents).toBe("1.0000000000");
+    for (const k of ["grossCents", "netCents", "vendorCents", "unpricedGrossCents"]) expect(t.differences[k]).toBe("0.0000000000");
+    expect(t.shares.undeclared.gross).toBe("0.1250000000");
+    expect(t.consumptions).toBe("1.0000000000");
+    expect(t.unknownProvenance).toBe("1.0000000000");
+    expect(r.services[0]).toMatchObject({ serviceName: "apollo-service", undeclaredRuns: 1, undeclared: { grossCents: "2.0000000000" } });
+    expect(r.services.find((s: any) => s.serviceName === "workflow-service")).toMatchObject({ unpooledLossRuns: 1, unpooledLoss: { grossCents: "3.0000000000" } });
+    expect(r.provenance[0]).toMatchObject({ consumedOutcomeKey: "message_sent", consumingServiceName: "instantly-service", unknownProvenance: "1.0000000000", unknownShare: "1.0000000000" });
+
+    // Group by the spending service: who still spends without declaring.
+    const bySvc = await request(app)
+      .get(`/internal/stats/outcome-costs?since=${DAY}&until=${DAY}&orgId=${ORG}&groupBy=serviceName`)
+      .set(getInternalAuthHeaders());
+    expect(bySvc.body.scope.find((s: any) => s.dimensions.serviceName === "apollo-service").undeclared.grossCents).toBe("2.0000000000");
+  });
+
+  it("a backfill recorded after a day was computed makes the day STALE: missing, out of totals, until recomputed", async () => {
+    const send = await run(DAY2, "09:00", { serviceName: "instantly-service", taskName: "send" });
+    await cost(send.id, "5", at(DAY2, "09:01"));
+    await refresh(DAY2);
+    let r = await recon(DAY2, DAY2);
+    expect(r).toMatchObject({ complete: true, daysMissing: [], daysStale: [] });
+    expect(r.totals.undeclared.grossCents).toBe("5.0000000000");
+
+    // The producer backfills the outcome of its past run, today.
+    expect(
+      (await declare("instantly-service", [
+        { runId: send.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "S1" }] },
+      ])).status,
+    ).toBe(201);
+    r = await recon(DAY2, DAY2);
+    expect(r).toMatchObject({ complete: false, reconciled: false, daysMissing: [DAY2], daysStale: [DAY2] });
+    expect(r.totals.spend.grossCents).toBe("0.0000000000"); // a stale day is never summed
+    const oc = await request(app).get(`/internal/stats/outcome-costs?since=${DAY2}&until=${DAY2}`).set(getInternalAuthHeaders());
+    expect(oc.body).toMatchObject({ complete: false, daysMissing: [DAY2], daysStale: [DAY2] });
+
+    // The refresher's sweep flags it and moves its window past the backfill: still stale (by the flag).
+    expect(await daysToCompute(new Date("2024-08-20T12:00:00Z"), DAY2, true)).toContain(DAY2);
+    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 3`)) as any[];
+    expect(flag.stale).toBe(true);
+    expect(await recon(DAY2, DAY2)).toMatchObject({ complete: false, daysStale: [DAY2] });
+
+    await refresh(DAY2);
+    r = await recon(DAY2, DAY2);
+    expect(r).toMatchObject({ complete: true, balanced: true, declarationsComplete: true, reconciled: true, daysStale: [] });
+    expect(r.totals.declaredProduction.grossCents).toBe("5.0000000000");
+    expect(r.totals.shares.declaredProduction.gross).toBe("1.0000000000");
+  });
+
+  it("spend landing on a past day after it was computed (a hold materialized late) makes the day stale", async () => {
+    const day = "2024-08-07";
+    const send = await run(day, "09:00", { serviceName: "instantly-service", taskName: "send" });
+    const hold = await cost(send.id, "7", at(day, "09:01"), "provisioned");
+    await refresh(day);
+    expect((await recon(day, day)).totals.spend.grossCents).toBe("0.0000000000");
+    await db.execute(sql`
+      INSERT INTO cost_lifecycle_events (cost_id, run_id, event_type, payload)
+      VALUES (${hold.id}::uuid, ${send.id}::uuid, 'cost.materialized', '{"from":"provisioned","to":"actual"}'::jsonb)
+    `);
+    expect(await recon(day, day)).toMatchObject({ complete: false, daysStale: [day] });
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r).toMatchObject({ complete: true, daysStale: [] });
+    expect(r.totals.spend.grossCents).toBe("7.0000000000");
+  });
+
+  it("refuses an unknown parameter", async () => {
+    const res = await request(app).get(`/internal/outcome-costs/reconciliation?since=${DAY}&foo=1`).set(getInternalAuthHeaders());
+    expect(res.status).toBe(400);
+  });
+});
