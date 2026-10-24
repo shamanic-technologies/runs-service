@@ -727,7 +727,8 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
              none_gross::text, none_net::text, none_vendor::text, none_unpriced_gross::text,
              reuse_gross::text, reuse_net::text, reuse_vendor::text, reuse_unpriced_gross::text,
              reuse_count, unknown_provenance_count, cost_rows, occurrences, support_by_function,
-             loss_gross::text, loss_net::text, loss_vendor::text, loss_unpriced_gross::text
+             loss_gross::text, loss_net::text, loss_vendor::text, loss_unpriced_gross::text,
+             abnormal_gross::text, abnormal_net::text, abnormal_vendor::text, abnormal_unpriced_gross::text, abnormal_by_reason
       FROM cost_ledger_days
       WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${range.since}::date AND ${range.until}::date
       ORDER BY day, organization_id NULLS FIRST
@@ -738,8 +739,9 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       vendor: new Decimal(r[`${p}_vendor`]).toFixed(10),
       unpricedGross: new Decimal(r[u]).toFixed(10),
     });
-    const totals = { ledger: zeroMoney(), standard: zeroMoney(), reuseGain: zeroMoney(), allocated: zeroMoney(), producedNone: zeroMoney(), normalLoss: zeroMoney() };
+    const totals = { ledger: zeroMoney(), standard: zeroMoney(), reuseGain: zeroMoney(), allocated: zeroMoney(), producedNone: zeroMoney(), normalLoss: zeroMoney(), abnormal: zeroMoney() };
     let totalSupport: SupportByFunction = {};
+    const totalAbnormal: Record<string, Money> = {};
     const rows = stored.map((r) => {
       const row = {
         ledger: m(r, "ledger", "ledger_unpriced_gross"),
@@ -747,8 +749,15 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         producedNone: m(r, "none", "none_unpriced_gross"),
         reuse: m(r, "reuse", "reuse_unpriced_gross"),
         normalLoss: m(r, "loss", "loss_unpriced_gross"),
+        abnormal: m(r, "abnormal", "abnormal_unpriced_gross"),
       };
       const input = ledgerCheckInputOf(row);
+      totals.abnormal = addMoney(totals.abnormal, row.abnormal);
+      const abnormalByReason: Record<string, Money> = {};
+      for (const [k, v] of Object.entries((r.abnormal_by_reason ?? {}) as Record<string, Money>)) {
+        abnormalByReason[k] = v;
+        totalAbnormal[k] = addMoney(totalAbnormal[k] ?? zeroMoney(), v);
+      }
       totals.ledger = addMoney(totals.ledger, input.ledger);
       totals.standard = addMoney(totals.standard, input.standard);
       totals.reuseGain = addMoney(totals.reuseGain, input.reuseGain);
@@ -771,6 +780,8 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         support: wireMoney(support),
         supportByFunction: wireSupport(supportByFunction),
         undeclared: wireMoney(subMoney(row.producedNone, support)),
+        abnormal: wireMoney(row.abnormal),
+        abnormalByReason: Object.fromEntries(Object.entries(abnormalByReason).map(([k, v]) => [k, wireMoney(v)])),
         differences: wireMoney(check.differences),
         balanced: check.balanced,
         costRows: Number(r.cost_rows),
@@ -805,8 +816,13 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         support: wireMoney(support),
         supportByFunction: wireSupport(totalSupport),
         undeclared: wireMoney(subMoney(totals.producedNone, support)),
+        abnormal: wireMoney(totals.abnormal),
+        abnormalByReason: Object.fromEntries(Object.entries(totalAbnormal).map(([k, v]) => [k, wireMoney(v)])),
         outcomeSpend: wireMoney(outcomeSpend),
-        outcomeSpendCoverage: { gross: fraction(totals.allocated.gross, outcomeSpend.gross), net: fraction(totals.allocated.net, outcomeSpend.net) },
+        outcomeSpendCoverage: {
+          gross: fraction(addMoney(totals.allocated, totals.abnormal).gross, outcomeSpend.gross),
+          net: fraction(addMoney(totals.allocated, totals.abnormal).net, outcomeSpend.net),
+        },
       },
       mismatches,
       rows: q.rows === "false" ? [] : rows,
@@ -1022,7 +1038,10 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         support: wireMoney(g.support),
         supportByFunction: wireSupport(g.supportByFunction),
         undeclared: wireMoney(g.undeclared),
+        abnormal: wireMoney(g.abnormal),
       })),
+      abnormal: totals.abnormal.map((g) => ({ ...g, cost: wireMoney(g.cost) })),
+      parallel: totals.parallel.map((g) => ({ ...g, cost: wireMoney(g.cost), unpooled: wireMoney(g.unpooled) })),
     });
   } catch (err) {
     if (err instanceof TooManyGroupsError) {

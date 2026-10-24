@@ -232,12 +232,18 @@ export interface OutcomeCostTotals {
     support: Money;
     supportByFunction: SupportByFunction;
     undeclared: Money;
+    /** Abnormal loss (v5) under the paying run's tags: spend = producedCost + producedNone + abnormal. */
+    abnormal: Money;
     coverageShare: { gross: string | null; net: string | null };
     /** producedCost / (spend - support): coverage on outcome spend only. */
     outcomeSpendCoverageShare: { gross: string | null; net: string | null };
   }>;
   /** Days stored before the support split (support reads 0 there until recomputed). */
   supportDaysMissing: string[];
+  /** v5: spend in no unit cost, per reason (dimensions carry abnormalReason). */
+  abnormal: Array<{ dimensions: Record<string, string | null>; runs: string; cost: Money }>;
+  /** v5: the routed spend priced in the OTHER state family (never summed with produced across keys). */
+  parallel: Array<{ dimensions: Record<string, string | null>; cost: Money; unpooled: Money }>;
 }
 
 /**
@@ -295,9 +301,30 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
         SUM(x.vendor) FILTER (WHERE x.kind = 'produced_cost')::text AS p_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'produced_cost')::text AS p_unpriced,
         SUM(x.gross) FILTER (WHERE x.kind = 'none')::text AS z_gross, SUM(x.net) FILTER (WHERE x.kind = 'none')::text AS z_net,
         SUM(x.vendor) FILTER (WHERE x.kind = 'none')::text AS z_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'none')::text AS z_unpriced,
+        SUM(x.gross) FILTER (WHERE x.kind = 'abnormal')::text AS a_gross, SUM(x.net) FILTER (WHERE x.kind = 'abnormal')::text AS a_net,
+        SUM(x.vendor) FILTER (WHERE x.kind = 'abnormal')::text AS a_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'abnormal')::text AS a_unpriced,
         ${MONEY_SUMS()}, SUM(x.n)::text AS n,
         ${supportSums()}`,
-    baseSql(["produced_cost", "none"], byBrand, f, since, until, null, sourced, startDays, false),
+    baseSql(["produced_cost", "none", "abnormal"], byBrand, f, since, until, null, sourced, startDays, false),
+  );
+
+  // v5: abnormal loss per reason, and the other state family's view of the routed spend.
+  const abnormalDims = [{ name: "abnormalReason", expr: "x.abnormal_reason" }, ...dims];
+  const abnormal = await grouped(
+    "abnormal",
+    abnormalDims,
+    sql`SUM(x.n)::text AS n, ${MONEY_SUMS()}`,
+    baseSql(["abnormal"], byBrand, f, since, until, "outcome_key", sourced, startDays, false),
+  );
+  const parallel = await grouped(
+    "parallel",
+    dims,
+    sql`SUM(x.n)::text AS n,
+        SUM(x.gross) FILTER (WHERE x.kind = 'parallel_cost')::text AS gross, SUM(x.net) FILTER (WHERE x.kind = 'parallel_cost')::text AS net,
+        SUM(x.vendor) FILTER (WHERE x.kind = 'parallel_cost')::text AS vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'parallel_cost')::text AS unpriced,
+        SUM(x.gross) FILTER (WHERE x.kind = 'parallel_none')::text AS u_gross, SUM(x.net) FILTER (WHERE x.kind = 'parallel_none')::text AS u_net,
+        SUM(x.vendor) FILTER (WHERE x.kind = 'parallel_none')::text AS u_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'parallel_none')::text AS u_unpriced`,
+    baseSql(["parallel_cost", "parallel_none"], byBrand, f, since, until, "outcome_key", sourced, startDays, false),
   );
 
   const computed = (await statsDb.execute(sql`
@@ -359,6 +386,7 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
         support,
         supportByFunction,
         undeclared,
+        abnormal: moneyOf(r, "a_"),
         coverageShare: { gross: share(producedCost.gross, spend.gross), net: share(producedCost.net, spend.net) },
         outcomeSpendCoverageShare: {
           gross: share(producedCost.gross, sub(spend.gross, support.gross)),
@@ -366,5 +394,7 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
         },
       };
     }),
+    abnormal: abnormal.map((r) => ({ dimensions: dimensionsOf(r, abnormalDims.map((d) => d.name)), runs: fx(r.n), cost: moneyOf(r) })),
+    parallel: parallel.map((r) => ({ dimensions: dimensionsOf(r, names), cost: moneyOf(r), unpooled: moneyOf(r, "u_") })),
   };
 }
