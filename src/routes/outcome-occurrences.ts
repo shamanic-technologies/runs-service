@@ -49,6 +49,7 @@ import {
   OUTCOME_COST_DIMENSIONS,
   TooManyGroupsError,
   firstOutcomeCostDay,
+  MAX_RANGE_DAYS,
   readOutcomeCostTotals,
   type OutcomeCostDimension,
 } from "../services/outcome-cost-totals.js";
@@ -574,7 +575,6 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
 });
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const MAX_RANGE_DAYS = 400;
 
 /** since/until as UTC days (inclusive), or an error message. */
 function parseRange(q: Record<string, string | undefined>, defaultUntil: string, defaultSpan: number): { since: string; until: string } | string {

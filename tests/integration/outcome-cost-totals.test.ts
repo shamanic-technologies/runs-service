@@ -329,6 +329,27 @@ describe("GET /internal/stats/outcome-costs: the outcome ledger as totals", () =
     }
   });
 
+  it("default since = the first day of SPEND, never the first day stored under this version: unstored days read missing", async () => {
+    const { firstOutcomeCostDay } = await import("../../src/services/outcome-cost-totals.js");
+    const { firstLedgerDay } = await import("../../src/services/outcome-ledger.js");
+    // A spend day nobody has stored yet (as after a version bump: only the newest days recomputed).
+    const old = addDays(TODAY, -120);
+    const run = await insertTestRun({ organizationId: ORG, serviceName: "x-service", taskName: "t", status: "completed", startedAt: new Date(`${old}T10:00:00Z`) });
+    await insertTestRunCost({ runId: run.id, costName: "tok", quantity: "1", unitCostInUsdCents: "1", totalCostInUsdCents: "1.0000000000", status: "actual", createdAt: new Date(`${old}T10:01:00Z`) });
+    try {
+      const first = await firstLedgerDay(TODAY);
+      expect(first <= old).toBe(true);
+      const res = await totals(`groupBy=`);
+      expect(res.status).toBe(200);
+      expect(res.body.since).toBe(await firstOutcomeCostDay());
+      expect(res.body.since <= old).toBe(true);
+      expect(res.body.complete).toBe(false);
+      expect(res.body.daysMissing).toContain(old);
+    } finally {
+      await db.execute(sql`DELETE FROM runs WHERE id = ${run.id}::uuid`);
+    }
+  });
+
   it("contract: bad groupBy 400, missing days stated, too many groups 422 (never truncated)", async () => {
     expect((await totals("groupBy=subjectId")).status).toBe(400);
     expect((await totals("groupBy=day,day")).status).toBe(400);

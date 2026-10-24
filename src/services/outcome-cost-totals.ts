@@ -9,7 +9,10 @@
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { statsDb } from "../db/index.js";
-import { ALLOCATION_VERSION, addDays, supportTotal, type Money, type SupportByFunction } from "./outcome-ledger.js";
+import { ALLOCATION_VERSION, addDays, firstLedgerDay, supportTotal, utcDay, type Money, type SupportByFunction } from "./outcome-ledger.js";
+
+/** Longest since..until range of the totals read (= the route's parseRange cap). */
+export const MAX_RANGE_DAYS = 400;
 import { SUPPORT_FUNCTIONS } from "./support-marks.js";
 
 export const OUTCOME_COST_DIMENSIONS = [
@@ -223,13 +226,20 @@ export interface OutcomeCostTotals {
   supportDaysMissing: string[];
 }
 
-/** First UTC day the refresher stored outcome totals for (null when none yet). */
-export async function firstOutcomeCostDay(): Promise<string | null> {
-  const [r] = (await statsDb.execute(sql`
-    SELECT to_char(MIN(day), 'YYYY-MM-DD') AS day FROM cost_ledger_computed_days
-    WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs
-  `)) as any[];
-  return r?.day ?? null;
+/**
+ * Default `since` of the totals read ("since inception"): the first day of SPEND
+ * in the ledger (firstLedgerDay), never the first day stored under the current
+ * allocation version. Keyed on stored days, a version bump made the read start at
+ * the first day v2 had recomputed and answer complete on 16 days of 265 ($2.4k of
+ * $23k, Research served $7.41 per positive reply instead of $148, 2026-10-24).
+ * Days the refresher has not stored yet now read as daysMissing. Capped to the
+ * read's 400-day range.
+ */
+export async function firstOutcomeCostDay(): Promise<string> {
+  const today = utcDay(new Date());
+  const first = await firstLedgerDay(today);
+  const floor = addDays(today, -(MAX_RANGE_DAYS - 1));
+  return first < floor ? floor : first;
 }
 
 export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: OutcomeCostFilters, since: string, until: string): Promise<OutcomeCostTotals> {
