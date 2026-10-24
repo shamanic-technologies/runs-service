@@ -299,6 +299,7 @@ type MarkBody = {
   topLevelOnly?: boolean;
   withSpendOnly?: boolean;
   offOutcomeOnly?: boolean;
+  offAncestorMarkOnly?: boolean;
 };
 
 /** runIds mode: every run must exist, belong to `owner` (owner door) and declare no produced outcome; all or nothing. */
@@ -320,10 +321,10 @@ async function checkSupportRunIds(runIds: string[], owner: string | null) {
 /** Preview or apply one mark request; `owner` = the calling service on the owner door, null on the staff door. */
 async function handleSupportMark(res: Response, body: MarkBody, owner: string | null, apply: boolean) {
   const mark = { kind: body.kind, reason: body.reason, markedBy: body.markedBy };
-  const selection = [body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly, body.withSpendOnly, body.offOutcomeOnly].some((v) => v !== undefined);
+  const selection = [body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly, body.withSpendOnly, body.offOutcomeOnly, body.offAncestorMarkOnly].some((v) => v !== undefined);
   if (body.runIds) {
     if (selection || body.serviceName || body.featureSlugs) {
-      res.status(400).json({ error: "runIds and a selection (serviceName, featureSlugs, taskNames, start window, topLevelOnly, withSpendOnly, offOutcomeOnly) are exclusive" });
+      res.status(400).json({ error: "runIds and a selection (serviceName, featureSlugs, taskNames, start window, topLevelOnly, withSpendOnly, offOutcomeOnly, offAncestorMarkOnly) are exclusive" });
       return;
     }
     const runIds = [...new Set(body.runIds.map((id) => id.toLowerCase()))];
@@ -355,6 +356,7 @@ async function handleSupportMark(res: Response, body: MarkBody, owner: string | 
     topLevelOnly: body.topLevelOnly,
     withSpendOnly: body.withSpendOnly,
     offOutcomeOnly: body.offOutcomeOnly,
+    offAncestorMarkOnly: body.offAncestorMarkOnly,
   });
   if (!apply) {
     res.json(wireSelection(sel));
@@ -375,6 +377,8 @@ const wireSelection = (sel: Awaited<ReturnType<typeof selectSupportRuns>>) => ({
   declaresOutcomesCount: sel.declaresOutcomesCount,
   onOutcomeNowCount: sel.onOutcomeNowCount,
   leftOnOutcomeCount: sel.leftOnOutcomeCount,
+  onAncestorMarkNowCount: sel.onAncestorMarkNowCount,
+  leftOnAncestorMarkCount: sel.leftOnAncestorMarkCount,
   spend: sel.spend,
   maxRuns: MAX_SUPPORT_MARK_RUNS,
   tooMany: sel.tooMany,

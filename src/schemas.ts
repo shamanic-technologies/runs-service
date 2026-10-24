@@ -2872,6 +2872,7 @@ const SupportSelectionShape = {
   topLevelOnly: z.boolean().optional().openapi({ description: "Only runs with no parent (e.g. judgments made for no caller run; a child made on behalf of a caller's run rides that run's outcome)." }),
   withSpendOnly: z.boolean().optional().openapi({ description: "Only runs carrying spend (an actual or refunded cost row)." }),
   offOutcomeOnly: z.boolean().optional().openapi({ description: "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount." }),
+  offAncestorMarkOnly: z.boolean().optional().openapi({ description: "Leave out runs whose cost already stops on an ANCESTOR's support mark (marking them would relabel that owner's decision); counted in leftOnAncestorMarkCount." }),
 };
 
 const supportFeatureSlugs = z.array(z.string().min(1)).min(1).max(50).optional().openapi({
@@ -2914,6 +2915,8 @@ const SupportSelectionResultSchema = z
     declaresOutcomesCount: z.number().int().openapi({ description: "Matched runs that declared a produced occurrence: production, never support, left untouched." }),
     onOutcomeNowCount: z.number().int().nullable().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome (0 with offOutcomeOnly). Null when tooMany (not computed: narrow the selection)." }),
     leftOnOutcomeCount: z.number().int().nullable().openapi({ description: "offOutcomeOnly: matched runs left out because their cost rides an ancestor's outcome today (0 without it). Null when tooMany." }),
+    onAncestorMarkNowCount: z.number().int().nullable().openapi({ description: "Runs to mark whose cost stops on an ancestor's support mark today: the mark relabels it (0 with offAncestorMarkOnly). Null when tooMany." }),
+    leftOnAncestorMarkCount: z.number().int().nullable().openapi({ description: "offAncestorMarkOnly: matched runs left out because their cost stops on an ancestor's support mark (0 without it). Null when tooMany." }),
     spend: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "Own spend (actual + refunded) of the runs to mark." }),
     maxRuns: z.number().int(),
     tooMany: z.boolean().openapi({ description: "More than maxRuns to mark: apply refuses (422), narrow the selection." }),
