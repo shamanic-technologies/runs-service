@@ -505,6 +505,13 @@
       "when": 1783240200000,
       "tag": "0071_unattributed_production",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1783250200000,
+      "tag": "0072_loss_pool_task_key",
+      "breakpoints": true
     }
   ]
 }

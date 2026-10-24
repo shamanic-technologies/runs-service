@@ -119,7 +119,7 @@ describe("Backfill: declaring the outcomes of past runs", () => {
     };
     const res = await batch(body);
     expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ allocationVersion: 3, recordedCount: 3, alreadyRecordedCount: 0 });
+    expect(res.body).toMatchObject({ allocationVersion: 4, recordedCount: 3, alreadyRecordedCount: 0 });
     const declared = res.body.runs.flatMap((r: any) => r.occurrences);
     for (const o of declared) {
       expect(o.declaredAt.slice(0, 10)).toBe(PDAY);

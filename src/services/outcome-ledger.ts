@@ -59,9 +59,9 @@ import { fetchVendorCostCatalog, type VendorCostVersion } from "./vendor-costs.j
 import { versionWindowsSql } from "../routes/vendor-costs.js";
 import type { SupportFunction } from "./support-marks.js";
 
-export const ALLOCATION_VERSION = 3;
+export const ALLOCATION_VERSION = 4;
 export const ALLOCATION_RULE =
-  "v3: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2, keyed on the campaign since v3): a cost row with no such run, no support mark on its walk and a workflow slug W on its run of campaign C (null = no campaign) is loss of pipe W in C; per (UTC day of the cost row, org of the cost row, W, C) it is split the same way over the occurrences produced that day by runs of W and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags.";
+  "v4: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2; keyed on the campaign since v3; on the task when there is no workflow since v4): a cost row with no such run and no support mark on its walk is loss of its run's POOL KEY P (its workflow slug, else its own task = service + task name) in its run's campaign C (null = no campaign); per (UTC day of the cost row, org of the cost row, P, C) it is split the same way over the occurrences produced that day by runs of the same P and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags.";
 
 /** Legacy keys accepted on input and stored under their successor (never emitted). */
 export const LEGACY_OUTCOME_KEYS: Readonly<Record<string, string>> = { email_sent: "message_sent" };
@@ -424,30 +424,36 @@ function shareSql(col: string): SQL {
 
 /**
  * Rule 4b units: the occurrences PRODUCED on `day` (declared_at, UTC) by runs of
- * workflow W and campaign C in org K, for each (org_key K, workflow_slug W,
- * campaign_id C) of `poolsCte` (C null = runs without a campaign), with
+ * pool key P (workflow, else task) and campaign C in org K, for each (org_key K,
+ * pool_key P, campaign_id C) of `poolsCte` (C null = runs without a campaign), with
  * their cumulative quantity per pool (occurrence-id order). The day statement
  * and the per-occurrence read use this one definition, so their shares agree.
  */
 function pipeUnitsSql(day: string | SQL, poolsCte: string): SQL {
   const d = typeof day === "string" ? sql`${day}::date` : day;
   return sql`
-    SELECT x.id, x.anchor_id, x.outcome_key, x.quantity, x.org_key, x.workflow_slug, x.campaign_id,
-           SUM(x.quantity) OVER (PARTITION BY x.org_key, x.workflow_slug, x.campaign_id ORDER BY x.id) AS cum_q,
-           SUM(x.quantity) OVER (PARTITION BY x.org_key, x.workflow_slug, x.campaign_id) AS q_total
+    SELECT x.id, x.anchor_id, x.outcome_key, x.quantity, x.org_key, x.pool_key, x.campaign_id,
+           SUM(x.quantity) OVER (PARTITION BY x.org_key, x.pool_key, x.campaign_id ORDER BY x.id) AS cum_q,
+           SUM(x.quantity) OVER (PARTITION BY x.org_key, x.pool_key, x.campaign_id) AS q_total
     FROM (
-      SELECT o.id, o.run_id AS anchor_id, o.outcome_key, o.quantity, r.org_key, r.workflow_slug, r.campaign_id
+      SELECT o.id, o.run_id AS anchor_id, o.outcome_key, o.quantity, r.org_key, r.pool_key, r.campaign_id
       FROM run_outcomes o
-      CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, workflow_slug, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
+      CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, ${poolKeySql("")} AS pool_key, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
       WHERE o.direction = 'produced'
         AND o.declared_at >= (${d})::timestamp AT TIME ZONE 'UTC'
         AND o.declared_at < (${d} + 1)::timestamp AT TIME ZONE 'UTC'
-        AND EXISTS (SELECT 1 FROM ${sql.raw(poolsCte)} p WHERE p.workflow_slug = r.workflow_slug AND p.org_key IS NOT DISTINCT FROM r.org_key
+        AND EXISTS (SELECT 1 FROM ${sql.raw(poolsCte)} p WHERE p.pool_key = r.pool_key AND p.org_key IS NOT DISTINCT FROM r.org_key
                     AND p.campaign_id IS NOT DISTINCT FROM r.campaign_id)
         -- One-time gate: no loss that day = no scan of the day's occurrences.
         AND EXISTS (SELECT 1 FROM ${sql.raw(poolsCte)})
     ) x`;
 }
+
+/**
+ * The loss POOL KEY of a run (v4): its workflow slug, else its own task (service +
+ * task name). Columns read from alias `a` (e.g. "r.").
+ */
+const poolKeySql = (a: string) => sql.raw(`COALESCE('workflow:' || ${a}workflow_slug, 'task:' || ${a}service_name || '/' || ${a}task_name)`);
 
 /** Produced occurrences of the anchors in `anchorsCte`, with their cumulative quantity (v1 order: id). */
 function occurrencesOfAnchorsSql(anchorsCte: string): SQL {
@@ -540,7 +546,10 @@ export interface LedgerDay {
 export interface LossPool {
   /** Org of the lost cost rows (= of the units' runs). */
   organizationId: string | null;
-  workflowSlug: string;
+  /** Pool key (v4): `workflow:<slug>`, else `task:<service>/<task>`. */
+  poolKey: string;
+  /** The workflow of a workflow pool (null on a task pool). */
+  workflowSlug: string | null;
   /** Campaign of the lost runs (= of the units' runs); null = runs without a campaign (v3). */
   campaignId: string | null;
   units: number;
@@ -598,6 +607,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
              COALESCE(b.rc_org, dr.organization_id)::text AS org_key,
              dr.service_name, dr.task_name, b.gross, b.net,
              dr.organization_id AS run_org, dr.brand_ids, dr.campaign_id, dr.workflow_slug, dr.feature_slug, dr.audience_id,
+             ${poolKeySql("dr.")} AS pool_key,
              to_char((dr.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
              ${vj.vendor} AS vendor, ${vj.unpriced} AS unpriced
       FROM b
@@ -639,24 +649,23 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
       FROM g JOIN o ON o.anchor_id = g.anchor_id
     ),
-    -- Rule 4b: loss of pipe W in campaign C (no anchor, no support, workflow slug W)
-    -- per (cost org, W, C), split over the units W produced in C that day in that org.
+    -- Rule 4b: loss of pool P (workflow, else task) in campaign C (no anchor, no
+    -- support) per (cost org, P, C), split over the units P produced in C that day in that org.
     lost AS MATERIALIZED (
-      SELECT c.org_key, c.workflow_slug, c.campaign_id,
+      SELECT c.org_key, c.pool_key, MIN(c.workflow_slug) AS workflow_slug, c.campaign_id,
              SUM(c.gross) AS gross, SUM(c.net) AS net, SUM(c.vendor) AS vendor, SUM(c.unpriced) AS unpriced
       FROM costed c
-      WHERE c.workflow_slug IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
+      WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
         AND NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
-      GROUP BY 1, 2, 3
+      GROUP BY c.org_key, c.pool_key, c.campaign_id
     ),
     pipe_units AS MATERIALIZED (${pipeUnitsSql(day, "lost")}),
-    pooled AS MATERIALIZED (SELECT DISTINCT org_key, workflow_slug, campaign_id FROM pipe_units),
+    pooled AS MATERIALIZED (SELECT DISTINCT org_key, pool_key, campaign_id FROM pipe_units),
     loss_shares AS MATERIALIZED (
       SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key,
              ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
-      FROM lost g JOIN pipe_units o ON o.org_key IS NOT DISTINCT FROM g.org_key AND o.workflow_slug = g.workflow_slug
+      FROM lost g JOIN pipe_units o ON o.org_key IS NOT DISTINCT FROM g.org_key AND o.pool_key = g.pool_key
                                     AND o.campaign_id IS NOT DISTINCT FROM g.campaign_id
     ),
     shares AS MATERIALIZED (SELECT * FROM own_shares UNION ALL SELECT * FROM loss_shares),
@@ -666,7 +675,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
       SELECT DISTINCT c.run_id, c.org_key FROM costed c
       WHERE EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
          OR (NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
-             AND EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM c.org_key AND p.workflow_slug = c.workflow_slug
+             AND EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM c.org_key AND p.pool_key = c.pool_key
                          AND p.campaign_id IS NOT DISTINCT FROM c.campaign_id))
     ),
     ledger AS (
@@ -681,7 +690,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     ),
     loss_by_org AS (
       SELECT l.org_key, ${sums("l", "loss")}
-      FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.workflow_slug = l.workflow_slug
+      FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.pool_key = l.pool_key
                                 AND p.campaign_id IS NOT DISTINCT FROM l.campaign_id)
       GROUP BY l.org_key
     ),
@@ -770,11 +779,11 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
         'audience_id', n.audience_id, 'service_name', n.service_name, 'runs', n.runs,
         'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       COALESCE((SELECT json_agg(json_build_object(
-        'org_id', l.org_key, 'workflow_slug', l.workflow_slug, 'campaign_id', l.campaign_id,
-        'units', (SELECT COUNT(*) FROM pipe_units u WHERE u.org_key IS NOT DISTINCT FROM l.org_key AND u.workflow_slug = l.workflow_slug
+        'org_id', l.org_key, 'pool_key', l.pool_key, 'workflow_slug', l.workflow_slug, 'campaign_id', l.campaign_id,
+        'units', (SELECT COUNT(*) FROM pipe_units u WHERE u.org_key IS NOT DISTINCT FROM l.org_key AND u.pool_key = l.pool_key
                   AND u.campaign_id IS NOT DISTINCT FROM l.campaign_id),
         'gross', l.gross::text, 'net', l.net::text, 'vendor', l.vendor::text, 'unpriced', l.unpriced::text))
-        FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.workflow_slug = l.workflow_slug
+        FROM lost l WHERE EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM l.org_key AND p.pool_key = l.pool_key
                                   AND p.campaign_id IS NOT DISTINCT FROM l.campaign_id)), '[]'::json) AS loss_pools,
       (SELECT COUNT(*) FROM walked WHERE NOT found AND parent_id IS NOT NULL AND depth >= ${MAX_WALK_DEPTH}) AS unplaced_runs
   `;
@@ -1176,7 +1185,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     })),
     lossPools: (row.loss_pools as any[]).map((r) => ({
       organizationId: r.org_id ?? null,
-      workflowSlug: r.workflow_slug,
+      poolKey: r.pool_key,
+      workflowSlug: r.workflow_slug ?? null,
       campaignId: r.campaign_id ?? null,
       units: Number(r.units),
       loss: { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) },
@@ -1195,14 +1205,14 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
     await tx.execute(sql`DELETE FROM cost_loss_pool_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     if (d.lossPools.length > 0) {
       await tx.execute(sql`
-        INSERT INTO cost_loss_pool_days (day, allocation_version, organization_id, workflow_slug, campaign_id, units, gross, net, vendor, unpriced_gross)
-        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.org, x.wf, x.cmp, x.units, x.g, x.n, x.v, x.u
+        INSERT INTO cost_loss_pool_days (day, allocation_version, organization_id, pool_key, workflow_slug, campaign_id, units, gross, net, vendor, unpriced_gross)
+        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.org, x.pk, x.wf, x.cmp, x.units, x.g, x.n, x.v, x.u
         FROM jsonb_to_recordset(${JSON.stringify(
           d.lossPools.map((p) => ({
-            org: p.organizationId, wf: p.workflowSlug, cmp: p.campaignId, units: p.units,
+            org: p.organizationId, pk: p.poolKey, wf: p.workflowSlug, cmp: p.campaignId, units: p.units,
             g: p.loss.gross, n: p.loss.net, v: p.loss.vendor, u: p.loss.unpricedGross,
           })),
-        )}::jsonb) AS x(org uuid, wf text, cmp text, units bigint, g numeric, n numeric, v numeric, u numeric)
+        )}::jsonb) AS x(org uuid, pk text, wf text, cmp text, units bigint, g numeric, n numeric, v numeric, u numeric)
       `);
     }
     if (d.outcomeCosts.length > 0) {
@@ -1690,21 +1700,21 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
     ORDER BY o.id, g.day, g.org_key NULLS FIRST
   `)) as any[];
   // Rule 4b: each occurrence's share of the loss pool of (its declaration's UTC
-  // day, its run's org, its run's workflow), as the day stored it. Units = the
+  // day, its run's org, its run's pool key and campaign), as the day stored it. Units = the
   // pipeUnitsSql definition (same predicate, same order).
   const loss = (await exec.execute(sql`
     WITH lo AS MATERIALIZED (
-      SELECT o.id, (o.declared_at AT TIME ZONE 'UTC')::date AS day, r.org_key, r.workflow_slug, r.campaign_id
+      SELECT o.id, (o.declared_at AT TIME ZONE 'UTC')::date AS day, r.org_key, r.pool_key, r.campaign_id
       FROM run_outcomes o
-      CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, workflow_slug, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
-      WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[]) AND r.workflow_slug IS NOT NULL
+      CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, ${poolKeySql("")} AS pool_key, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
+      WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[])
     ),
     g AS MATERIALIZED (
-      SELECT p.day, p.organization_id::text AS org_key, p.workflow_slug, p.campaign_id,
+      SELECT p.day, p.organization_id::text AS org_key, p.pool_key, p.campaign_id,
              p.gross, p.net, p.vendor, p.unpriced_gross AS unpriced
       FROM cost_loss_pool_days p
       WHERE p.allocation_version = ${ALLOCATION_VERSION}
-        AND EXISTS (SELECT 1 FROM lo WHERE lo.day = p.day AND lo.workflow_slug = p.workflow_slug AND lo.org_key IS NOT DISTINCT FROM p.organization_id::text
+        AND EXISTS (SELECT 1 FROM lo WHERE lo.day = p.day AND lo.pool_key = p.pool_key AND lo.org_key IS NOT DISTINCT FROM p.organization_id::text
                     AND lo.campaign_id IS NOT DISTINCT FROM p.campaign_id)
     )
     SELECT o.id, to_char(g.day, 'YYYY-MM-DD') AS day, g.org_key,
@@ -1718,11 +1728,11 @@ export async function occurrenceCostSlices(anchorIds: string[], versions: Vendor
       FROM (
         SELECT u.id, u.quantity
         FROM run_outcomes u
-        CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, workflow_slug, campaign_id FROM runs WHERE id = u.run_id OFFSET 0) r
+        CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, ${poolKeySql("")} AS pool_key, campaign_id FROM runs WHERE id = u.run_id OFFSET 0) r
         WHERE u.direction = 'produced'
           AND u.declared_at >= (g.day)::timestamp AT TIME ZONE 'UTC'
           AND u.declared_at < (g.day + 1)::timestamp AT TIME ZONE 'UTC'
-          AND r.workflow_slug = g.workflow_slug AND r.org_key IS NOT DISTINCT FROM g.org_key
+          AND r.pool_key = g.pool_key AND r.org_key IS NOT DISTINCT FROM g.org_key
           AND r.campaign_id IS NOT DISTINCT FROM g.campaign_id
         OFFSET 0
       ) x

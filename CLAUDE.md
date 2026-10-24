@@ -868,6 +868,10 @@ concept, a value-based joint-cost split.
   produced nothing on W that day keeps its loss as produced-none under its own tags (= `unpooledLoss` on the reconciliation; features
   pools it on the pipe's output). `outcome_cost_days` also carries the row's run's `audience_id` / `service_name` and the producing
   run's `source_audience_id` (dims `audienceId`, `serviceName`, `sourceAudienceId`); 'none' rows: n = distinct spending runs.
+- **Allocation v4 = v3 with the pool keyed on the run's TASK when it has no workflow (migration 0072)**: pool key =
+  `workflow:<slug>`, else `task:<service>/<task>`; per (UTC day, cost org, pool key, campaign). A crm judging run that kept nothing
+  (no workflow, no campaign) rides the same task's lead_identified that org-day; only a pool that produced nothing that day stays
+  produced-none (`unpooledLoss` when it carries a workflow, else `undeclared`). `cost_loss_pool_days.pool_key`.
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
