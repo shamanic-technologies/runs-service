@@ -902,6 +902,12 @@ concept, a value-based joint-cost split.
   `workflow:<slug>`, else `task:<service>/<task>`; per (UTC day, cost org, pool key, campaign). A crm judging run that kept nothing
   (no workflow, no campaign) rides the same task's lead_identified that org-day; only a pool that produced nothing that day stays
   produced-none (`unpooledLoss` when it carries a workflow, else `undeclared`). `cost_loss_pool_days.pool_key`.
+- **Loss shares stored per occurrence (migration 0075, LOSS-SHARE-STORED-1024)**: the day statement also stores each produced
+  occurrence's share of its pool (`cost_loss_occurrence_days`, flag `cost_ledger_computed_days.loss_occurrences`), and the
+  per-occurrence read (`occurrenceCostSlices`) serves it by occurrence id. A day without the flag (stored before 0075) is ranked
+  live (one runs PK probe per produced occurrence of the day: 64k probes for 150 runs, 35 s at load ~50, a 500 on the 30 s timeout,
+  2026-10-24) and recomputed by the refresher AFTER every missing / stale day; the flag is not part of day completeness, so no other
+  read moves. Guard: `tests/integration/ledger-reconciliation.test.ts` (v4 test: stored == live body).
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
