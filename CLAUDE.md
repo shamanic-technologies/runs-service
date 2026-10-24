@@ -938,6 +938,15 @@ stored produced-none sources agree) AND complete AND declarationsComplete (no un
   no unknown provenance (never vacuous over missing days).
 - Guard: `tests/integration/ledger-reconciliation.test.ts` (red if the campaign key is dropped from the pool).
 
+## Subject equivalence — one occurrence, two subject spaces (migration 0073, SUBJECT-EQUIVALENCE-1024)
+
+`POST /v1/platform-runs/subject-equivalences` (owner door, x-service-name = every item's `subjectService`): "my subject X is the
+same subject as Y" (transactional-email-service: subscriber S == lead-service lead L). The consumption resolver matches a consumption
+to a production under the CANONICAL subject (the target, else itself) or any subject stated equivalent to it, and reuse ranks across
+both spaces. Never inferred. One hop (a target is never a source, a source never a target), immutable rows (the table is its own log;
+another target = 422 `conflicting_target`). A new equivalence re-stales every stored day from the first day either subject was
+declared. Guard: `tests/integration/ledger-reconciliation.test.ts` ("SUBJECT-EQUIVALENCE-1024").
+
 ## Taking a declaration back — `POST /v1/runs/:id/outcomes/void` (migration 0059, RUNS-VOID-1023)
 
 A declaring service that stated outcomes on a run in error (lead-service 2026-10-23: two `outcome-recording` runs each PRODUCED
