@@ -851,8 +851,19 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
   }
 });
 
+/** Every query param the totals read understands: anything else is a 400, never a cut silently dropped. */
+const OUTCOME_COST_QUERY_PARAMS = new Set([
+  "groupBy", "since", "until", "outcomeKey", "orgId", "costOrgId", "brandId", "campaignId", "workflowSlug", "featureSlug",
+  "runStartUntil", "sourceDayUntil", "sourceRunStartUntil",
+]);
+
 router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res) => {
   try {
+    const unknown = Object.keys(req.query).filter((k) => !OUTCOME_COST_QUERY_PARAMS.has(k));
+    if (unknown.length > 0) {
+      res.status(400).json({ error: `unknown query parameter(s): ${unknown.join(", ")}; accepted: ${[...OUTCOME_COST_QUERY_PARAMS].join(", ")}` });
+      return;
+    }
     const q = req.query as Record<string, string | undefined>;
     const groupBy = (csv(q.groupBy) ?? []) as OutcomeCostDimension[];
     const bad = groupBy.filter((d) => !(OUTCOME_COST_DIMENSIONS as readonly string[]).includes(d));
