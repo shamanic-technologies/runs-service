@@ -152,6 +152,8 @@ export async function readReconciliation(since: string, until: string, status: D
     GROUP BY 1, 2, 3
   `)) as any[];
 
+  // A day not stored under the current facts is out of EVERY figure (totals and lists alike).
+  const missing = new Set(status.daysMissing);
   const days = new Map<string, DayAcc>();
   const dayOf = (d: string) => days.get(d) ?? days.set(d, dayAcc()).get(d)!;
   const m = (r: any, p: string) => ({ gross: r[`${p}_gross`], net: r[`${p}_net`], vendor: r[`${p}_vendor`], unpricedGross: r[`${p}_unpriced_gross`] });
@@ -176,6 +178,7 @@ export async function readReconciliation(since: string, until: string, status: D
   type Svc = { unpooled: Acc; undeclared: Acc; support: Acc; undeclaredRuns: Decimal; unpooledRuns: Decimal };
   const services = new Map<string, Svc>();
   for (const r of noneRows) {
+    if (missing.has(r.day)) continue;
     const a = dayOf(r.day);
     const money = { gross: r.gross, net: r.net, vendor: r.vendor, unpricedGross: r.unpriced };
     addInto(a.noneFromRows, money);
@@ -193,6 +196,7 @@ export async function readReconciliation(since: string, until: string, status: D
   }
   const provenance = new Map<string, { consumedOutcomeKey: string; serviceName: string | null; consumptions: Decimal; unknown: Decimal }>();
   for (const r of consumedRows) {
+    if (missing.has(r.day)) continue;
     const a = dayOf(r.day);
     a.consumptions = a.consumptions.plus(r.n);
     a.unknown = a.unknown.plus(r.unknown);
@@ -202,7 +206,6 @@ export async function readReconciliation(since: string, until: string, status: D
     p.unknown = p.unknown.plus(r.unknown);
   }
 
-  const missing = new Set(status.daysMissing);
   const total = dayAcc();
   const dayRows = [];
   for (let d = since; d <= until; d = addDays(d, 1)) {
