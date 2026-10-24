@@ -336,6 +336,15 @@ export async function isRunOutcomesVoided(runId: string): Promise<boolean> {
   return Boolean(row);
 }
 
+/** True when `service` declared at least one occurrence on the run (bronze `outcomes.declared`). */
+export async function hasDeclaredOnRun(runId: string, service: string): Promise<boolean> {
+  const [row] = (await db.execute(sql`
+    SELECT 1 AS x FROM outcome_declaration_events
+    WHERE run_id = ${runId}::uuid AND event_type = 'outcomes.declared' AND source_service = ${service} LIMIT 1
+  `)) as any[];
+  return Boolean(row);
+}
+
 export class RunOutcomesVoidedError extends Error {
   constructor(runId: string) {
     super(`run_outcomes_voided: run ${runId} had its declaration taken back, it accepts no new one`);
@@ -370,11 +379,21 @@ export async function voidRunOutcomes(
 
   // SCOPED-VOID-1024: one direction x outcome key; the run stays open.
   const scope = body.scope ? { direction: body.scope.direction, outcomeKey: normalizeOutcomeKey(body.scope.outcomeKey) } : null;
+  // DECLARER-VOID-1024: a scoped void takes back only the rows the CALLER declared
+  // (the `outcomes.declared` event that projected the row names its service), so
+  // another service's rows on the same run are never touched, owner included.
   const rows = (await db.execute(sql`
-    SELECT id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity, declared_at
-    FROM run_outcomes WHERE run_id = ${runId}::uuid
-      ${scope ? sql`AND direction = ${scope.direction} AND outcome_key = ${scope.outcomeKey}` : sql``}
-    ORDER BY id
+    SELECT o.id, o.direction, o.outcome_key, o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at
+    FROM run_outcomes o WHERE o.run_id = ${runId}::uuid
+      ${scope
+        ? sql`AND o.direction = ${scope.direction} AND o.outcome_key = ${scope.outcomeKey}
+          AND EXISTS (
+            SELECT 1 FROM outcome_declaration_events e
+            CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(id uuid)
+            WHERE e.run_id = o.run_id AND e.event_type = 'outcomes.declared'
+              AND e.source_service = ${sourceService} AND it.id = o.id)`
+        : sql``}
+    ORDER BY o.id
   `)) as any[];
   if (scope && rows.length === 0) return { status: "nothing_to_void", voidedCount: 0, voidedAt: new Date().toISOString() };
   const [run] = (await db.execute(sql`SELECT started_at FROM runs WHERE id = ${runId}::uuid`)) as any[];
