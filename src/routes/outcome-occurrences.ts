@@ -18,6 +18,7 @@ import {
   RunOutcomesVoidedError,
   isRunOutcomesVoided,
   voidRunOutcomes,
+  hasDeclaredOnRun,
   addDays,
   normalizeOutcomeKey,
   checkLedgerRow,
@@ -264,9 +265,17 @@ async function handleVoid(req: Request, res: Response, orgRequired: boolean) {
       res.status(409).json({ error: "run_org_mismatch" });
       return;
     }
+    // Whole-run void: the run's owner only. Scoped void (DECLARER-VOID-1024): the
+    // owner, or a service that declared on this run; either takes back only its own rows.
     if (run.service_name !== caller) {
-      res.status(403).json({ error: "not_run_owner", details: { runServiceName: run.service_name, callerServiceName: caller } });
-      return;
+      if (!parsed.data.scope) {
+        res.status(403).json({ error: "not_run_owner", details: { runServiceName: run.service_name, callerServiceName: caller } });
+        return;
+      }
+      if (!(await hasDeclaredOnRun(id, caller))) {
+        res.status(403).json({ error: "not_run_declarer", details: { runServiceName: run.service_name, callerServiceName: caller } });
+        return;
+      }
     }
     const v = await voidRunOutcomes(id, parsed.data, caller);
     res.status(v.status === "voided" ? 201 : 200).json({ runId: id, allocationVersion: ALLOCATION_VERSION, ...v });
