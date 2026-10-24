@@ -289,4 +289,57 @@ describe("Support functions: support spend named and reported apart", () => {
     const marked = (await db.execute(sql`SELECT run_id FROM run_support_marks WHERE run_id = ANY(${`{${[send.id, ridesSend.id, orphan.id, other.id].join(",")}}`}::uuid[])`)) as any[];
     expect(marked.map((m) => m.run_id)).toEqual([orphan.id]);
   });
+
+  it("v2 cross-run normal loss: a run of pipe W that produced nothing rides the units W produced that day in that org", async () => {
+    const DAY4 = "2025-04-18";
+    const mk = (workflowSlug: string, hour: string) =>
+      insertTestRun({ organizationId: ORG, serviceName: "workflow-service", taskName: "execute-workflow", workflowSlug, status: "completed", startedAt: new Date(`${DAY4}T${hour}:00Z`) });
+    const c = (runId: string, cents: string, hour: string) => cost(runId, cents, new Date(`${DAY4}T${hour}:00Z`));
+    const kept = await mk("follow-up-w1", "09:00");
+    await c(kept.id, "4", "09:01");
+    const keptFree = await mk("follow-up-w1", "09:30");
+    const lost = await mk("follow-up-w1", "10:00"); // judged "later": produced nothing
+    await c(lost.id, "6", "10:01");
+    const otherPipe = await mk("other-pipe-w2", "10:00"); // its pipe produced nothing that day
+    await c(otherPipe.id, "2", "10:01");
+    const supported = await mk("follow-up-w1", "11:00");
+    await c(supported.id, "1", "11:01");
+    expect((await staffMark({ kind: "staff_experiment", reason: "probe", markedBy: "t", runIds: [supported.id] })).status).toBe(200);
+    const decl = await request(app)
+      .post("/v1/platform-runs/outcomes/batch")
+      .set(getPlatformAuthHeaders({ serviceName: "workflow-service" }))
+      .send({
+        runs: [
+          { runId: kept.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "K1" }] },
+          { runId: keptFree.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "K2" }] },
+        ],
+      });
+    expect(decl.status).toBe(201);
+
+    await storeLedgerDay(await computeLedgerDay(DAY4, VERSIONS as any));
+    const res = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY4}&until=${DAY4}`).set(getInternalAuthHeaders());
+    expect(res.body.allocationVersion).toBe(2);
+    expect(res.body.balanced).toBe(true);
+    const row = res.body.rows.find((r: any) => r.organizationId === ORG);
+    expect(row.ledger.grossCents).toBe("13.0000000000");
+    expect(row.allocated.grossCents).toBe("10.0000000000"); // kept 4 + lost 6
+    expect(row.normalLoss.grossCents).toBe("6.0000000000");
+    expect(row.support.grossCents).toBe("1.0000000000");
+    expect(row.undeclared.grossCents).toBe("2.0000000000");
+
+    // Per occurrence: the loss splits equally over the two units, and Σ occurrences = allocated.
+    const occ = await request(app).get(`/internal/outcome-occurrences?runIds=${kept.id},${keptFree.id}&limit=1000`).set(getInternalAuthHeaders());
+    expect(occ.status).toBe(200);
+    const by = Object.fromEntries(occ.body.occurrences.map((o: any) => [o.subjectId, o.cost.grossCents]));
+    expect(by).toEqual({ K1: "7.0000000000", K2: "3.0000000000" });
+
+    // Coverage counts the carried loss as covered; outcome totals carry it on message_sent.
+    const cov = await request(app).get(`/internal/stats/outcome-coverage?since=${DAY4}&until=${DAY4}&serviceName=workflow-service`).set(getInternalAuthHeaders());
+    const svc = cov.body.services.find((x: any) => x.serviceName === "workflow-service");
+    expect(svc).toMatchObject({ spendGrossCents: "13.0000000000", coveredGrossCents: "10.0000000000", supportGrossCents: "1.0000000000" });
+    const oc = await request(app).get(`/internal/stats/outcome-costs?since=${DAY4}&until=${DAY4}&orgId=${ORG}&groupBy=outcomeKey`).set(getInternalAuthHeaders());
+    const sent = oc.body.produced.find((p: any) => p.dimensions.outcomeKey === "message_sent");
+    expect(sent.cost.grossCents).toBe("10.0000000000");
+    expect(oc.body.scope[0].undeclared.grossCents).toBe("2.0000000000");
+  });
 });

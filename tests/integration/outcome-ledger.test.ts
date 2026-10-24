@@ -105,7 +105,7 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     const res = await declare(r.id, { produced: leads(50) });
     expect(res.status).toBe(201);
     expect(res.body.recordedCount).toBe(50);
-    expect(res.body.allocationVersion).toBe(1);
+    expect(res.body.allocationVersion).toBe(2);
 
     const occ = await occurrencesOf(r.id);
     expect(occ).toHaveLength(50);
@@ -415,7 +415,7 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     // The owner takes it back.
     const v = await request(app).post(`/v1/runs/${wrong.id}/outcomes/void`).set(orgHeaders("lead-service")).send(body);
     expect(v.status).toBe(201);
-    expect(v.body).toMatchObject({ runId: wrong.id, status: "voided", voidedCount: 4, allocationVersion: 1 });
+    expect(v.body).toMatchObject({ runId: wrong.id, status: "voided", voidedCount: 4, allocationVersion: 2 });
     const again = await request(app).post(`/v1/platform-runs/${wrong.id}/outcomes/void`).set(getPlatformAuthHeaders({ serviceName: "lead-service" })).send(body);
     expect(again.status).toBe(200);
     expect(again.body).toMatchObject({ status: "already_voided", voidedCount: 0, voidedAt: v.body.voidedAt });
