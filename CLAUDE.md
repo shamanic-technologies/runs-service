@@ -1023,7 +1023,8 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
   withSpendOnly + offOutcomeOnly (spend already on an outcome stays): $791.30 / $271.14 / $15.85 / $295.07. Their FEATURE-LESS runs
   (feature_slug NULL: every run of `ai-visibility-score-service`, `journalists-service`, `journalists-quotes-service`, api-service
   `POST /v1/content/generate-expert-quote-pitch`) marked by serviceName, no spend filter (a parent covers its chat/scraping
-  children). Press kits are NOT retired. Never mark live production.
+  children). Press kits ARE retired (no container since the 2026-08 box migration, api-service v0.98.0 removed the routes, last
+  generation 2026-04-02): its 29,042 runs marked `retired_product` 2026-10-24 by its owner door. Never mark live production.
 - **One answer on every read**: ledger-check, outcome-coverage and outcome-costs read the same stored day rows, so at one instant they
   agree to the cent (prod 2026-10-24). Two figures captured minutes apart while marks are applied (`supportComplete: false`, days
   recomputing) differ: compare reads taken together, after `supportComplete`.
