@@ -470,6 +470,13 @@
       "when": 1783210080000,
       "tag": "0066_cross_run_normal_loss",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1783210140000,
+      "tag": "0067_outcome_cost_days_start_days",
+      "breakpoints": true
     }
   ]
 }
