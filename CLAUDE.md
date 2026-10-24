@@ -946,6 +946,8 @@ resolution keys on declaration time.
   child (`outcome_before_run_start`), and such a run takes no cost and no child (409 `run_holds_dated_facts` on the cost/run doors).
   On-time rows (declared_at = recorded_at, or recorded_at NULL) are never caught by a clock difference. Redate moves only the listed
   occurrences: one batch call per instant. Guard: `tests/integration/outcome-dated-facts.test.ts`.
+  The guards compare at MILLISECOND precision (migration 0070): `runs.started_at` holds µs, every stated time arrives in ms, so
+  `run_started_at` on a run with spend was read as 548 µs before its start (400 on every workflow-service backfill, 2026-10-24).
 
 ## Support spend, named and reported apart (migrations 0062 + 0064 + 0065, COST-SUPPORT-1024-RUNS)
 
