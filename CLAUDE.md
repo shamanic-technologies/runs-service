@@ -975,7 +975,8 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
 - **Doors** (`src/services/support-marks.ts`): at creation, body `support: {kind, reason}` on POST /v1/runs + /v1/platform-runs (same
   transaction, markedBy = serviceName); owner bulk `POST /v1/platform-runs/support-marks/{preview,apply}` (x-service-name = owner: its
   own runs only, by runIds (all or nothing, 422 `not_run_owner`) or selection: taskNames, start window, topLevelOnly, withSpendOnly;
-  declaring runs left out and counted; preview shows `onOutcomeNowCount` = runs whose cost rides an ancestor's outcome today); staff
+  declaring runs left out and counted; preview shows `onOutcomeNowCount` = runs whose cost rides an ancestor's outcome today;
+  `offAncestorMarkOnly` leaves out runs whose cost already stops on an ancestor's MARK, counted in `leftOnAncestorMarkCount`); staff
   `POST /internal/runs/support-marks{,/preview}` (any service: runIds, or `serviceName` and/or `featureSlugs` = a product whatever
   service ran it; `offOutcomeOnly` leaves out runs whose cost rides an ancestor's outcome today, counted in `leftOnOutcomeCount`). <= 50,000 runs per apply (422
   `too_many_runs`). The selection seq-scans `runs` (no service-first index, ~9 s), own 300 s timeout.

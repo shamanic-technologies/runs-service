@@ -4894,6 +4894,10 @@
           "offOutcomeOnly": {
             "type": "boolean",
             "description": "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount."
+          },
+          "offAncestorMarkOnly": {
+            "type": "boolean",
+            "description": "Leave out runs whose cost already stops on an ANCESTOR's support mark (marking them would relabel that owner's decision); counted in leftOnAncestorMarkCount."
           }
         },
         "required": [
@@ -4930,6 +4934,16 @@
             "nullable": true,
             "description": "offOutcomeOnly: matched runs left out because their cost rides an ancestor's outcome today (0 without it). Null when tooMany."
           },
+          "onAncestorMarkNowCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Runs to mark whose cost stops on an ancestor's support mark today: the mark relabels it (0 with offAncestorMarkOnly). Null when tooMany."
+          },
+          "leftOnAncestorMarkCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "offAncestorMarkOnly: matched runs left out because their cost stops on an ancestor's support mark (0 without it). Null when tooMany."
+          },
           "spend": {
             "type": "object",
             "properties": {
@@ -4961,6 +4975,8 @@
           "declaresOutcomesCount",
           "onOutcomeNowCount",
           "leftOnOutcomeCount",
+          "onAncestorMarkNowCount",
+          "leftOnAncestorMarkCount",
           "spend",
           "maxRuns",
           "tooMany"
@@ -5035,6 +5051,10 @@
           "offOutcomeOnly": {
             "type": "boolean",
             "description": "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount."
+          },
+          "offAncestorMarkOnly": {
+            "type": "boolean",
+            "description": "Leave out runs whose cost already stops on an ANCESTOR's support mark (marking them would relabel that owner's decision); counted in leftOnAncestorMarkCount."
           }
         },
         "required": [
