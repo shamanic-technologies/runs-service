@@ -6,7 +6,7 @@ const m = (gross: string, net = gross, vendor = gross, unpricedGross = "0") => (
 
 describe("checkLedgerRow", () => {
   it("balances when standard - reuse gain + produced none = ledger on every basis", () => {
-    const r = checkLedgerRow({
+    const r = checkLedgerRow({ abnormal: m("0"),
       ledger: m("314.0000000001", "300.5", "62", "4"),
       standard: m("320.0000000001", "296.5", "61", "4"),
       reuseGain: m("20", "6", "1", "0"),
@@ -17,19 +17,25 @@ describe("checkLedgerRow", () => {
   });
 
   it("FAILS on a hand-built fixture one cent off (gross)", () => {
-    const r = checkLedgerRow({ ledger: m("100"), standard: m("60"), reuseGain: m("0"), producedNone: { ...m("40"), gross: "41" } });
+    const r = checkLedgerRow({ abnormal: m("0"), ledger: m("100"), standard: m("60"), reuseGain: m("0"), producedNone: { ...m("40"), gross: "41" } });
     expect(r.balanced).toBe(false);
     expect(r.differences.gross).toBe("1.0000000000");
   });
 
   it("FAILS when only the vendor basis is one cent off", () => {
-    const r = checkLedgerRow({ ledger: m("100"), standard: { ...m("70"), vendor: "69" }, reuseGain: m("10"), producedNone: m("40") });
+    const r = checkLedgerRow({ abnormal: m("0"), ledger: m("100"), standard: { ...m("70"), vendor: "69" }, reuseGain: m("10"), producedNone: m("40") });
     expect(r.balanced).toBe(false);
     expect(r.differences.vendor).toBe("-1.0000000000");
   });
 
+  it("v5: abnormal loss is a line of its own: standard - reuse gain + produced none + abnormal = ledger", () => {
+    const row = { ledger: m("100"), standard: m("60"), reuseGain: m("0"), producedNone: m("30") };
+    expect(checkLedgerRow({ ...row, abnormal: m("10") }).balanced).toBe(true);
+    expect(checkLedgerRow({ ...row, abnormal: m("0") }).differences.gross).toBe("-10.0000000000");
+  });
+
   it("FAILS on a 1e-10 cent drift (no tolerance)", () => {
-    const r = checkLedgerRow({ ledger: m("100"), standard: m("60.0000000001"), reuseGain: m("0"), producedNone: m("40") });
+    const r = checkLedgerRow({ abnormal: m("0"), ledger: m("100"), standard: m("60.0000000001"), reuseGain: m("0"), producedNone: m("40") });
     expect(r.balanced).toBe(false);
   });
 });

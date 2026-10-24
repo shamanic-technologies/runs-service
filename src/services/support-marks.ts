@@ -187,7 +187,7 @@ export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPO
   const withParent = tooMany ? [] : candidates.filter((r) => r.has_parent).map((r) => r.id as string);
   const onOutcome = new Set<string>();
   for (let i = 0; i < withParent.length; i += 5000) {
-    const keys = await anchorKeysOf(withParent.slice(i, i + 5000), db);
+    const keys = await anchorKeysOf(withParent.slice(i, i + 5000), null, db);
     for (const [id, k] of keys) if (k.length > 0) onOutcome.add(id);
   }
   const onMark = tooMany ? new Set<string>() : await onAncestorMark(withParent);

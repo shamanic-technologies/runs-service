@@ -106,7 +106,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     await refresh(DAY);
 
     const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY}&until=${DAY}`).set(getInternalAuthHeaders());
-    expect(check.body.allocationVersion).toBe(4);
+    expect(check.body.allocationVersion).toBe(5);
     expect(check.body.balanced).toBe(true);
     const row = check.body.rows.find((r: any) => r.organizationId === ORG);
     expect(row.ledger.grossCents).toBe("16.0000000000");
@@ -173,7 +173,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
 
     // The refresher's sweep flags it and moves its window past the backfill: still stale (by the flag).
     expect(await daysToCompute(new Date("2024-08-20T12:00:00Z"), DAY2, true)).toContain(DAY2);
-    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 4`)) as any[];
+    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 5`)) as any[];
     expect(flag.stale).toBe(true);
     expect(await recon(DAY2, DAY2)).toMatchObject({ complete: false, daysStale: [DAY2] });
 

@@ -4,7 +4,7 @@
 // (owner 2026-10-24: every reader switches at once, the day the ledger
 // reconciles). Per UTC day since the first day of spend, fleet-wide:
 //
-//   spend = declared production + normal loss + unpooled loss + undeclared + support
+//   spend = declared production + normal loss + unpooled loss + undeclared + support + abnormal loss
 //
 // to the cent on every basis, from the stored days (cost_ledger_days for the
 // money, outcome_cost_days for the produced-none split and the consumptions),
@@ -23,7 +23,10 @@
 //  - unattributed: real production work its owner marked `unattributed_production`
 //    (it belongs to no pipe and its subject was never recorded, e.g. runs from
 //    before campaigns existed): an unabsorbed period cost, never spread;
-//  - support: spend named apart by its owner (every other support function, 0064).
+//  - support: spend named apart by its owner (every other support function, 0064);
+//  - abnormal loss (allocation v5, IAS 2 section 16): declared spend priced in no
+//    unit (a pipe acting on a lead already past its target state, a run re-buying
+//    the same lead), per reason.
 //
 // Nothing here is an estimate: every figure is a sum of stored rows.
 
@@ -65,11 +68,13 @@ export interface ReconciliationParts {
   undeclared: WireMoney;
   unattributed: WireMoney;
   support: WireMoney;
+  abnormalLoss: WireMoney;
+  abnormalByReason: Record<string, WireMoney>;
   /** Standard charges of the day's reuses (no spend behind them; never part of spend). */
   reuseGain: WireMoney;
   /** Σ parts − spend per basis: "0.0000000000" when the day reconciles. */
   differences: WireMoney;
-  shares: Record<"declaredProduction" | "normalLoss" | "unpooledLoss" | "undeclared" | "unattributed" | "support", { gross: string | null; net: string | null }>;
+  shares: Record<"declaredProduction" | "normalLoss" | "unpooledLoss" | "undeclared" | "unattributed" | "support" | "abnormalLoss", { gross: string | null; net: string | null }>;
   consumptions: string;
   unknownProvenance: string;
 }
@@ -84,6 +89,8 @@ interface DayAcc {
   unattributed: Acc;
   unpooled: Acc;
   undeclared: Acc;
+  abnormal: Acc;
+  abnormalByReason: Map<string, Acc>;
   noneFromRows: Acc;
   orgsBalanced: boolean;
   consumptions: Decimal;
@@ -92,12 +99,12 @@ interface DayAcc {
 
 const dayAcc = (): DayAcc => ({
   ledger: acc(), allocated: acc(), loss: acc(), none: acc(), reuse: acc(), support: acc(), unattributed: acc(), unpooled: acc(), undeclared: acc(),
-  noneFromRows: acc(), orgsBalanced: true, consumptions: new D(0), unknown: new D(0),
+  abnormal: acc(), abnormalByReason: new Map(), noneFromRows: acc(), orgsBalanced: true, consumptions: new D(0), unknown: new D(0),
 });
 
 function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitConsistent: boolean } {
   const declared = minus(a.allocated, a.loss);
-  const differences = minus(sumOf(declared, a.loss, a.unpooled, a.undeclared, a.unattributed, a.support), a.ledger);
+  const differences = minus(sumOf(declared, a.loss, a.unpooled, a.undeclared, a.unattributed, a.support, a.abnormal), a.ledger);
   // The two stored sources of produced-none (per-org rows vs per-tag rows) must agree.
   const splitConsistent = isZero(minus(a.noneFromRows, a.none));
   return {
@@ -108,6 +115,8 @@ function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitCon
     undeclared: wire(a.undeclared),
     unattributed: wire(a.unattributed),
     support: wire(a.support),
+    abnormalLoss: wire(a.abnormal),
+    abnormalByReason: Object.fromEntries([...a.abnormalByReason].sort(([x], [y]) => x.localeCompare(y)).map(([k, v]) => [k, wire(v)])),
     reuseGain: wire(a.reuse),
     differences: wire(differences),
     shares: {
@@ -117,6 +126,7 @@ function partsOf(a: DayAcc): ReconciliationParts & { balanced: boolean; splitCon
       undeclared: shareOf(a.undeclared, a.ledger),
       unattributed: shareOf(a.unattributed, a.ledger),
       support: shareOf(a.support, a.ledger),
+      abnormalLoss: shareOf(a.abnormal, a.ledger),
     },
     consumptions: a.consumptions.toFixed(10),
     unknownProvenance: a.unknown.toFixed(10),
@@ -139,7 +149,8 @@ export async function readReconciliation(since: string, until: string, status: D
            none_gross::text, none_net::text, none_vendor::text, none_unpriced_gross::text,
            reuse_gross::text, reuse_net::text, reuse_vendor::text, reuse_unpriced_gross::text,
            loss_gross::text, loss_net::text, loss_vendor::text, loss_unpriced_gross::text,
-           support_by_function
+           abnormal_gross::text, abnormal_net::text, abnormal_vendor::text, abnormal_unpriced_gross::text,
+           support_by_function, abnormal_by_reason
     FROM cost_ledger_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
@@ -174,6 +185,10 @@ export async function readReconciliation(since: string, until: string, status: D
     addInto(a.none, m(r, "none"));
     addInto(a.reuse, m(r, "reuse"));
     addInto(a.loss, m(r, "loss"));
+    addInto(a.abnormal, m(r, "abnormal"));
+    for (const [k, v] of Object.entries((r.abnormal_by_reason ?? {}) as Record<string, any>)) {
+      addInto(a.abnormalByReason.get(k) ?? a.abnormalByReason.set(k, acc()).get(k)!, v);
+    }
     for (const [k, v] of Object.entries((r.support_by_function ?? {}) as Record<string, any>)) addInto(k === UNATTRIBUTED ? a.unattributed : a.support, v);
     const check = checkLedgerRow(
       ledgerCheckInputOf({
@@ -181,6 +196,7 @@ export async function readReconciliation(since: string, until: string, status: D
         allocated: money(fromRow(m(r, "allocated"))),
         producedNone: money(fromRow(m(r, "none"))),
         reuse: money(fromRow(m(r, "reuse"))),
+        abnormal: money(fromRow(m(r, "abnormal"))),
       }),
     );
     if (!check.balanced) a.orgsBalanced = false;
@@ -226,7 +242,8 @@ export async function readReconciliation(since: string, until: string, status: D
   for (let d = since; d <= until; d = addDays(d, 1)) {
     const a = days.get(d) ?? dayAcc();
     if (!missing.has(d)) {
-      for (const k of ["ledger", "allocated", "loss", "none", "reuse", "support", "unattributed", "unpooled", "undeclared", "noneFromRows"] as const) total[k] = sumOf(total[k], a[k]);
+      for (const k of ["ledger", "allocated", "loss", "none", "reuse", "support", "unattributed", "unpooled", "undeclared", "noneFromRows", "abnormal"] as const) total[k] = sumOf(total[k], a[k]);
+      for (const [k, v] of a.abnormalByReason) total.abnormalByReason.set(k, sumOf(total.abnormalByReason.get(k) ?? acc(), v));
       total.orgsBalanced &&= a.orgsBalanced;
       total.consumptions = total.consumptions.plus(a.consumptions);
       total.unknown = total.unknown.plus(a.unknown);

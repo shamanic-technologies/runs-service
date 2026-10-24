@@ -5810,6 +5810,81 @@
                   "unpricedGrossCents"
                 ]
               },
+              "abnormal": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+              },
+              "abnormalByReason": {
+                "type": "object",
+                "properties": {
+                  "target_already_reached": {
+                    "type": "object",
+                    "properties": {
+                      "grossCents": {
+                        "type": "string"
+                      },
+                      "netCents": {
+                        "type": "string"
+                      },
+                      "vendorCents": {
+                        "type": "string"
+                      },
+                      "unpricedGrossCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grossCents",
+                      "netCents",
+                      "vendorCents",
+                      "unpricedGrossCents"
+                    ]
+                  },
+                  "repeat_production": {
+                    "type": "object",
+                    "properties": {
+                      "grossCents": {
+                        "type": "string"
+                      },
+                      "netCents": {
+                        "type": "string"
+                      },
+                      "vendorCents": {
+                        "type": "string"
+                      },
+                      "unpricedGrossCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grossCents",
+                      "netCents",
+                      "vendorCents",
+                      "unpricedGrossCents"
+                    ]
+                  }
+                }
+              },
               "outcomeSpend": {
                 "type": "object",
                 "properties": {
@@ -5850,7 +5925,7 @@
                   "gross",
                   "net"
                 ],
-                "description": "allocated / outcomeSpend, 10 decimals (0..1): coverage on outcome spend only. Null on zero."
+                "description": "(allocated + abnormal) / outcomeSpend, 10 decimals (0..1): the declared part of outcome spend (abnormal spend is declared, priced in no unit). Null on zero."
               }
             },
             "required": [
@@ -5863,6 +5938,8 @@
               "support",
               "supportByFunction",
               "undeclared",
+              "abnormal",
+              "abnormalByReason",
               "outcomeSpend",
               "outcomeSpendCoverage"
             ]
@@ -6243,7 +6320,83 @@
               "vendorCents",
               "unpricedGrossCents"
             ],
-            "description": "producedNone - support: spend nobody declared an outcome for yet. allocated + support + undeclared = ledger."
+            "description": "producedNone - support: spend nobody declared an outcome for yet. allocated + support + undeclared + abnormal = ledger."
+          },
+          "abnormal": {
+            "type": "object",
+            "properties": {
+              "grossCents": {
+                "type": "string"
+              },
+              "netCents": {
+                "type": "string"
+              },
+              "vendorCents": {
+                "type": "string"
+              },
+              "unpricedGrossCents": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "grossCents",
+              "netCents",
+              "vendorCents",
+              "unpricedGrossCents"
+            ],
+            "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+          },
+          "abnormalByReason": {
+            "type": "object",
+            "properties": {
+              "target_already_reached": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ]
+              },
+              "repeat_production": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ]
+              }
+            },
+            "description": "abnormal per reason (a reason with no spend is absent)."
           },
           "standard": {
             "type": "object",
@@ -6315,7 +6468,7 @@
               "vendorCents",
               "unpricedGrossCents"
             ],
-            "description": "standard - reuseGain + producedNone - ledger per basis. Zero when balanced."
+            "description": "standard - reuseGain + producedNone + abnormal - ledger per basis. Zero when balanced."
           },
           "balanced": {
             "type": "boolean"
@@ -6346,6 +6499,8 @@
           "support",
           "supportByFunction",
           "undeclared",
+          "abnormal",
+          "abnormalByReason",
           "standard",
           "reuseGain",
           "differences",
@@ -7134,7 +7289,7 @@
                       "$ref": "#/components/schemas/ProductionCost"
                     },
                     {
-                      "description": "Every actual + refunded cost row of the scope in the range = producedCost + producedNone."
+                      "description": "Every actual + refunded cost row of the scope in the range = producedCost + producedNone + abnormal."
                     }
                   ]
                 },
@@ -7207,6 +7362,16 @@
                     }
                   ]
                 },
+                "abnormal": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "Abnormal loss (v5) under the paying run's tags: in no unit cost. spend = producedCost + producedNone + abnormal."
+                    }
+                  ]
+                },
                 "coverageShare": {
                   "type": "object",
                   "properties": {
@@ -7252,10 +7417,82 @@
                 "support",
                 "supportByFunction",
                 "undeclared",
+                "abnormal",
                 "coverageShare",
                 "outcomeSpendCoverageShare"
               ]
             }
+          },
+          "abnormal": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimensions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "description": "abnormalReason (always: target_already_reached | repeat_production) + the requested dimensions (outcomeKey = the occurrence the spend was for), under the paying run's tags; day = the cost row's UTC day."
+                },
+                "runs": {
+                  "type": "string",
+                  "description": "Σ per day of the distinct paying runs."
+                },
+                "cost": {
+                  "$ref": "#/components/schemas/ProductionCost"
+                }
+              },
+              "required": [
+                "dimensions",
+                "runs",
+                "cost"
+              ]
+            },
+            "description": "Allocation v5: spend in NO unit cost (IAS 2 section 16), per reason."
+          },
+          "parallel": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimensions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "description": "The requested dimensions (outcomeKey = the lead state), under the paying run's tags."
+                },
+                "cost": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "Spend of runs whose pipe targets the OTHER state family, priced in this state (a cold email before the first visit counts in lead_visited AND in lead_interested). A state's own production cost = produced[].cost + parallel[].cost of its key; never summed across keys."
+                    }
+                  ]
+                },
+                "unpooled": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "The same, for leads that never reached the state when no lead of the pipe reached it that day (not spread)."
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "dimensions",
+                "cost",
+                "unpooled"
+              ]
+            },
+            "description": "Allocation v5: the routed spend priced in the other state family (interest vs visit)."
           }
         },
         "required": [
@@ -7272,7 +7509,9 @@
           "supportDaysMissing",
           "produced",
           "consumed",
-          "scope"
+          "scope",
+          "abnormal",
+          "parallel"
         ]
       },
       "LedgerReconciliationResponse": {
@@ -7451,6 +7690,81 @@
                 ],
                 "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
               },
+              "abnormalLoss": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+              },
+              "abnormalByReason": {
+                "type": "object",
+                "properties": {
+                  "target_already_reached": {
+                    "type": "object",
+                    "properties": {
+                      "grossCents": {
+                        "type": "string"
+                      },
+                      "netCents": {
+                        "type": "string"
+                      },
+                      "vendorCents": {
+                        "type": "string"
+                      },
+                      "unpricedGrossCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grossCents",
+                      "netCents",
+                      "vendorCents",
+                      "unpricedGrossCents"
+                    ]
+                  },
+                  "repeat_production": {
+                    "type": "object",
+                    "properties": {
+                      "grossCents": {
+                        "type": "string"
+                      },
+                      "netCents": {
+                        "type": "string"
+                      },
+                      "vendorCents": {
+                        "type": "string"
+                      },
+                      "unpricedGrossCents": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grossCents",
+                      "netCents",
+                      "vendorCents",
+                      "unpricedGrossCents"
+                    ]
+                  }
+                }
+              },
               "unattributed": {
                 "type": "object",
                 "properties": {
@@ -7545,7 +7859,7 @@
                   "vendorCents",
                   "unpricedGrossCents"
                 ],
-                "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled."
+                "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support + abnormalLoss - spend: 0 when reconciled."
               },
               "shares": {
                 "type": "object",
@@ -7657,6 +7971,24 @@
                       "net"
                     ],
                     "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                  },
+                  "abnormalLoss": {
+                    "type": "object",
+                    "properties": {
+                      "gross": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "net": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "gross",
+                      "net"
+                    ],
+                    "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
                   }
                 },
                 "required": [
@@ -7665,7 +7997,8 @@
                   "unpooledLoss",
                   "undeclared",
                   "unattributed",
-                  "support"
+                  "support",
+                  "abnormalLoss"
                 ]
               },
               "consumptions": {
@@ -7693,6 +8026,8 @@
               "normalLoss",
               "unpooledLoss",
               "undeclared",
+              "abnormalLoss",
+              "abnormalByReason",
               "unattributed",
               "support",
               "reuseGain",
@@ -7993,6 +8328,81 @@
                   ],
                   "description": "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared."
                 },
+                "abnormalLoss": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+                },
+                "abnormalByReason": {
+                  "type": "object",
+                  "properties": {
+                    "target_already_reached": {
+                      "type": "object",
+                      "properties": {
+                        "grossCents": {
+                          "type": "string"
+                        },
+                        "netCents": {
+                          "type": "string"
+                        },
+                        "vendorCents": {
+                          "type": "string"
+                        },
+                        "unpricedGrossCents": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "grossCents",
+                        "netCents",
+                        "vendorCents",
+                        "unpricedGrossCents"
+                      ]
+                    },
+                    "repeat_production": {
+                      "type": "object",
+                      "properties": {
+                        "grossCents": {
+                          "type": "string"
+                        },
+                        "netCents": {
+                          "type": "string"
+                        },
+                        "vendorCents": {
+                          "type": "string"
+                        },
+                        "unpricedGrossCents": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "grossCents",
+                        "netCents",
+                        "vendorCents",
+                        "unpricedGrossCents"
+                      ]
+                    }
+                  }
+                },
                 "unattributed": {
                   "type": "object",
                   "properties": {
@@ -8087,7 +8497,7 @@
                     "vendorCents",
                     "unpricedGrossCents"
                   ],
-                  "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled."
+                  "description": "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support + abnormalLoss - spend: 0 when reconciled."
                 },
                 "shares": {
                   "type": "object",
@@ -8199,6 +8609,24 @@
                         "net"
                       ],
                       "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
+                    },
+                    "abnormalLoss": {
+                      "type": "object",
+                      "properties": {
+                        "gross": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "net": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "gross",
+                        "net"
+                      ],
+                      "description": "part / spend, 10 decimals (0..1). Null when nothing was spent."
                     }
                   },
                   "required": [
@@ -8207,7 +8635,8 @@
                     "unpooledLoss",
                     "undeclared",
                     "unattributed",
-                    "support"
+                    "support",
+                    "abnormalLoss"
                   ]
                 },
                 "consumptions": {
@@ -8240,6 +8669,8 @@
                 "normalLoss",
                 "unpooledLoss",
                 "undeclared",
+                "abnormalLoss",
+                "abnormalByReason",
                 "unattributed",
                 "support",
                 "reuseGain",

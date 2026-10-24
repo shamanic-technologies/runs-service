@@ -3161,6 +3161,13 @@ const LedgerMoneySchema = z.object({
   unpricedGrossCents: z.string(),
 });
 
+export const AbnormalReasonEnum = z.enum(["target_already_reached", "repeat_production"]).openapi({
+  description:
+    "Why spend is ABNORMAL loss (allocation v5, IAS 2 section 16: in no unit cost). target_already_reached = a run of a pipe acted on a lead that had already reached the pipe's target state at the run's start (a cold email sent after the yes); repeat_production = a run of the same service, task and campaign produced the same outcome for the same subject again (re-buying the same lead).",
+});
+const ABNORMAL_DESCRIPTION =
+  "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal.";
+
 export const LedgerCheckRowSchema = z
   .object({
     day: z.string().openapi({ description: "UTC day of the cost rows, YYYY-MM-DD." }),
@@ -3171,10 +3178,12 @@ export const LedgerCheckRowSchema = z
     producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs with no declaring run at or above them = support + undeclared." }),
     support: LedgerMoneySchema.openapi({ description: "Part of producedNone that is SUPPORT (runs marked support and their non-declaring subtrees): spend that produces no outcome by design." }),
     supportByFunction: z.record(SupportFunctionEnum, LedgerMoneySchema).openapi({ description: "support per support function (a function with no spend is absent)." }),
-    undeclared: LedgerMoneySchema.openapi({ description: "producedNone - support: spend nobody declared an outcome for yet. allocated + support + undeclared = ledger." }),
+    undeclared: LedgerMoneySchema.openapi({ description: "producedNone - support: spend nobody declared an outcome for yet. allocated + support + undeclared + abnormal = ledger." }),
+    abnormal: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
+    abnormalByReason: z.record(AbnormalReasonEnum, LedgerMoneySchema).openapi({ description: "abnormal per reason (a reason with no spend is absent)." }),
     standard: LedgerMoneySchema.openapi({ description: "Σ standard cost charged on occurrences: allocated + the standard charges of the day's reuses (consuming org, consumption's UTC day)." }),
     reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges with no spend behind them (consumptions after the first of an occurrence). standard - actual spread." }),
-    differences: LedgerMoneySchema.openapi({ description: "standard - reuseGain + producedNone - ledger per basis. Zero when balanced." }),
+    differences: LedgerMoneySchema.openapi({ description: "standard - reuseGain + producedNone + abnormal - ledger per basis. Zero when balanced." }),
     balanced: z.boolean(),
     costRows: z.number().int(),
     occurrences: z.number().int().openapi({ description: "Produced occurrences receiving a share of the day's spend." }),
@@ -3206,8 +3215,10 @@ export const LedgerCheckResponseSchema = z
       support: LedgerMoneySchema,
       supportByFunction: z.record(SupportFunctionEnum, LedgerMoneySchema),
       undeclared: LedgerMoneySchema,
+      abnormal: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
+      abnormalByReason: z.record(AbnormalReasonEnum, LedgerMoneySchema),
       outcomeSpend: LedgerMoneySchema.openapi({ description: "ledger - support: the spend expected to ride an outcome." }),
-      outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "allocated / outcomeSpend, 10 decimals (0..1): coverage on outcome spend only. Null on zero." }),
+      outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "(allocated + abnormal) / outcomeSpend, 10 decimals (0..1): the declared part of outcome spend (abnormal spend is declared, priced in no unit). Null on zero." }),
     }),
     mismatches: z.array(LedgerCheckRowSchema),
     rows: z.array(LedgerCheckRowSchema).openapi({ description: "Every (day, org) row, day ascending. Omitted when rows=false." }),
@@ -3324,16 +3335,31 @@ export const OutcomeCostTotalsResponseSchema = z
     scope: z.array(
       z.object({
         dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except outcomeKey and the source* ones." }),
-        spend: ProductionCostSchema.openapi({ description: "Every actual + refunded cost row of the scope in the range = producedCost + producedNone." }),
+        spend: ProductionCostSchema.openapi({ description: "Every actual + refunded cost row of the scope in the range = producedCost + producedNone + abnormal." }),
         producedCost: ProductionCostSchema.openapi({ description: "Part spread on produced occurrences (Σ produced[].cost of the scope)." }),
         producedNone: ProductionCostSchema.openapi({ description: "Part of runs with no declaring run at or above them, under the spending run's tags = support + undeclared." }),
         support: ProductionCostSchema.openapi({ description: "Part of producedNone that is support (spend that produces no outcome by design)." }),
         supportByFunction: z.record(SupportFunctionEnum, ProductionCostSchema),
         undeclared: ProductionCostSchema.openapi({ description: "producedNone - support." }),
+        abnormal: ProductionCostSchema.openapi({ description: "Abnormal loss (v5) under the paying run's tags: in no unit cost. spend = producedCost + producedNone + abnormal." }),
         coverageShare: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "producedCost / spend, 10 decimals (0..1). Null when the scope spent nothing." }),
         outcomeSpendCoverageShare: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "producedCost / (spend - support), 10 decimals: coverage on outcome spend only. Null on zero." }),
       }),
     ),
+    abnormal: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "abnormalReason (always: target_already_reached | repeat_production) + the requested dimensions (outcomeKey = the occurrence the spend was for), under the paying run's tags; day = the cost row's UTC day." }),
+        runs: z.string().openapi({ description: "Σ per day of the distinct paying runs." }),
+        cost: ProductionCostSchema,
+      }),
+    ).openapi({ description: "Allocation v5: spend in NO unit cost (IAS 2 section 16), per reason." }),
+    parallel: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions (outcomeKey = the lead state), under the paying run's tags." }),
+        cost: ProductionCostSchema.openapi({ description: "Spend of runs whose pipe targets the OTHER state family, priced in this state (a cold email before the first visit counts in lead_visited AND in lead_interested). A state's own production cost = produced[].cost + parallel[].cost of its key; never summed across keys." }),
+        unpooled: ProductionCostSchema.openapi({ description: "The same, for leads that never reached the state when no lead of the pipe reached it that day (not spread)." }),
+      }),
+    ).openapi({ description: "Allocation v5: the routed spend priced in the other state family (interest vs visit)." }),
   })
   .openapi("OutcomeCostTotalsResponse");
 
@@ -3378,11 +3404,13 @@ const ReconPartsSchema = z.object({
   normalLoss: LedgerMoneySchema.openapi({ description: "Spend of runs that produced nothing, carried by the units their pipe produced in their campaign that day (rule 2, allocation v3)." }),
   unpooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe's runs (workflow slug) whose campaign produced nothing on that pipe that day: produced none, kept under its own campaign (features pools it on the pipe's output)." }),
   undeclared: LedgerMoneySchema.openapi({ description: "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared." }),
+  abnormalLoss: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
+  abnormalByReason: z.record(AbnormalReasonEnum, LedgerMoneySchema),
   unattributed: LedgerMoneySchema.openapi({ description: "Real production its owner marked unattributed_production (no pipe, subject never recorded, e.g. before campaigns existed): an unabsorbed period cost on its own line, never spread." }),
   support: LedgerMoneySchema.openapi({ description: "Spend named support by its owner (every support function except unattributed_production)." }),
   reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges of reuses: no spend behind them, never part of spend." }),
-  differences: LedgerMoneySchema.openapi({ description: "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support - spend: 0 when reconciled." }),
-  shares: z.object({ declaredProduction: ReconShareSchema, normalLoss: ReconShareSchema, unpooledLoss: ReconShareSchema, undeclared: ReconShareSchema, unattributed: ReconShareSchema, support: ReconShareSchema }),
+  differences: LedgerMoneySchema.openapi({ description: "declaredProduction + normalLoss + unpooledLoss + undeclared + unattributed + support + abnormalLoss - spend: 0 when reconciled." }),
+  shares: z.object({ declaredProduction: ReconShareSchema, normalLoss: ReconShareSchema, unpooledLoss: ReconShareSchema, undeclared: ReconShareSchema, unattributed: ReconShareSchema, support: ReconShareSchema, abnormalLoss: ReconShareSchema }),
   consumptions: z.string().openapi({ description: "Consumptions declared (weights, 10 decimals)." }),
   unknownProvenance: z.string().openapi({ description: "Of which no run declared producing the consumed occurrence." }),
 });

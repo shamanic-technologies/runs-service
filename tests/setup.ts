@@ -9,5 +9,12 @@ process.env.BILLING_SERVICE_URL = "http://localhost:9998";
 process.env.BILLING_SERVICE_API_KEY = "test-billing-key";
 process.env.NODE_ENV = "test";
 
-beforeAll(() => console.log("Test suite starting..."));
+// Allocation v5 inputs (features-service catalogue): the served step -> lead state
+// map and NO pipe targets, so a test that does not set its own reads exactly as v4.
+beforeAll(async () => {
+  const { setAllocationInputsForTests, setLeadStatesSourceForTests, TEST_STEP_STATES } = await import("./helpers/lead-states.js");
+  setAllocationInputsForTests({ stepStates: TEST_STEP_STATES, pipeTargets: [] });
+  setLeadStatesSourceForTests([]);
+  console.log("Test suite starting...");
+});
 afterAll(() => console.log("Test suite complete."));
