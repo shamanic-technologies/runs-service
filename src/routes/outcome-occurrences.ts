@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
+import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -47,6 +47,7 @@ import {
 } from "../services/support-marks.js";
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
 import { readReconciliation } from "../services/ledger-reconciliation.js";
+import { EquivalenceRefusedError, stateEquivalences } from "../services/subject-equivalences.js";
 import {
   MAX_OUTCOME_COST_GROUPS,
   OUTCOME_COST_DIMENSIONS,
@@ -278,6 +279,28 @@ async function handleVoid(req: Request, res: Response, orgRequired: boolean) {
 router.post("/v1/runs/:id/outcomes", requireApiKey, (req, res) => handleDeclare(req, res, true));
 router.post("/v1/platform-runs/outcomes/batch", requirePlatformAuth, handleDeclareBatch);
 router.post("/v1/platform-runs/:id/outcomes", requirePlatformAuth, (req, res) => handleDeclare(req, res, false));
+router.post("/v1/platform-runs/subject-equivalences", requirePlatformAuth, async (req: Request, res: Response) => {
+  try {
+    const parsed = StateSubjectEquivalencesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    const owner = req.platformServiceName!;
+    const out = await stateEquivalences(parsed.data.items, owner, { reason: parsed.data.reason, statedBy: parsed.data.statedBy });
+    res.json({
+      recordedCount: out.filter((o) => o.status === "recorded").length,
+      alreadyRecordedCount: out.filter((o) => o.status === "already_recorded").length,
+    });
+  } catch (err) {
+    if (err instanceof EquivalenceRefusedError) {
+      res.status(422).json({ error: "invalid_equivalences", details: { refusals: err.refusals } });
+      return;
+    }
+    console.error("[Runs Service] subject equivalences failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
 
