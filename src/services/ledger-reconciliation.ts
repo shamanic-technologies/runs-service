@@ -194,7 +194,8 @@ export async function readReconciliation(since: string, until: string, status: D
     addInto(a.noneFromRows, money);
     if (r.part === "unpooled") addInto(a.unpooled, money);
     if (r.part === "undeclared") addInto(a.undeclared, money);
-    if (r.part === "unattributed") addInto(a.unattributed, money);
+    // support and unattributed come from the per-org ledger rows (support_by_function);
+    // the per-tag rows must sum to the same (noneFromRows vs none, splitConsistent).
     const name = (r.service_name as string | null) ?? "";
     const s = services.get(name) ?? services.set(name, { unpooled: acc(), undeclared: acc(), unattributed: acc(), support: acc(), undeclaredRuns: new D(0), unpooledRuns: new D(0), unattributedRuns: new D(0) }).get(name)!;
     if (r.part === "unpooled") {
