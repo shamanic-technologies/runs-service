@@ -526,6 +526,13 @@
       "when": 1783270200000,
       "tag": "0074_scoped_void",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1783280200000,
+      "tag": "0075_loss_occurrence_days",
+      "breakpoints": true
     }
   ]
 }
