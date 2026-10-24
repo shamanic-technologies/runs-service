@@ -199,4 +199,94 @@ describe("Support functions: support spend named and reported apart", () => {
     const { row } = await ledgerRow();
     expect(row.supportByFunction.retired_product.grossCents).toBe("1.0000000000");
   });
+
+  it("a mark undone lets the run declare again, bronze keeps the mark and its undo, the days it moved are recomputed", async () => {
+    const DAY2 = "2025-04-16";
+    const run = await insertTestRun({ organizationId: ORG, serviceName: "journalists-service", taskName: "buffer-next", status: "completed", startedAt: new Date(`${DAY2}T09:00:00Z`) });
+    await cost(run.id, "6", new Date(`${DAY2}T09:01:00Z`));
+    const unmark = (body: unknown, preview = false) =>
+      request(app).post(`/internal/runs/support-marks/unmark${preview ? "/preview" : ""}`).set(getInternalAuthHeaders()).send(body);
+    expect((await staffMark({ kind: "retired_product", reason: "PR cold email retired", markedBy: "t", runIds: [run.id] })).body).toMatchObject({ markedCount: 1 });
+    const declare = () =>
+      request(app)
+        .post(`/v1/platform-runs/${run.id}/outcomes`)
+        .set(getPlatformAuthHeaders({ serviceName: "journalists-service" }))
+        .send({ produced: [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: "J1" }] });
+    expect((await declare()).status).toBe(409);
+    await storeLedgerDay(await computeLedgerDay(DAY2, VERSIONS as any));
+    const before = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY2}&until=${DAY2}`).set(getInternalAuthHeaders());
+    expect(before.body.rows.find((r: any) => r.organizationId === ORG).supportByFunction.retired_product.grossCents).toBe("6.0000000000");
+
+    // Body rules: runIds and a selection are exclusive; reason + unmarkedBy required.
+    expect((await unmark({ reason: "r", unmarkedBy: "t", runIds: [run.id], kind: "retired_product" })).status).toBe(400);
+    expect((await unmark({ runIds: [run.id] })).status).toBe(400);
+    // Preview by feature-less selection over the service: what apply writes.
+    const preview = await unmark({ reason: "product is back", unmarkedBy: "t", serviceName: "journalists-service", kind: "retired_product" }, true);
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({ toUnmarkCount: 1, byFunction: { retired_product: 1 }, spend: { grossCents: "6.0000000000" }, tooMany: false });
+    expect((await unmark({ reason: "product is back", unmarkedBy: "t", serviceName: "journalists-service", kind: "copilot" }, true)).body.toUnmarkCount).toBe(0);
+    // Owner door: another service cannot undo it.
+    const foreign = await request(app)
+      .post("/v1/platform-runs/support-marks/unmark/apply")
+      .set(getPlatformAuthHeaders({ serviceName: "chat-service" }))
+      .send({ reason: "r", unmarkedBy: "t", runIds: [run.id] });
+    expect(foreign.status).toBe(422);
+    expect(foreign.body.details.invalid).toEqual([{ runId: run.id, reason: "not_run_owner" }]);
+
+    const done = await request(app)
+      .post("/v1/platform-runs/support-marks/unmark/apply")
+      .set(getPlatformAuthHeaders({ serviceName: "journalists-service" }))
+      .send({ reason: "product is back", unmarkedBy: "journalists-service", runIds: [run.id] });
+    expect(done.status).toBe(200);
+    expect(done.body).toEqual({ unmarkedCount: 1, notMarkedCount: 0 });
+    expect((await unmark({ reason: "again", unmarkedBy: "t", runIds: [run.id] })).body).toEqual({ unmarkedCount: 0, notMarkedCount: 1 });
+    expect((await db.execute(sql`SELECT 1 FROM run_support_marks WHERE run_id = ${run.id}::uuid`)).length).toBe(0);
+    const events = (await db.execute(sql`
+      SELECT event_type, payload FROM outcome_declaration_events WHERE run_id = ${run.id}::uuid ORDER BY occurred_at, event_type
+    `)) as any[];
+    expect(events.map((e) => e.event_type)).toEqual(["run.support_marked", "run.support_unmarked"]);
+    expect(events[1].payload).toMatchObject({ kind: "retired_product", reason: "product is back", unmarkedBy: "journalists-service", affectedFromDay: DAY2 });
+
+    // The stored day is stale: the refresher recomputes it, and the spend is undeclared again.
+    expect(await daysToCompute(new Date(`${DAY2}T12:00:00Z`), DAY2)).toContain(DAY2);
+    await storeLedgerDay(await computeLedgerDay(DAY2, VERSIONS as any));
+    const after = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY2}&until=${DAY2}`).set(getInternalAuthHeaders());
+    const row = after.body.rows.find((r: any) => r.organizationId === ORG);
+    expect(row.supportByFunction).toEqual({});
+    expect(row.undeclared.grossCents).toBe("6.0000000000");
+
+    // The run declares again, and its spend rides that outcome.
+    expect((await declare()).status).toBe(201);
+    await storeLedgerDay(await computeLedgerDay(DAY2, VERSIONS as any));
+    const declared = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY2}&until=${DAY2}`).set(getInternalAuthHeaders());
+    expect(declared.body.rows.find((r: any) => r.organizationId === ORG).allocated.grossCents).toBe("6.0000000000");
+  });
+
+  it("staff door: selection by featureSlugs, offOutcomeOnly leaves spend already on an outcome where it is", async () => {
+    const DAY3 = "2025-04-17";
+    const mk = (serviceName: string, featureSlug: string, hour: string, parentRunId?: string) =>
+      insertTestRun({ organizationId: ORG, serviceName, taskName: "t", featureSlug, status: "completed", parentRunId, startedAt: new Date(`${DAY3}T${hour}:00Z`) });
+    const send = await mk("instantly-service", "pr-retired-x", "09:00");
+    await cost(send.id, "4", new Date(`${DAY3}T09:01:00Z`));
+    const decl = await request(app)
+      .post("/v1/platform-runs/outcomes/batch")
+      .set(getPlatformAuthHeaders({ serviceName: "instantly-service" }))
+      .send({ runs: [{ runId: send.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: "P1" }] }] });
+    expect(decl.status).toBe(201);
+    const ridesSend = await mk("chat-service", "pr-retired-x", "09:02", send.id);
+    await cost(ridesSend.id, "2", new Date(`${DAY3}T09:03:00Z`));
+    const orphan = await mk("chat-service", "pr-retired-x", "10:00");
+    await cost(orphan.id, "3", new Date(`${DAY3}T10:01:00Z`));
+    const other = await mk("chat-service", "sales-live-y", "10:00");
+    await cost(other.id, "5", new Date(`${DAY3}T10:01:00Z`));
+
+    const body = { kind: "retired_product", reason: "PR retired", markedBy: "t", featureSlugs: ["pr-retired-x"], withSpendOnly: true, offOutcomeOnly: true };
+    const preview = await staffMark(body, true);
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({ matchedRunCount: 3, declaresOutcomesCount: 1, toMarkCount: 1, onOutcomeNowCount: 0, leftOnOutcomeCount: 1, spend: { grossCents: "3.0000000000" } });
+    expect((await staffMark({ ...body, offOutcomeOnly: undefined }, true)).body).toMatchObject({ toMarkCount: 2, onOutcomeNowCount: 1, leftOnOutcomeCount: 0 });
+    expect((await staffMark(body)).body).toMatchObject({ markedCount: 1 });
+    const marked = (await db.execute(sql`SELECT run_id FROM run_support_marks WHERE run_id = ANY(${`{${[send.id, ridesSend.id, orphan.id, other.id].join(",")}}`}::uuid[])`)) as any[];
+    expect(marked.map((m) => m.run_id)).toEqual([orphan.id]);
+  });
 });

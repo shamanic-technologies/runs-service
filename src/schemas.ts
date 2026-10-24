@@ -2861,7 +2861,12 @@ const SupportSelectionShape = {
   startedBefore: z.string().datetime({ offset: true }).optional().openapi({ description: "Exclusive run start." }),
   topLevelOnly: z.boolean().optional().openapi({ description: "Only runs with no parent (e.g. judgments made for no caller run; a child made on behalf of a caller's run rides that run's outcome)." }),
   withSpendOnly: z.boolean().optional().openapi({ description: "Only runs carrying spend (an actual or refunded cost row)." }),
+  offOutcomeOnly: z.boolean().optional().openapi({ description: "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount." }),
 };
+
+const supportFeatureSlugs = z.array(z.string().min(1)).min(1).max(50).optional().openapi({
+  description: "Selection: runs carrying one of these feature slugs (a product, whatever service ran it). ANDs with serviceName.",
+});
 
 const SupportMarkShape = {
   kind: SupportFunctionEnum,
@@ -2877,7 +2882,8 @@ export const MarkRunsSupportRequestSchema = z
   .object({
     ...SupportMarkShape,
     runIds: supportRunIds.optional(),
-    serviceName: z.string().min(1).optional().openapi({ description: "Selection instead of runIds: every run of this service (narrowed by the other selection fields). Exactly one of runIds / serviceName." }),
+    serviceName: z.string().min(1).optional().openapi({ description: "Selection instead of runIds: every run of this service (narrowed by the other selection fields). runIds, or a selection by serviceName and/or featureSlugs." }),
+    featureSlugs: supportFeatureSlugs,
     ...SupportSelectionShape,
   })
   .openapi("MarkRunsSupportRequest");
@@ -2896,12 +2902,53 @@ const SupportSelectionResultSchema = z
     toMarkCount: z.number().int().openapi({ description: "Runs the apply marks (matched, not yet marked, not declaring an outcome)." }),
     alreadyMarkedCount: z.number().int(),
     declaresOutcomesCount: z.number().int().openapi({ description: "Matched runs that declared a produced occurrence: production, never support, left untouched." }),
-    onOutcomeNowCount: z.number().int().nullable().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null when tooMany (not computed: narrow the selection)." }),
+    onOutcomeNowCount: z.number().int().nullable().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome (0 with offOutcomeOnly). Null when tooMany (not computed: narrow the selection)." }),
+    leftOnOutcomeCount: z.number().int().nullable().openapi({ description: "offOutcomeOnly: matched runs left out because their cost rides an ancestor's outcome today (0 without it). Null when tooMany." }),
     spend: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "Own spend (actual + refunded) of the runs to mark." }),
     maxRuns: z.number().int(),
     tooMany: z.boolean().openapi({ description: "More than maxRuns to mark: apply refuses (422), narrow the selection." }),
   })
   .openapi("SupportSelectionResult");
+
+const SupportUnmarkShape = {
+  reason: z.string().min(1).max(2000),
+  unmarkedBy: z.string().min(1).max(200).openapi({ description: "Who decided (session, person, ticket)." }),
+  kind: SupportFunctionEnum.optional().openapi({ description: "Only marks of this support function." }),
+  taskNames: SupportSelectionShape.taskNames,
+  startedAfter: SupportSelectionShape.startedAfter,
+  startedBefore: SupportSelectionShape.startedBefore,
+  topLevelOnly: SupportSelectionShape.topLevelOnly,
+};
+
+export const UnmarkRunsSupportRequestSchema = z
+  .object({
+    ...SupportUnmarkShape,
+    runIds: supportRunIds.optional().openapi({ description: "Runs whose mark is undone (<= 5000); a run not marked is counted, never an error." }),
+    serviceName: z.string().min(1).optional().openapi({ description: "Selection: marked runs of this service." }),
+    featureSlugs: supportFeatureSlugs,
+  })
+  .openapi("UnmarkRunsSupportRequest");
+
+export const OwnerUnmarkRunsSupportRequestSchema = z
+  .object({
+    ...SupportUnmarkShape,
+    runIds: supportRunIds.optional().openapi({ description: "Runs whose mark is undone (<= 5000), each a run of the calling service; all or nothing. Absent = a selection over the caller's own marked runs." }),
+  })
+  .openapi("OwnerUnmarkRunsSupportRequest");
+
+const SupportUnmarkPreviewSchema = z
+  .object({
+    toUnmarkCount: z.number().int().openapi({ description: "Marked runs the apply un-marks." }),
+    byFunction: z.record(z.string(), z.number().int()).openapi({ description: "Those runs per support function removed." }),
+    spend: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "Own spend (actual + refunded) of those runs." }),
+    maxRuns: z.number().int(),
+    tooMany: z.boolean(),
+  })
+  .openapi("SupportUnmarkPreview");
+
+const SupportUnmarkResultSchema = z
+  .object({ unmarkedCount: z.number().int(), notMarkedCount: z.number().int() })
+  .openapi("SupportUnmarkResult");
 
 const SupportMarkResultSchema = z
   .object({ markedCount: z.number().int(), alreadyMarkedCount: z.number().int(), declaresOutcomesCount: z.number().int().optional() })
@@ -2912,15 +2959,39 @@ const SupportInvalidRunsSchema = z.object({
   details: z.object({ invalid: z.array(z.object({ runId: z.string(), reason: z.enum(["run_not_found", "run_declares_outcomes", "not_run_owner"]) })) }),
 });
 
+const UNMARK_DOCTRINE =
+  "Undo support marks (owner 2026-10-24: a retired product may come back and its past spend move back onto outcomes). One bronze run.support_unmarked event per marked run (the function removed, reason, unmarkedBy, affectedFromDay = the run's start day); the projection removes the silver mark, so the run's spend leaves support at once (undeclared again until its owner declares outcomes on it) and the run accepts declarations again. Bronze keeps the mark and its undo; the run can be marked again later. The refresher recomputes every stored day from the run's start. Idempotent: a run not marked writes nothing.";
+
+for (const door of ["staff", "owner"] as const) {
+  for (const step of ["preview", "apply"] as const) {
+    registry.registerPath({
+      method: "post",
+      path: door === "staff" ? `/internal/runs/support-marks/unmark${step === "preview" ? "/preview" : ""}` : `/v1/platform-runs/support-marks/unmark/${step}`,
+      summary: `${step === "preview" ? "Preview undoing" : "Undo"} support marks (${door === "staff" ? "staff, any service" : "owning service, its own runs"})`,
+      description: `${UNMARK_DOCTRINE} ${door === "staff" ? "Staff door: by runIds or by selection (serviceName and/or featureSlugs + optional kind, tasks, start window, topLevelOnly)." : "Owner door (x-service-name required): by runIds (each a run of the caller, else 422 not_run_owner) or by selection over the caller's own marked runs."} At most 50,000 runs per apply (422 too_many_runs). ${step === "preview" ? "Writes nothing." : "Same selection as preview."}`,
+      security: [{ apiKey: [] }],
+      request: { body: { content: { "application/json": { schema: door === "staff" ? UnmarkRunsSupportRequestSchema : OwnerUnmarkRunsSupportRequestSchema } } } },
+      responses: {
+        200: step === "preview"
+          ? { description: "Selection", content: { "application/json": { schema: SupportUnmarkPreviewSchema } } }
+          : { description: "Unmarked", content: { "application/json": { schema: SupportUnmarkResultSchema } } },
+        400: { description: "Invalid body", content: { "application/json": { schema: ValidationErrorSchema } } },
+        401: { description: "Unauthorized" },
+        422: { description: "invalid_runs (runIds: run_not_found, not_run_owner) or too_many_runs", content: { "application/json": { schema: SupportInvalidRunsSchema } } },
+      },
+    });
+  }
+}
+
 const SUPPORT_DOCTRINE =
-  "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); final and idempotent (an already marked run keeps its first function). The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name.";
+  "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); idempotent (an already marked run keeps its first function). A mark can be UNDONE (…/support-marks/unmark): a bronze run.support_unmarked event, the run declares again, bronze keeps both. The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name.";
 
 registry.registerPath({
   method: "post",
   path: "/internal/runs/support-marks",
   summary: "Mark runs SUPPORT, naming the support function (staff, service-auth)",
   description:
-    `${SUPPORT_DOCTRINE} Staff door: any service's runs, by runIds (all or nothing: any unknown run or run declaring an outcome = 422, nothing written) or by selection (serviceName + optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). First uses: 3,052 probe runs parented to newsletter sends (2026-10-23); runs of services no longer in the fleet (retired_product). POST /internal/runs/support-marks/preview shows what a selection would mark.`,
+    `${SUPPORT_DOCTRINE} Staff door: any service's runs, by runIds (all or nothing: any unknown run or run declaring an outcome = 422, nothing written) or by selection (serviceName and/or featureSlugs + optional tasks, start window, topLevelOnly, withSpendOnly, offOutcomeOnly; runs declaring an outcome are left out and counted). First uses: 3,052 probe runs parented to newsletter sends (2026-10-23); runs of services no longer in the fleet (retired_product). POST /internal/runs/support-marks/preview shows what a selection would mark.`,
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: MarkRunsSupportRequestSchema } } } },
   responses: {

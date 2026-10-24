@@ -11,7 +11,13 @@
 // /v1/platform-runs) or later in bulk for its past runs (POST
 // /v1/platform-runs/support-marks/{preview,apply}); staff for any service through
 // /internal/runs/support-marks{,/preview} (runs of services with no owner left:
-// retired products). Never inferred from a cost name.
+// retired products, selected by service or by FEATURE). Never inferred from a
+// cost name.
+//
+// A mark can be UNDONE (migration 0065, owner 2026-10-24: a retired product may
+// come back, its past spend then moves back onto outcomes): a bronze
+// `run.support_unmarked` event, the projection deletes the silver mark, the run
+// declares again, the refresher recomputes the days it moved. Bronze keeps both.
 
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
@@ -54,7 +60,7 @@ export const supportMarkEvent = (runId: string, m: SupportMark) => ({
  * Marks runs SUPPORT: one bronze `run.support_marked` event per run not yet
  * marked. The caller has checked every run exists and declares no produced
  * occurrence. Idempotent: an already marked run writes nothing (its first
- * function stays: a mark is final).
+ * function stays until the mark is undone, see unmarkRunsSupport).
  */
 export async function markRunsSupport(runIds: string[], m: SupportMark): Promise<{ marked: string[]; alreadyMarked: string[] }> {
   const already = new Set<string>();
@@ -72,6 +78,8 @@ export async function markRunsSupport(runIds: string[], m: SupportMark): Promise
 export interface SupportSelection {
   /** Service whose runs are selected (the owner's own name on the owner door). */
   serviceName?: string;
+  /** Runs carrying one of these feature slugs (staff door: a product, whatever service ran it). ANDs with serviceName. */
+  featureSlugs?: string[];
   /** Or these runs (checked by the caller: exist, owned, declaring nothing). */
   runIds?: string[];
   taskNames?: string[];
@@ -81,6 +89,8 @@ export interface SupportSelection {
   topLevelOnly?: boolean;
   /** Only runs that carry spend (an actual or refunded cost row). */
   withSpendOnly?: boolean;
+  /** Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there). */
+  offOutcomeOnly?: boolean;
 }
 
 export interface SupportSelectionResult {
@@ -94,6 +104,8 @@ export interface SupportSelectionResult {
   spend: { grossCents: string; netCents: string };
   /** Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null = not computed (tooMany). */
   onOutcomeNowCount: number | null;
+  /** offOutcomeOnly: runs left out because their cost rides an ancestor's outcome today (0 without it). Null = not computed (tooMany). */
+  leftOnOutcomeCount: number | null;
   tooMany: boolean;
 }
 
@@ -104,9 +116,10 @@ export interface SupportSelectionResult {
  * with a statement timeout sized for it.
  */
 export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPORT_MARK_RUNS): Promise<SupportSelectionResult> {
-  const where: SQL[] = s.runIds
-    ? [sql`r.id = ANY(${`{${s.runIds.join(",")}}`}::uuid[])`]
-    : [sql`r.service_name = ${s.serviceName}`];
+  const where: SQL[] = s.runIds ? [sql`r.id = ANY(${`{${s.runIds.join(",")}}`}::uuid[])`] : [];
+  if (!s.runIds && s.serviceName) where.push(sql`r.service_name = ${s.serviceName}`);
+  if (!s.runIds && s.featureSlugs?.length) where.push(sql`r.feature_slug IN (SELECT jsonb_array_elements_text(${JSON.stringify(s.featureSlugs)}::jsonb))`);
+  if (where.length === 0) throw new Error("support selection needs runIds, serviceName or featureSlugs");
   if (s.taskNames?.length) where.push(sql`r.task_name IN (SELECT jsonb_array_elements_text(${JSON.stringify(s.taskNames)}::jsonb))`);
   if (s.startedAfter) where.push(sql`r.started_at >= ${s.startedAfter}::timestamptz`);
   if (s.startedBefore) where.push(sql`r.started_at < ${s.startedBefore}::timestamptz`);
@@ -132,16 +145,18 @@ export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPO
       ${s.withSpendOnly ? sql`WHERE x.n > 0` : sql``}
     `)) as any[];
   });
-  const toMarkRows = rows.filter((r) => !r.produces && !r.marked);
-  const tooMany = toMarkRows.length > maxRuns;
-  const withParent = tooMany ? [] : toMarkRows.filter((r) => r.has_parent).map((r) => r.id as string);
-  let onOutcome = 0;
+  const candidates = rows.filter((r) => !r.produces && !r.marked);
+  const tooMany = candidates.length > maxRuns;
+  const withParent = tooMany ? [] : candidates.filter((r) => r.has_parent).map((r) => r.id as string);
+  const onOutcome = new Set<string>();
   for (let i = 0; i < withParent.length; i += 5000) {
     const keys = await anchorKeysOf(withParent.slice(i, i + 5000), db);
-    for (const k of keys.values()) if (k.length > 0) onOutcome += 1;
+    for (const [id, k] of keys) if (k.length > 0) onOutcome.add(id);
   }
+  const toMarkRows = s.offOutcomeOnly ? candidates.filter((r) => !onOutcome.has(r.id)) : candidates;
   // Over the cap the walk is not run: the count is unknown, never a reassuring 0.
-  const onOutcomeNowCount = tooMany ? null : onOutcome;
+  const onOutcomeNowCount = tooMany ? null : s.offOutcomeOnly ? 0 : onOutcome.size;
+  const leftOnOutcomeCount = tooMany ? null : s.offOutcomeOnly ? onOutcome.size : 0;
   return {
     toMark: toMarkRows.map((r) => r.id as string),
     matchedRunCount: rows.length,
@@ -152,6 +167,102 @@ export async function selectSupportRuns(s: SupportSelection, maxRuns = MAX_SUPPO
       netCents: toMarkRows.reduce((a, r) => a.plus(r.net), new Decimal(0)).toFixed(10),
     },
     onOutcomeNowCount,
+    leftOnOutcomeCount,
     tooMany,
   };
+}
+
+export interface SupportUnmark {
+  reason: string;
+  unmarkedBy: string;
+}
+
+export interface MarkedSelectionResult {
+  /** Marked runs the unmark removes. */
+  toUnmark: string[];
+  /** Runs per support function removed. */
+  byFunction: Partial<Record<SupportFunction, number>>;
+  /** Own spend (actual + refunded) of those runs, gross and frozen net. */
+  spend: { grossCents: string; netCents: string };
+  tooMany: boolean;
+}
+
+/**
+ * The MARKED runs an unmark selects (same selection fields as a mark, plus the
+ * function to remove). Preview and apply share it.
+ */
+export async function selectMarkedRuns(
+  s: Omit<SupportSelection, "withSpendOnly" | "offOutcomeOnly"> & { kind?: SupportFunction },
+  maxRuns = MAX_SUPPORT_MARK_RUNS,
+): Promise<MarkedSelectionResult> {
+  const where: SQL[] = s.runIds ? [sql`r.id = ANY(${`{${s.runIds.join(",")}}`}::uuid[])`] : [];
+  if (!s.runIds && s.serviceName) where.push(sql`r.service_name = ${s.serviceName}`);
+  if (!s.runIds && s.featureSlugs?.length) where.push(sql`r.feature_slug IN (SELECT jsonb_array_elements_text(${JSON.stringify(s.featureSlugs)}::jsonb))`);
+  if (where.length === 0) throw new Error("support selection needs runIds, serviceName or featureSlugs");
+  if (s.kind) where.push(sql`m.kind = ${s.kind}`);
+  if (s.taskNames?.length) where.push(sql`r.task_name IN (SELECT jsonb_array_elements_text(${JSON.stringify(s.taskNames)}::jsonb))`);
+  if (s.startedAfter) where.push(sql`r.started_at >= ${s.startedAfter}::timestamptz`);
+  if (s.startedBefore) where.push(sql`r.started_at < ${s.startedBefore}::timestamptz`);
+  if (s.topLevelOnly) where.push(sql`r.parent_run_id IS NULL`);
+  const rows = await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '300s'`);
+    return (await tx.execute(sql`
+      SELECT r.id, m.kind, sp.gross::text AS gross, sp.net::text AS net
+      FROM run_support_marks m JOIN runs r ON r.id = m.run_id
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS gross,
+               COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)), 0) AS net
+        FROM runs_costs rc WHERE rc.run_id = r.id AND rc.status IN ('actual','refunded') OFFSET 0
+      ) sp
+      WHERE ${sql.join(where, sql` AND `)}
+    `)) as any[];
+  });
+  const byFunction: Partial<Record<SupportFunction, number>> = {};
+  for (const r of rows) byFunction[r.kind as SupportFunction] = (byFunction[r.kind as SupportFunction] ?? 0) + 1;
+  return {
+    toUnmark: rows.map((r) => r.id as string),
+    byFunction,
+    spend: {
+      grossCents: rows.reduce((a, r) => a.plus(r.gross), new Decimal(0)).toFixed(10),
+      netCents: rows.reduce((a, r) => a.plus(r.net), new Decimal(0)).toFixed(10),
+    },
+    tooMany: rows.length > maxRuns,
+  };
+}
+
+/**
+ * Undoes the support marks of these runs: one bronze `run.support_unmarked`
+ * event per run still marked (the function removed, reason, who, and the first
+ * UTC day the mark could have moved: the run's start). The projection deletes
+ * the silver mark; bronze keeps the mark AND its undo. Idempotent: a run not
+ * marked writes nothing.
+ */
+export async function unmarkRunsSupport(runIds: string[], u: SupportUnmark): Promise<{ unmarked: string[]; notMarked: string[] }> {
+  const marked = new Map<string, { kind: string; fromDay: string }>();
+  for (let i = 0; i < runIds.length; i += 5000) {
+    const rows = (await db.execute(sql`
+      SELECT m.run_id, m.kind, to_char(r.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS from_day
+      FROM run_support_marks m JOIN runs r ON r.id = m.run_id
+      WHERE m.run_id = ANY(${`{${runIds.slice(i, i + 5000).join(",")}}`}::uuid[])
+    `)) as any[];
+    for (const r of rows) marked.set(r.run_id as string, { kind: r.kind, fromDay: r.from_day });
+  }
+  const ids = runIds.filter((id) => marked.has(id));
+  for (let i = 0; i < ids.length; i += 500) {
+    await db.insert(outcomeDeclarationEvents).values(
+      ids.slice(i, i + 500).map((runId) => ({
+        runId,
+        eventType: "run.support_unmarked",
+        sourceService: u.unmarkedBy,
+        payload: {
+          allocationVersion: ALLOCATION_VERSION,
+          kind: marked.get(runId)!.kind,
+          reason: u.reason,
+          unmarkedBy: u.unmarkedBy,
+          affectedFromDay: marked.get(runId)!.fromDay,
+        },
+      })),
+    );
+  }
+  return { unmarked: ids, notMarked: runIds.filter((id) => !marked.has(id)) };
 }

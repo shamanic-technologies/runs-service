@@ -1201,9 +1201,11 @@ export async function daysToCompute(now = new Date(), firstDay?: string): Promis
   // first one its rows could have touched (stated on the void event).
   if (computed.size > 0) {
     const oldest = new Date(Math.min(...[...computed.values()].map((d) => d.getTime())));
+    // A support mark undone (0065) moves every day from its run's start, stated the same way.
     const voids = (await db.execute(sql`
-      SELECT payload->>'affectedFromDay' AS from_day, occurred_at FROM outcome_declaration_events
-      WHERE event_type = 'outcomes.voided' AND occurred_at > ${oldest.toISOString()}::timestamptz
+      SELECT payload->>'affectedFromDay' AS from_day, MAX(occurred_at) AS occurred_at FROM outcome_declaration_events
+      WHERE event_type IN ('outcomes.voided', 'run.support_unmarked') AND occurred_at > ${oldest.toISOString()}::timestamptz
+      GROUP BY 1
     `)) as any[];
     for (const v of voids) {
       const at = new Date(v.occurred_at);

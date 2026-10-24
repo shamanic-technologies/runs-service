@@ -4580,6 +4580,215 @@
           "runs"
         ]
       },
+      "SupportUnmarkPreview": {
+        "type": "object",
+        "properties": {
+          "toUnmarkCount": {
+            "type": "integer",
+            "description": "Marked runs the apply un-marks."
+          },
+          "byFunction": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Those runs per support function removed."
+          },
+          "spend": {
+            "type": "object",
+            "properties": {
+              "grossCents": {
+                "type": "string"
+              },
+              "netCents": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "grossCents",
+              "netCents"
+            ],
+            "description": "Own spend (actual + refunded) of those runs."
+          },
+          "maxRuns": {
+            "type": "integer"
+          },
+          "tooMany": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "toUnmarkCount",
+          "byFunction",
+          "spend",
+          "maxRuns",
+          "tooMany"
+        ]
+      },
+      "UnmarkRunsSupportRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "unmarkedBy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Who decided (session, person, ticket)."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "payment_fees",
+              "brand_setup",
+              "copilot",
+              "platform_llm",
+              "staff_experiment",
+              "product_feature",
+              "retired_product"
+            ],
+            "description": "Only marks of this support function."
+          },
+          "taskNames": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 200,
+            "description": "Only runs of these tasks."
+          },
+          "startedAfter": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive run start."
+          },
+          "startedBefore": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive run start."
+          },
+          "topLevelOnly": {
+            "type": "boolean",
+            "description": "Only runs with no parent (e.g. judgments made for no caller run; a child made on behalf of a caller's run rides that run's outcome)."
+          },
+          "runIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i"
+            },
+            "minItems": 1,
+            "maxItems": 5000,
+            "description": "Runs whose mark is undone (<= 5000); a run not marked is counted, never an error."
+          },
+          "serviceName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Selection: marked runs of this service."
+          },
+          "featureSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Selection: runs carrying one of these feature slugs (a product, whatever service ran it). ANDs with serviceName."
+          }
+        },
+        "required": [
+          "reason",
+          "unmarkedBy"
+        ]
+      },
+      "SupportUnmarkResult": {
+        "type": "object",
+        "properties": {
+          "unmarkedCount": {
+            "type": "integer"
+          },
+          "notMarkedCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unmarkedCount",
+          "notMarkedCount"
+        ]
+      },
+      "OwnerUnmarkRunsSupportRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "unmarkedBy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Who decided (session, person, ticket)."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "payment_fees",
+              "brand_setup",
+              "copilot",
+              "platform_llm",
+              "staff_experiment",
+              "product_feature",
+              "retired_product"
+            ],
+            "description": "Only marks of this support function."
+          },
+          "taskNames": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 200,
+            "description": "Only runs of these tasks."
+          },
+          "startedAfter": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive run start."
+          },
+          "startedBefore": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive run start."
+          },
+          "topLevelOnly": {
+            "type": "boolean",
+            "description": "Only runs with no parent (e.g. judgments made for no caller run; a child made on behalf of a caller's run rides that run's outcome)."
+          },
+          "runIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i"
+            },
+            "minItems": 1,
+            "maxItems": 5000,
+            "description": "Runs whose mark is undone (<= 5000), each a run of the calling service; all or nothing. Absent = a selection over the caller's own marked runs."
+          }
+        },
+        "required": [
+          "reason",
+          "unmarkedBy"
+        ]
+      },
       "SupportMarkResult": {
         "type": "object",
         "properties": {
@@ -4638,7 +4847,17 @@
           "serviceName": {
             "type": "string",
             "minLength": 1,
-            "description": "Selection instead of runIds: every run of this service (narrowed by the other selection fields). Exactly one of runIds / serviceName."
+            "description": "Selection instead of runIds: every run of this service (narrowed by the other selection fields). runIds, or a selection by serviceName and/or featureSlugs."
+          },
+          "featureSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Selection: runs carrying one of these feature slugs (a product, whatever service ran it). ANDs with serviceName."
           },
           "taskNames": {
             "type": "array",
@@ -4667,6 +4886,10 @@
           "withSpendOnly": {
             "type": "boolean",
             "description": "Only runs carrying spend (an actual or refunded cost row)."
+          },
+          "offOutcomeOnly": {
+            "type": "boolean",
+            "description": "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount."
           }
         },
         "required": [
@@ -4696,7 +4919,12 @@
           "onOutcomeNowCount": {
             "type": "integer",
             "nullable": true,
-            "description": "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null when tooMany (not computed: narrow the selection)."
+            "description": "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome (0 with offOutcomeOnly). Null when tooMany (not computed: narrow the selection)."
+          },
+          "leftOnOutcomeCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "offOutcomeOnly: matched runs left out because their cost rides an ancestor's outcome today (0 without it). Null when tooMany."
           },
           "spend": {
             "type": "object",
@@ -4728,6 +4956,7 @@
           "alreadyMarkedCount",
           "declaresOutcomesCount",
           "onOutcomeNowCount",
+          "leftOnOutcomeCount",
           "spend",
           "maxRuns",
           "tooMany"
@@ -4797,6 +5026,10 @@
           "withSpendOnly": {
             "type": "boolean",
             "description": "Only runs carrying spend (an actual or refunded cost row)."
+          },
+          "offOutcomeOnly": {
+            "type": "boolean",
+            "description": "Leave out runs whose cost rides an ancestor's outcome today (spend already on production stays there); counted in leftOnOutcomeCount."
           }
         },
         "required": [
@@ -11540,10 +11773,402 @@
         }
       }
     },
+    "/internal/runs/support-marks/unmark/preview": {
+      "post": {
+        "summary": "Preview undoing support marks (staff, any service)",
+        "description": "Undo support marks (owner 2026-10-24: a retired product may come back and its past spend move back onto outcomes). One bronze run.support_unmarked event per marked run (the function removed, reason, unmarkedBy, affectedFromDay = the run's start day); the projection removes the silver mark, so the run's spend leaves support at once (undeclared again until its owner declares outcomes on it) and the run accepts declarations again. Bronze keeps the mark and its undo; the run can be marked again later. The refresher recomputes every stored day from the run's start. Idempotent: a run not marked writes nothing. Staff door: by runIds or by selection (serviceName and/or featureSlugs + optional kind, tasks, start window, topLevelOnly). At most 50,000 runs per apply (422 too_many_runs). Writes nothing.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnmarkRunsSupportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Selection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportUnmarkPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_runs (runIds: run_not_found, not_run_owner) or too_many_runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_runs"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "invalid": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runId": {
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "run_not_found",
+                                  "run_declares_outcomes",
+                                  "not_run_owner"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "runId",
+                              "reason"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "details"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/runs/support-marks/unmark": {
+      "post": {
+        "summary": "Undo support marks (staff, any service)",
+        "description": "Undo support marks (owner 2026-10-24: a retired product may come back and its past spend move back onto outcomes). One bronze run.support_unmarked event per marked run (the function removed, reason, unmarkedBy, affectedFromDay = the run's start day); the projection removes the silver mark, so the run's spend leaves support at once (undeclared again until its owner declares outcomes on it) and the run accepts declarations again. Bronze keeps the mark and its undo; the run can be marked again later. The refresher recomputes every stored day from the run's start. Idempotent: a run not marked writes nothing. Staff door: by runIds or by selection (serviceName and/or featureSlugs + optional kind, tasks, start window, topLevelOnly). At most 50,000 runs per apply (422 too_many_runs). Same selection as preview.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnmarkRunsSupportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unmarked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportUnmarkResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_runs (runIds: run_not_found, not_run_owner) or too_many_runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_runs"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "invalid": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runId": {
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "run_not_found",
+                                  "run_declares_outcomes",
+                                  "not_run_owner"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "runId",
+                              "reason"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "details"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/platform-runs/support-marks/unmark/preview": {
+      "post": {
+        "summary": "Preview undoing support marks (owning service, its own runs)",
+        "description": "Undo support marks (owner 2026-10-24: a retired product may come back and its past spend move back onto outcomes). One bronze run.support_unmarked event per marked run (the function removed, reason, unmarkedBy, affectedFromDay = the run's start day); the projection removes the silver mark, so the run's spend leaves support at once (undeclared again until its owner declares outcomes on it) and the run accepts declarations again. Bronze keeps the mark and its undo; the run can be marked again later. The refresher recomputes every stored day from the run's start. Idempotent: a run not marked writes nothing. Owner door (x-service-name required): by runIds (each a run of the caller, else 422 not_run_owner) or by selection over the caller's own marked runs. At most 50,000 runs per apply (422 too_many_runs). Writes nothing.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerUnmarkRunsSupportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Selection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportUnmarkPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_runs (runIds: run_not_found, not_run_owner) or too_many_runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_runs"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "invalid": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runId": {
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "run_not_found",
+                                  "run_declares_outcomes",
+                                  "not_run_owner"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "runId",
+                              "reason"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "details"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/platform-runs/support-marks/unmark/apply": {
+      "post": {
+        "summary": "Undo support marks (owning service, its own runs)",
+        "description": "Undo support marks (owner 2026-10-24: a retired product may come back and its past spend move back onto outcomes). One bronze run.support_unmarked event per marked run (the function removed, reason, unmarkedBy, affectedFromDay = the run's start day); the projection removes the silver mark, so the run's spend leaves support at once (undeclared again until its owner declares outcomes on it) and the run accepts declarations again. Bronze keeps the mark and its undo; the run can be marked again later. The refresher recomputes every stored day from the run's start. Idempotent: a run not marked writes nothing. Owner door (x-service-name required): by runIds (each a run of the caller, else 422 not_run_owner) or by selection over the caller's own marked runs. At most 50,000 runs per apply (422 too_many_runs). Same selection as preview.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerUnmarkRunsSupportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unmarked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportUnmarkResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "invalid_runs (runIds: run_not_found, not_run_owner) or too_many_runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_runs"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "invalid": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runId": {
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "run_not_found",
+                                  "run_declares_outcomes",
+                                  "not_run_owner"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "runId",
+                              "reason"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "details"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/runs/support-marks": {
       "post": {
         "summary": "Mark runs SUPPORT, naming the support function (staff, service-auth)",
-        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); final and idempotent (an already marked run keeps its first function). The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Staff door: any service's runs, by runIds (all or nothing: any unknown run or run declaring an outcome = 422, nothing written) or by selection (serviceName + optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). First uses: 3,052 probe runs parented to newsletter sends (2026-10-23); runs of services no longer in the fleet (retired_product). POST /internal/runs/support-marks/preview shows what a selection would mark.",
+        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); idempotent (an already marked run keeps its first function). A mark can be UNDONE (…/support-marks/unmark): a bronze run.support_unmarked event, the run declares again, bronze keeps both. The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Staff door: any service's runs, by runIds (all or nothing: any unknown run or run declaring an outcome = 422, nothing written) or by selection (serviceName and/or featureSlugs + optional tasks, start window, topLevelOnly, withSpendOnly, offOutcomeOnly; runs declaring an outcome are left out and counted). First uses: 3,052 probe runs parented to newsletter sends (2026-10-23); runs of services no longer in the fleet (retired_product). POST /internal/runs/support-marks/preview shows what a selection would mark.",
         "security": [
           {
             "apiKey": []
@@ -11739,7 +12364,7 @@
     "/v1/platform-runs/support-marks/preview": {
       "post": {
         "summary": "Preview marking your own runs SUPPORT (owning service)",
-        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); final and idempotent (an already marked run keeps its first function). The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Owner door: the calling service (x-service-name, required) marks ITS OWN runs only, past ones in bulk: by runIds (each must be a run of the caller, else 422 not_run_owner; all or nothing) or by selection over its runs (optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). At most 50,000 runs per apply (422 too_many_runs: narrow the window). New runs can be marked at creation instead (body `support` on POST /v1/runs, /v1/platform-runs). Writes nothing.",
+        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); idempotent (an already marked run keeps its first function). A mark can be UNDONE (…/support-marks/unmark): a bronze run.support_unmarked event, the run declares again, bronze keeps both. The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Owner door: the calling service (x-service-name, required) marks ITS OWN runs only, past ones in bulk: by runIds (each must be a run of the caller, else 422 not_run_owner; all or nothing) or by selection over its runs (optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). At most 50,000 runs per apply (422 too_many_runs: narrow the window). New runs can be marked at creation instead (body `support` on POST /v1/runs, /v1/platform-runs). Writes nothing.",
         "security": [
           {
             "apiKey": []
@@ -11849,7 +12474,7 @@
     "/v1/platform-runs/support-marks/apply": {
       "post": {
         "summary": "Mark your own runs SUPPORT, naming the support function (owning service)",
-        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); final and idempotent (an already marked run keeps its first function). The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Owner door: the calling service (x-service-name, required) marks ITS OWN runs only, past ones in bulk: by runIds (each must be a run of the caller, else 422 not_run_owner; all or nothing) or by selection over its runs (optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). At most 50,000 runs per apply (422 too_many_runs: narrow the window). New runs can be marked at creation instead (body `support` on POST /v1/runs, /v1/platform-runs). Same selection as preview: what preview shows is what apply writes.",
+        "description": "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); idempotent (an already marked run keeps its first function). A mark can be UNDONE (…/support-marks/unmark): a bronze run.support_unmarked event, the run declares again, bronze keeps both. The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name. Owner door: the calling service (x-service-name, required) marks ITS OWN runs only, past ones in bulk: by runIds (each must be a run of the caller, else 422 not_run_owner; all or nothing) or by selection over its runs (optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). At most 50,000 runs per apply (422 too_many_runs: narrow the window). New runs can be marked at creation instead (body `support` on POST /v1/runs, /v1/platform-runs). Same selection as preview: what preview shows is what apply writes.",
         "security": [
           {
             "apiKey": []
