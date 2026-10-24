@@ -183,6 +183,13 @@ describe("Support functions: support spend named and reported apart", () => {
     expect(preview.body).toMatchObject({ toMarkCount: 1, spend: { grossCents: "1.0000000000" } });
     const ok = await staffMark({ kind: "retired_product", reason: "service gone", markedBy: "t", serviceName: "emailgeneration-service" });
     expect(ok.body).toMatchObject({ markedCount: 1 });
+    // Over the cap the walk is not run: the count is unknown (null), never a reassuring 0.
+    const { selectSupportRuns } = await import("../../src/services/support-marks.js");
+    const child = await pastRun("emailgeneration-service", "single-generation", "14:05");
+    await cost(child.id, "1", at("14:06"));
+    expect(await selectSupportRuns({ serviceName: "emailgeneration-service" }, 0)).toMatchObject({ tooMany: true, onOutcomeNowCount: null });
+    expect((await selectSupportRuns({ serviceName: "emailgeneration-service" })).onOutcomeNowCount).toBe(0);
+    await db.execute(sql`DELETE FROM runs WHERE id = ${child.id}::uuid`);
 
     await refresh(PDAY);
     await db.execute(sql`UPDATE cost_ledger_computed_days SET support_split = false WHERE day = ${PDAY}::date`);

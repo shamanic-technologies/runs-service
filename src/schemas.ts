@@ -2896,7 +2896,7 @@ const SupportSelectionResultSchema = z
     toMarkCount: z.number().int().openapi({ description: "Runs the apply marks (matched, not yet marked, not declaring an outcome)." }),
     alreadyMarkedCount: z.number().int(),
     declaresOutcomesCount: z.number().int().openapi({ description: "Matched runs that declared a produced occurrence: production, never support, left untouched." }),
-    onOutcomeNowCount: z.number().int().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome." }),
+    onOutcomeNowCount: z.number().int().nullable().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome. Null when tooMany (not computed: narrow the selection)." }),
     spend: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "Own spend (actual + refunded) of the runs to mark." }),
     maxRuns: z.number().int(),
     tooMany: z.boolean().openapi({ description: "More than maxRuns to mark: apply refuses (422), narrow the selection." }),
