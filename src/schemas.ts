@@ -3184,6 +3184,7 @@ export const LedgerCheckResponseSchema = z
     balanced: z.boolean().openapi({ description: "Every stored (day, org) row balances EXACTLY on gross, net, vendor and unpriced gross (no tolerance)." }),
     complete: z.boolean().openapi({ description: "Every day of the range is computed (daysMissing empty)." }),
     daysMissing: z.array(z.string()),
+    daysStale: z.array(z.string()).openapi({ description: "Stored days computed before a fact recorded since (also listed in daysMissing)." }),
     supportComplete: z.boolean().openapi({ description: "Every day of the range is stored WITH the support split (supportDaysMissing empty)." }),
     supportDaysMissing: z.array(z.string()).openapi({ description: "Days not stored, or stored before the support split (migration 0064, until the refresher recomputes them): support reads 0 there, its spend sits in undeclared." }),
     supportFunctions: z.record(SupportFunctionEnum, z.string()).openapi({ description: "What each support function means." }),
@@ -3246,6 +3247,7 @@ export const OutcomeCoverageResponseSchema = z
     since: z.string(),
     until: z.string(),
     daysMissing: z.array(z.string()),
+    daysStale: z.array(z.string()),
     supportComplete: z.boolean(),
     supportDaysMissing: z.array(z.string()).openapi({ description: "Days stored before the support split: support reads 0 there until recomputed." }),
     fleet: z.array(CoveragePointSchema).openapi({ description: "One point per computed day." }),
@@ -3288,8 +3290,9 @@ export const OutcomeCostTotalsResponseSchema = z
     until: z.string(),
     groupBy: z.array(z.string()),
     maxGroups: z.number().int().openapi({ description: "Per-section cap. Above it the read is a 422 `too_many_groups`, never a truncated list." }),
-    complete: z.boolean().openapi({ description: "Every day of the range holds stored totals (daysMissing empty)." }),
-    daysMissing: z.array(z.string()),
+    complete: z.boolean().openapi({ description: "Every day of the range holds stored totals under the current facts (daysMissing empty)." }),
+    daysMissing: z.array(z.string()).openapi({ description: "Days not stored, or stored but STALE (a declaration, mark, void or late spend recorded after the day was computed): never read as complete." }),
+    daysStale: z.array(z.string()).openapi({ description: "The stale part of daysMissing (recomputed by the refresher)." }),
     supportComplete: z.boolean(),
     supportDaysMissing: z.array(z.string()).openapi({ description: "Days stored before the support split: support reads 0 there until recomputed." }),
     produced: z.array(
@@ -3335,7 +3338,7 @@ registry.registerPath({
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section." }),
+      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section." }),
       since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: the first stored day)." }),
       until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: today UTC)." }),
       outcomeKey: z.string().optional(),
@@ -3345,6 +3348,8 @@ registry.registerPath({
       campaignId: z.string().optional(),
       workflowSlug: z.string().optional(),
       featureSlug: z.string().optional(),
+      audienceId: z.string().optional().openapi({ description: "The row's run's audience (the one its lead was served under)." }),
+      serviceName: z.string().optional().openapi({ description: "The row's run's service (declaring / consuming / spending run)." }),
       runStartUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive: only rows whose run started on or before this UTC day (every section)." }),
       sourceDayUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive, consumed section only: the consumed occurrence was declared on or before this UTC day." }),
       sourceRunStartUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive, consumed section only: the run that produced the consumed occurrence started on or before this UTC day." }),
@@ -3355,6 +3360,79 @@ registry.registerPath({
     400: { description: "Invalid groupBy, filter or range", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     422: { description: "too_many_groups: a section exceeds maxGroups (narrow groupBy, filters or range)", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const ReconShareSchema = z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "part / spend, 10 decimals (0..1). Null when nothing was spent." });
+const ReconPartsSchema = z.object({
+  spend: LedgerMoneySchema.openapi({ description: "Every actual + refunded cost row of the day(s) (the runs ledger)." }),
+  declaredProduction: LedgerMoneySchema.openapi({ description: "Spend carried by the run that declared the outcome (its own subtree, rules 1-3)." }),
+  normalLoss: LedgerMoneySchema.openapi({ description: "Spend of runs that produced nothing, carried by the units their pipe produced in their campaign that day (rule 2, allocation v3)." }),
+  unpooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe's runs (workflow slug) whose campaign produced nothing on that pipe that day: produced none, kept under its own campaign (features pools it on the pipe's output)." }),
+  undeclared: LedgerMoneySchema.openapi({ description: "Spend of runs with no outcome, no support mark and no pipe: a producer that has not declared." }),
+  support: LedgerMoneySchema.openapi({ description: "Spend named support by its owner (support functions)." }),
+  reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges of reuses: no spend behind them, never part of spend." }),
+  differences: LedgerMoneySchema.openapi({ description: "declaredProduction + normalLoss + unpooledLoss + undeclared + support - spend: 0 when reconciled." }),
+  shares: z.object({ declaredProduction: ReconShareSchema, normalLoss: ReconShareSchema, unpooledLoss: ReconShareSchema, undeclared: ReconShareSchema, support: ReconShareSchema }),
+  consumptions: z.string().openapi({ description: "Consumptions declared (weights, 10 decimals)." }),
+  unknownProvenance: z.string().openapi({ description: "Of which no run declared producing the consumed occurrence." }),
+});
+
+export const LedgerReconciliationResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    since: z.string(),
+    until: z.string(),
+    reconciled: z.boolean().openapi({ description: "balanced AND complete AND declarationsComplete: the ledger can be read as the whole truth." }),
+    balanced: z.boolean().openapi({ description: "Every stored day: the parts sum to spend exactly on every basis, every (day, org) ledger check balances, and the two stored sources of produced-none agree." }),
+    complete: z.boolean().openapi({ description: "Every day stored under the current facts (no missing, no stale day) with its support split." }),
+    declarationsComplete: z.boolean().openapi({ description: "No undeclared spend and no consumption of unknown provenance in the range." }),
+    daysMissing: z.array(z.string()).openapi({ description: "Days not stored or stale (their figures are not in totals)." }),
+    daysStale: z.array(z.string()),
+    supportDaysMissing: z.array(z.string()),
+    unbalancedDays: z.array(z.string()),
+    totals: ReconPartsSchema.extend({ unknownProvenanceShare: z.string().nullable(), balanced: z.boolean(), splitConsistent: z.boolean() }),
+    services: z.array(
+      z.object({
+        serviceName: z.string().nullable(),
+        undeclared: LedgerMoneySchema,
+        undeclaredRuns: z.number().int().openapi({ description: "Σ per day of the distinct runs with undeclared spend (a run spending on two days counts twice)." }),
+        unpooledLoss: LedgerMoneySchema,
+        unpooledLossRuns: z.number().int(),
+        support: LedgerMoneySchema,
+        undeclaredShareOfSpend: z.string().nullable(),
+      }),
+    ).openapi({ description: "Per SPENDING service, undeclared first: who still spends without declaring." }),
+    provenance: z.array(
+      z.object({
+        consumedOutcomeKey: z.string(),
+        consumingServiceName: z.string().nullable(),
+        consumptions: z.string(),
+        unknownProvenance: z.string(),
+        unknownShare: z.string().nullable(),
+      }),
+    ).openapi({ description: "Per consumed outcome x consuming service, most unknown first: the producer of that outcome key has not declared the occurrence consumed." }),
+    days: z.array(ReconPartsSchema.extend({ day: z.string(), stored: z.boolean(), stale: z.boolean(), balanced: z.boolean(), splitConsistent: z.boolean() })),
+  })
+  .openapi("LedgerReconciliationResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/outcome-costs/reconciliation",
+  summary: "The ledger reconciliation readers gate on: per day since inception, spend = declared production + loss + undeclared + support, to the cent (service-auth)",
+  description:
+    "Fleet-wide, per UTC day from the first day of spend (default) to yesterday (default): spend = declaredProduction + normalLoss + unpooledLoss + undeclared + support, exact decimals on billed gross, frozen net, vendor actual and unpriced gross, with the share of spend each part holds; which spending services still have undeclared runs; which consumptions resolve to no producer (per consumed outcome x consuming service). From the stored days only (no ledger scan, no estimate). `reconciled` = balanced AND complete AND declarationsComplete. A day not yet stored under the current allocation, or stored before a fact recorded since (backfill, mark, void, late spend), is in daysMissing and out of totals.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: the first day of spend, capped to 400 days)." }),
+      until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: yesterday UTC)." }),
+    }),
+  },
+  responses: {
+    200: { description: "Reconciliation", content: { "application/json": { schema: LedgerReconciliationResponseSchema } } },
+    400: { description: "Invalid range or unknown parameter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
   },
 });
 
