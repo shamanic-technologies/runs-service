@@ -972,6 +972,13 @@ reads TOTALS, never pages occurrences. Stored per UTC day by the ledger refreshe
   (`source_*`, NULL = unknown provenance, still counted in unknownProvenance); produced/scope ignore them. Days computed
   before 0063 (`cost_ledger_computed_days.consumed_sources = false`) are recomputed by the refresher and listed in
   daysMissing for a source read until then. Sums over source groups == the read without them (tested).
+- **When dimensions (migration 0066, SWITCH)**: `runStartDay` (every section: UTC start day of the row's run = declaring run for
+  produced, consuming run for consumed, spending run for none) and, consumed only, `sourceDay` (UTC day the consumed occurrence was
+  declared = the send a reply answers) + `sourceRunStartDay` (its producing run's start day). Filters `runStartUntil` (every section),
+  `sourceDayUntil` / `sourceRunStartUntil` (consumed only), inclusive UTC days: features' MATURE cut = produced `runStartUntil` + consumed
+  `sourceRunStartUntil`. `day` is NOT the run start (produced cost: cost row's day; count / consumed: declaration day). Days stored
+  before 0066 (`cost_ledger_computed_days.start_days = false`) recomputed by the refresher, in daysMissing for a when-read until then.
+  Guard: `tests/integration/outcome-cost-start-days.test.ts`.
 - Guard: `tests/integration/outcome-cost-totals.test.ts` (red if a cost-org or split is wrong; writers shard).
 
 ## A platform run made on behalf of a caller's run (`body.parentRunId`, COST-ACCOUNTING-1023-P1)

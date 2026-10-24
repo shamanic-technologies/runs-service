@@ -861,6 +861,12 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         return;
       }
     }
+    for (const k of ["runStartUntil", "sourceDayUntil", "sourceRunStartUntil"] as const) {
+      if (q[k] && !(/^\d{4}-\d{2}-\d{2}$/.test(q[k]!) && !Number.isNaN(Date.parse(`${q[k]}T00:00:00Z`)))) {
+        res.status(400).json({ error: `${k} must be a YYYY-MM-DD day` });
+        return;
+      }
+    }
     const today = utcDay(new Date());
     const until = q.until ?? today;
     const first = q.since ? null : await firstOutcomeCostDay();
@@ -879,6 +885,9 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         workflowSlug: q.workflowSlug,
         featureSlug: q.featureSlug,
         outcomeKey: q.outcomeKey ? normalizeOutcomeKey(q.outcomeKey) : undefined,
+        runStartUntil: q.runStartUntil,
+        sourceDayUntil: q.sourceDayUntil,
+        sourceRunStartUntil: q.sourceRunStartUntil,
       },
       range.since,
       range.until,
