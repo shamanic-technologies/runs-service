@@ -5,7 +5,7 @@ import { createTestApp, getAuthHeaders, getInternalAuthHeaders } from "../helper
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
-import { addDays, computeLedgerDay, storeLedgerDay, utcDay } from "../../src/services/outcome-ledger.js";
+import { ALLOCATION_VERSION, addDays, computeLedgerDay, storeLedgerDay, utcDay } from "../../src/services/outcome-ledger.js";
 import { MAX_OUTCOME_COST_GROUPS } from "../../src/services/outcome-cost-totals.js";
 
 // COST-ACCOUNTING-1023-P2: the outcome ledger read as totals. Every figure must be
@@ -342,7 +342,7 @@ describe("GET /internal/stats/outcome-costs: the outcome ledger as totals", () =
     const far = "2001-01-01";
     await db.execute(sql`
       INSERT INTO outcome_cost_days (day, allocation_version, kind, outcome_key, organization_id, campaign_id, n)
-      SELECT ${far}::date, 1, 'produced_count', 'email_found', ${ORG}::uuid, 'cap-' || i, 1
+      SELECT ${far}::date, ${ALLOCATION_VERSION}, 'produced_count', 'email_found', ${ORG}::uuid, 'cap-' || i, 1
       FROM generate_series(1, ${MAX_OUTCOME_COST_GROUPS + 1}) i
     `);
     try {

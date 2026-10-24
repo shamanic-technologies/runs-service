@@ -856,6 +856,13 @@ concept, a value-based joint-cost split.
   refunded cost row goes to its nearest run (self or ancestor) with a produced occurrence; per (that run, UTC day,
   org) split by quantity with CUMULATIVE rounding at 10 decimals (shares telescope to the exact total); same split on
   gross, frozen net, vendor actual (+ unpriced gross apart). No such run = "produced none".
+- **Allocation v2 = v1 + cross-run normal loss (migration 0066, 2026-10-24, doctrine rule 2)**: a cost row with no anchor, no
+  support mark on its walk and a workflow slug W on its run (a follow-up that judged "later", a run the funnel cap stopped) is LOSS
+  of pipe W; per (UTC day of the cost row, cost org, W) it is split as rule 2 over the occurrences PRODUCED that day by runs of W
+  in that org (declared_at, the run's org; occurrence-id order). W produced nothing there that day = it stays undeclared. Pools
+  stored per day (`cost_loss_pool_days`) so the per-occurrence read adds the same shares (Σ occurrences == allocated);
+  `cost_ledger_days.loss_*` = the part of allocated that is loss, served as `normalLoss` on ledger-check. A NULL workflow never
+  pools: a declaration gap stays visible as undeclared. v1 rows are kept, every day recomputes under v2.
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
@@ -945,7 +952,10 @@ is named and stated apart, so coverage reads on outcome spend only: declared / (
   staff run, $148.21) = `staff_experiment`. All marked 2026-10-24. Preview `onOutcomeNowCount` is null when `tooMany` (not computed).
   Owner-deprecated products (2026-10-24, may come back): features `pr-cold-email-outreach`, `pr-expert-quote-outreach`,
   `pr-expert-quote-opportunities` (featured publishing), `ai-visibility-scoring`, marked `retired_product` by featureSlugs +
-  withSpendOnly + offOutcomeOnly (spend already on an outcome stays). Press kits are NOT retired. Never mark live production.
+  withSpendOnly + offOutcomeOnly (spend already on an outcome stays): $791.30 / $271.14 / $15.85 / $295.07. Their FEATURE-LESS runs
+  (feature_slug NULL: every run of `ai-visibility-score-service`, `journalists-service`, `journalists-quotes-service`, api-service
+  `POST /v1/content/generate-expert-quote-pitch`) marked by serviceName, no spend filter (a parent covers its chat/scraping
+  children). Press kits are NOT retired. Never mark live production.
 - **One answer on every read**: ledger-check, outcome-coverage and outcome-costs read the same stored day rows, so at one instant they
   agree to the cent (prod 2026-10-24). Two figures captured minutes apart while marks are applied (`supportComplete: false`, days
   recomputing) differ: compare reads taken together, after `supportComplete`.

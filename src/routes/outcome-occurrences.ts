@@ -670,7 +670,8 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
              allocated_gross::text, allocated_net::text, allocated_vendor::text, allocated_unpriced_gross::text,
              none_gross::text, none_net::text, none_vendor::text, none_unpriced_gross::text,
              reuse_gross::text, reuse_net::text, reuse_vendor::text, reuse_unpriced_gross::text,
-             reuse_count, unknown_provenance_count, cost_rows, occurrences, support_by_function
+             reuse_count, unknown_provenance_count, cost_rows, occurrences, support_by_function,
+             loss_gross::text, loss_net::text, loss_vendor::text, loss_unpriced_gross::text
       FROM cost_ledger_days
       WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${range.since}::date AND ${range.until}::date
       ORDER BY day, organization_id NULLS FIRST
@@ -681,7 +682,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       vendor: new Decimal(r[`${p}_vendor`]).toFixed(10),
       unpricedGross: new Decimal(r[u]).toFixed(10),
     });
-    const totals = { ledger: zeroMoney(), standard: zeroMoney(), reuseGain: zeroMoney(), allocated: zeroMoney(), producedNone: zeroMoney() };
+    const totals = { ledger: zeroMoney(), standard: zeroMoney(), reuseGain: zeroMoney(), allocated: zeroMoney(), producedNone: zeroMoney(), normalLoss: zeroMoney() };
     let totalSupport: SupportByFunction = {};
     const rows = stored.map((r) => {
       const row = {
@@ -689,6 +690,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         allocated: m(r, "allocated", "allocated_unpriced_gross"),
         producedNone: m(r, "none", "none_unpriced_gross"),
         reuse: m(r, "reuse", "reuse_unpriced_gross"),
+        normalLoss: m(r, "loss", "loss_unpriced_gross"),
       };
       const input = ledgerCheckInputOf(row);
       totals.ledger = addMoney(totals.ledger, input.ledger);
@@ -696,6 +698,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       totals.reuseGain = addMoney(totals.reuseGain, input.reuseGain);
       totals.allocated = addMoney(totals.allocated, row.allocated);
       totals.producedNone = addMoney(totals.producedNone, row.producedNone);
+      totals.normalLoss = addMoney(totals.normalLoss, row.normalLoss);
       const supportByFunction = supportOf(r.support_by_function);
       totalSupport = addSupport(totalSupport, supportByFunction);
       const support = supportTotal(supportByFunction);
@@ -707,6 +710,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         standard: wireMoney(input.standard),
         reuseGain: wireMoney(input.reuseGain),
         allocated: wireMoney(row.allocated),
+        normalLoss: wireMoney(row.normalLoss),
         producedNone: wireMoney(row.producedNone),
         support: wireMoney(support),
         supportByFunction: wireSupport(supportByFunction),
@@ -739,6 +743,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         standard: wireMoney(totals.standard),
         reuseGain: wireMoney(totals.reuseGain),
         allocated: wireMoney(totals.allocated),
+        normalLoss: wireMoney(totals.normalLoss),
         producedNone: wireMoney(totals.producedNone),
         support: wireMoney(support),
         supportByFunction: wireSupport(totalSupport),
