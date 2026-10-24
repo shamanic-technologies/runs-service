@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
+import { sql } from "drizzle-orm";
+import { db } from "../../src/db/index.js";
 import { createTestApp, getAuthHeaders, getInternalAuthHeaders, getPlatformAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { addDays, computeLedgerDay, effectiveDeclaredAt, storeLedgerDay, utcDay } from "../../src/services/outcome-ledger.js";
@@ -171,5 +173,21 @@ describe("Recorded past facts: a spend-free run dates an occurrence before its o
     const redate = await batch({ runs: [{ runId: spent.id, occurredAt: `${PAST}T10:00:00.000Z`, redate: true, produced: [lead("lead_found", "S3")] }] });
     expect(redate.status).toBe(422);
     expect(await occurrencesOf(spent.id)).toHaveLength(1);
+  });
+
+  it("RUN-STARTED-AT-US-1024: run_started_at on a run with a child and a cost whose start holds microseconds is at its start, never before", async () => {
+    const parent = await insertTestRun({ organizationId: ORG, serviceName: "workflow-service", taskName: "execute-workflow", status: "completed" });
+    await db.execute(sql`UPDATE runs SET started_at = '2026-10-23 20:41:57.323548+00' WHERE id = ${parent.id}::uuid`);
+    await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", status: "completed", parentRunId: parent.id });
+    await insertTestRunCost({ runId: parent.id, costName: "tok", quantity: "1", unitCostInUsdCents: "5", totalCostInUsdCents: "5", createdAt: new Date("2026-10-23T20:42:00Z") });
+    const res = await batch({ runs: [{ runId: parent.id, occurredAt: "run_started_at", produced: [lead("booking_call", "U1")] }] }, "workflow-service");
+    expect(res.status).toBe(201);
+    const [occ] = await occurrencesOf(parent.id);
+    expect(occ.declaredAt).toBe("2026-10-23T20:41:57.323Z");
+    // ... and the run still takes spend and children afterwards.
+    await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", status: "completed", parentRunId: parent.id });
+    // A time a full millisecond before the start stays refused.
+    const before = await batch({ runs: [{ runId: parent.id, occurredAt: "2026-10-23T20:41:57.322Z", produced: [lead("booking_call", "U2")] }] }, "workflow-service");
+    expect(before.status).not.toBe(201);
   });
 });
