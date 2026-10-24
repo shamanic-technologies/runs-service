@@ -173,5 +173,9 @@ describe("GET /internal/stats/outcome-costs: grouped by when the run started and
   it("contract: a bad day filter is a 400", async () => {
     expect((await totals("runStartUntil=yesterday")).status).toBe(400);
     expect((await totals("sourceDayUntil=2026-13-40")).status).toBe(400);
+    // An unknown param (a typo, or a cut this build does not know) is refused, never ignored.
+    const typo = await totals(`sourceRunStartBefore=${D2}`);
+    expect(typo.status).toBe(400);
+    expect(typo.body.error).toContain("sourceRunStartBefore");
   });
 });
