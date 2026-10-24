@@ -35,6 +35,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
+- `src/services/support-marks.ts` — support marks (which support function a run serves), doors + selection. See "Support spend, named and reported apart".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
@@ -938,12 +939,34 @@ resolution keys on declaration time.
   `not_run_owner`). One bronze `outcomes.redated` event per run (id, new + previous time); the projection updates `declared_at` and sets
   `recorded_at` to the re-date instant so the refresher recomputes the moved days. First user: instantly-service's 79k sends of
   2026-05-17..10-22 declared through today's door on 2026-10-23 before `occurredAt` existed.
-- **Support marks (migration 0062)**: `POST /internal/runs/support-marks` (staff, ≤ 5000 runs, kind `staff_experiment|support`, reason,
-  markedBy) marks runs SUPPORT: the anchor walk STOPS there, so the run's and its subtree's cost stay produced none, whatever the
-  parent link says. Bronze `run.support_marked` → `run_support_marks`. A marked run produces nothing (409 `run_marked_support`); a
-  run with a produced occurrence cannot be marked (422). Final, idempotent; the refresher recomputes days from the run's start.
-  First case: 3,052 apollo/chat probe runs parented to 7 postmark sends via a reused x-run-id (~$114 riding newsletter message_sent).
+- **Support marks (migration 0062)**: see "Support spend, named and reported apart" (0064).
 - Guard: `tests/integration/outcome-backfill.test.ts`.
+
+## Support spend, named and reported apart (migrations 0062 + 0064, COST-SUPPORT-1024-RUNS)
+
+Doctrine (cost-accounting skill "Not outcomes ... Support functions, reported apart"): spend that produces no outcome BY DESIGN
+is named and stated apart, so coverage reads on outcome spend only: declared / (ledger - support). Never inferred from a cost name.
+- **A mark names its support function** (`run_support_marks.kind`, enum `SUPPORT_FUNCTIONS` in `schemas.ts`): `payment_fees`,
+  `brand_setup`, `copilot`, `platform_llm` (judgments / LLM calls made for no caller run), `staff_experiment`, `product_feature`
+  (onboarding, product reads), `retired_product`. The anchor walk stops at a marked run: its cost and its non-declaring subtree's
+  never ride an outcome (a judgment made FOR a caller's run is that run's child and rides its outcome: never mark it).
+  Bronze `run.support_marked` -> `run_support_marks`; final, idempotent (first function stays); a marked run produces nothing (409
+  `run_marked_support`); a declaring run is never support.
+- **Doors** (`src/services/support-marks.ts`): at creation, body `support: {kind, reason}` on POST /v1/runs + /v1/platform-runs (same
+  transaction, markedBy = serviceName); owner bulk `POST /v1/platform-runs/support-marks/{preview,apply}` (x-service-name = owner: its
+  own runs only, by runIds (all or nothing, 422 `not_run_owner`) or selection: taskNames, start window, topLevelOnly, withSpendOnly;
+  declaring runs left out and counted; preview shows `onOutcomeNowCount` = runs whose cost rides an ancestor's outcome today); staff
+  `POST /internal/runs/support-marks{,/preview}` (any service, `serviceName` selection or runIds). <= 50,000 runs per apply (422
+  `too_many_runs`). The selection seq-scans `runs` (no service-first index, ~9 s), own 300 s timeout.
+- **Reads**: produced none = support + undeclared. ledger-check rows + totals: `support`, `supportByFunction`, `undeclared`
+  (+ totals `outcomeSpend`, `outcomeSpendCoverage`); outcome-coverage points: `support*Cents`, `supportByFunction`,
+  `outcomeSpendCoveragePct`; outcome-costs scope: `support`, `supportByFunction`, `undeclared`, `outcomeSpendCoverageShare`. Stored
+  per day (`cost_ledger_days.support_by_function`, `outcome_coverage_days.support_by_function`, `outcome_cost_days.support_function`
+  on 'none' rows); `cost_ledger_computed_days.support_split = false` (day stored before 0064) = recomputed by the refresher and
+  listed in `supportDaysMissing`. Allocation rule unchanged (v1).
+- **Retired products** (no owning repo): marked by staff as `retired_product` through the staff door (legacy `google` serper
+  queries Mar..Jul 2026, `emailgeneration-service`); `apollo/angel-round-enrich` (2026-10-01, one staff run) = `staff_experiment`.
+- Guard: `tests/integration/support-functions.test.ts`.
 
 ## Outcome ledger as totals — `GET /internal/stats/outcome-costs` (migration 0058, COST-ACCOUNTING-1023-P2)
 
