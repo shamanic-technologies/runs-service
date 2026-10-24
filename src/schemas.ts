@@ -66,6 +66,30 @@ export const RunWithOwnCostSchema = RunSchema.extend({
   ownProvisionedCostInUsdCents: z.string(),
 }).openapi("RunWithOwnCost");
 
+// Support functions (COST-SUPPORT-1024-RUNS, migration 0064): spend that produces
+// no outcome BY DESIGN, named and reported apart (cost-accounting doctrine).
+export const SUPPORT_FUNCTIONS = [
+  "payment_fees",
+  "brand_setup",
+  "copilot",
+  "platform_llm",
+  "staff_experiment",
+  "product_feature",
+  "retired_product",
+] as const;
+
+export const SupportFunctionEnum = z.enum(SUPPORT_FUNCTIONS).openapi({
+  description:
+    "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet.",
+});
+
+export const RunSupportOnCreateSchema = z
+  .object({
+    kind: SupportFunctionEnum,
+    reason: z.string().min(1).max(2000),
+  })
+  .openapi("RunSupportOnCreate");
+
 export const CreateRunRequestSchema = z
   .object({
     brandIds: z.array(z.string().uuid()).min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence." }),
@@ -78,6 +102,10 @@ export const CreateRunRequestSchema = z
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
+    support: RunSupportOnCreateSchema.optional().openapi({
+      description:
+        "Optional: this run serves a SUPPORT function (spend that produces no outcome by design: payment fees, brand setup, Copilot, platform LLM / judgments, staff experiment, product feature / onboarding, retired product). The run is marked support at creation (markedBy = serviceName): its cost and its non-declaring subtree's never ride an outcome and are reported apart per function. A support run declares no produced outcome (409 run_marked_support). Ignored on an idempotent replay (the run exists already).",
+    }),
     idempotencyKey: z.string().min(1).max(256).optional().openapi({
       description:
         "Caller-supplied dedup key. Optional. Uniqueness is GLOBAL across all runs in the table — callers MUST self-namespace (e.g. `stripe:txn_abc`, `workflow:run_xyz`) to avoid colliding with other services. On retry with the same key, the original run is returned with HTTP 200. If a different (serviceName, taskName) is requested with the same key, the request is rejected with HTTP 409. Max 256 chars.",
@@ -2827,36 +2855,122 @@ registry.registerPath({
   },
 });
 
+const SupportSelectionShape = {
+  taskNames: z.array(z.string().min(1)).min(1).max(200).optional().openapi({ description: "Only runs of these tasks." }),
+  startedAfter: z.string().datetime({ offset: true }).optional().openapi({ description: "Inclusive run start." }),
+  startedBefore: z.string().datetime({ offset: true }).optional().openapi({ description: "Exclusive run start." }),
+  topLevelOnly: z.boolean().optional().openapi({ description: "Only runs with no parent (e.g. judgments made for no caller run; a child made on behalf of a caller's run rides that run's outcome)." }),
+  withSpendOnly: z.boolean().optional().openapi({ description: "Only runs carrying spend (an actual or refunded cost row)." }),
+};
+
+const SupportMarkShape = {
+  kind: SupportFunctionEnum,
+  reason: z.string().min(1).max(2000),
+  markedBy: z.string().min(1).max(200).openapi({ description: "Who decided (session, person, ticket)." }),
+};
+
+const supportRunIds = z.array(z.string().regex(UUID_STRING_RE)).min(1).max(5000).openapi({
+  description: "Runs to mark (<= 5000 per call), all or nothing. Marking a run covers its whole subtree: its descendants' cost stops at it too.",
+});
+
 export const MarkRunsSupportRequestSchema = z
   .object({
-    runIds: z.array(z.string().regex(UUID_STRING_RE)).min(1).max(5000).openapi({ description: "Runs to mark (<= 5000 per call). Marking a run covers its whole subtree: its descendants' cost stops at it too." }),
-    kind: z.enum(["staff_experiment", "support"]).openapi({ description: "staff_experiment = a staff probe / test; support = any other support function (cost-accounting: reported apart, never an outcome)." }),
-    reason: z.string().min(1).max(2000),
-    markedBy: z.string().min(1).max(200).openapi({ description: "Who decided (session, person, ticket)." }),
+    ...SupportMarkShape,
+    runIds: supportRunIds.optional(),
+    serviceName: z.string().min(1).optional().openapi({ description: "Selection instead of runIds: every run of this service (narrowed by the other selection fields). Exactly one of runIds / serviceName." }),
+    ...SupportSelectionShape,
   })
   .openapi("MarkRunsSupportRequest");
+
+export const OwnerMarkRunsSupportRequestSchema = z
+  .object({
+    ...SupportMarkShape,
+    runIds: supportRunIds.optional().openapi({ description: "Runs to mark (<= 5000), each a run of the calling service (x-service-name); all or nothing. Absent = a selection over the caller's own runs." }),
+    ...SupportSelectionShape,
+  })
+  .openapi("OwnerMarkRunsSupportRequest");
+
+const SupportSelectionResultSchema = z
+  .object({
+    matchedRunCount: z.number().int().openapi({ description: "Runs the selection matched." }),
+    toMarkCount: z.number().int().openapi({ description: "Runs the apply marks (matched, not yet marked, not declaring an outcome)." }),
+    alreadyMarkedCount: z.number().int(),
+    declaresOutcomesCount: z.number().int().openapi({ description: "Matched runs that declared a produced occurrence: production, never support, left untouched." }),
+    onOutcomeNowCount: z.number().int().openapi({ description: "Runs to mark whose cost rides an ancestor's outcome today: the mark takes it off that outcome." }),
+    spend: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "Own spend (actual + refunded) of the runs to mark." }),
+    maxRuns: z.number().int(),
+    tooMany: z.boolean().openapi({ description: "More than maxRuns to mark: apply refuses (422), narrow the selection." }),
+  })
+  .openapi("SupportSelectionResult");
+
+const SupportMarkResultSchema = z
+  .object({ markedCount: z.number().int(), alreadyMarkedCount: z.number().int(), declaresOutcomesCount: z.number().int().optional() })
+  .openapi("SupportMarkResult");
+
+const SupportInvalidRunsSchema = z.object({
+  error: z.literal("invalid_runs"),
+  details: z.object({ invalid: z.array(z.object({ runId: z.string(), reason: z.enum(["run_not_found", "run_declares_outcomes", "not_run_owner"]) })) }),
+});
+
+const SUPPORT_DOCTRINE =
+  "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked SUPPORT stops that walk: its own cost and its whole non-declaring subtree's stay off every outcome, reported apart per support function (ledger-check, outcome-coverage, outcome-costs: support + supportByFunction, the rest of produced none is undeclared). A marked run produces no outcome (409 run_marked_support); a run that declared a produced occurrence is never support. One bronze run.support_marked event per run (kind, reason, markedBy); final and idempotent (an already marked run keeps its first function). The refresher recomputes every stored day from the run's start; the ledger check stays balanced. Spend, billing and the run tree are untouched. Never inferred from a cost name.";
 
 registry.registerPath({
   method: "post",
   path: "/internal/runs/support-marks",
-  summary: "Mark runs as SUPPORT (staff experiment / probe): their cost never rides an outcome (staff, service-auth)",
+  summary: "Mark runs SUPPORT, naming the support function (staff, service-auth)",
   description:
-    "Production-cost ledger (allocation v1): a child run that declares nothing rides its nearest ancestor that declared a produced occurrence. A run marked here STOPS that walk: its own cost and its whole subtree's stay 'produced none' (reported apart), never on an ancestor's outcomes, whatever its parent link says (first case 2026-10-23: 3,052 apollo/chat probe runs parented to postmark newsletter sends through a reused x-run-id). A marked run produces no outcome (a produced declaration on it = 409 run_marked_support); a run that already declared a produced occurrence cannot be marked (void it first). One bronze run.support_marked event per run (kind, reason, markedBy); final, idempotent (an already marked run writes nothing). The refresher recomputes every stored day from the run's start; the ledger check stays balanced (the spend moves from an outcome to produced none). Spend, billing and the run tree are untouched. All or nothing: any invalid run = 422 with the list, nothing written.",
+    `${SUPPORT_DOCTRINE} Staff door: any service's runs, by runIds (all or nothing: any unknown run or run declaring an outcome = 422, nothing written) or by selection (serviceName + optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). First uses: 3,052 probe runs parented to newsletter sends (2026-10-23); runs of services no longer in the fleet (retired_product). POST /internal/runs/support-marks/preview shows what a selection would mark.`,
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: MarkRunsSupportRequestSchema } } } },
   responses: {
-    200: {
-      description: "Marked",
-      content: { "application/json": { schema: z.object({ markedCount: z.number().int(), alreadyMarkedCount: z.number().int() }) } },
-    },
-    400: { description: "Invalid body", content: { "application/json": { schema: ValidationErrorSchema } } },
+    200: { description: "Marked", content: { "application/json": { schema: SupportMarkResultSchema } } },
+    400: { description: "Invalid body (neither or both of runIds / serviceName)", content: { "application/json": { schema: ValidationErrorSchema } } },
     401: { description: "Unauthorized" },
     422: {
-      description: "invalid_runs: run_not_found, or run_declares_outcomes (void its declaration first); nothing written",
-      content: { "application/json": { schema: z.object({ error: z.literal("invalid_runs"), details: z.object({ invalid: z.array(z.object({ runId: z.string(), reason: z.enum(["run_not_found", "run_declares_outcomes"]) })) }) }) } },
+      description: "invalid_runs (runIds: run_not_found, run_declares_outcomes; nothing written), or too_many_runs (selection over maxRuns: narrow it)",
+      content: { "application/json": { schema: SupportInvalidRunsSchema } },
     },
   },
 });
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/runs/support-marks/preview",
+  summary: "Preview what a support mark would write (staff, service-auth)",
+  description: "Same body and same selection as POST /internal/runs/support-marks; writes nothing.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: MarkRunsSupportRequestSchema } } } },
+  responses: {
+    200: { description: "Selection", content: { "application/json": { schema: SupportSelectionResultSchema } } },
+    400: { description: "Invalid body", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "invalid_runs (runIds mode)", content: { "application/json": { schema: SupportInvalidRunsSchema } } },
+  },
+});
+
+for (const step of ["preview", "apply"] as const) {
+  registry.registerPath({
+    method: "post",
+    path: `/v1/platform-runs/support-marks/${step}`,
+    summary: step === "preview" ? "Preview marking your own runs SUPPORT (owning service)" : "Mark your own runs SUPPORT, naming the support function (owning service)",
+    description:
+      `${SUPPORT_DOCTRINE} Owner door: the calling service (x-service-name, required) marks ITS OWN runs only, past ones in bulk: by runIds (each must be a run of the caller, else 422 not_run_owner; all or nothing) or by selection over its runs (optional tasks, start window, topLevelOnly, withSpendOnly; runs declaring an outcome are left out and counted). At most ${"50,000"} runs per apply (422 too_many_runs: narrow the window). New runs can be marked at creation instead (body \`support\` on POST /v1/runs, /v1/platform-runs). ${step === "preview" ? "Writes nothing." : "Same selection as preview: what preview shows is what apply writes."}`,
+    security: [{ apiKey: [] }],
+    request: {
+      headers: z.object({ "x-service-name": z.string().openapi({ description: "The calling service = the owner of the runs." }) }),
+      body: { content: { "application/json": { schema: OwnerMarkRunsSupportRequestSchema } } },
+    },
+    responses: {
+      200: step === "preview"
+        ? { description: "Selection", content: { "application/json": { schema: SupportSelectionResultSchema } } }
+        : { description: "Marked", content: { "application/json": { schema: SupportMarkResultSchema } } },
+      400: { description: "Invalid body, or x-service-name missing", content: { "application/json": { schema: ValidationErrorSchema } } },
+      401: { description: "Unauthorized" },
+      422: { description: "invalid_runs (runIds mode: run_not_found, not_run_owner, run_declares_outcomes) or too_many_runs", content: { "application/json": { schema: SupportInvalidRunsSchema } } },
+    },
+  });
+}
 
 export const ListOutcomeOccurrencesQuerySchema = z.object({
   runIds: z.string().optional().openapi({ description: "Comma-separated run ids (<= 500)." }),
@@ -2965,7 +3079,10 @@ export const LedgerCheckRowSchema = z
     organizationId: z.string().uuid().nullable().openapi({ description: "The cost rows' org (null = org-less platform runs)." }),
     ledger: LedgerMoneySchema.openapi({ description: "Every actual + refunded cost row of the day, summed straight from the ledger." }),
     allocated: LedgerMoneySchema.openapi({ description: "Σ of the per-occurrence shares (the cost spread on produced occurrences)." }),
-    producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs with no declaring run at or above them." }),
+    producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs with no declaring run at or above them = support + undeclared." }),
+    support: LedgerMoneySchema.openapi({ description: "Part of producedNone that is SUPPORT (runs marked support and their non-declaring subtrees): spend that produces no outcome by design." }),
+    supportByFunction: z.record(SupportFunctionEnum, LedgerMoneySchema).openapi({ description: "support per support function (a function with no spend is absent)." }),
+    undeclared: LedgerMoneySchema.openapi({ description: "producedNone - support: spend nobody declared an outcome for yet. allocated + support + undeclared = ledger." }),
     standard: LedgerMoneySchema.openapi({ description: "Σ standard cost charged on occurrences: allocated + the standard charges of the day's reuses (consuming org, consumption's UTC day)." }),
     reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges with no spend behind them (consumptions after the first of an occurrence). standard - actual spread." }),
     differences: LedgerMoneySchema.openapi({ description: "standard - reuseGain + producedNone - ledger per basis. Zero when balanced." }),
@@ -2986,7 +3103,21 @@ export const LedgerCheckResponseSchema = z
     balanced: z.boolean().openapi({ description: "Every stored (day, org) row balances EXACTLY on gross, net, vendor and unpriced gross (no tolerance)." }),
     complete: z.boolean().openapi({ description: "Every day of the range is computed (daysMissing empty)." }),
     daysMissing: z.array(z.string()),
-    totals: z.object({ ledger: LedgerMoneySchema, standard: LedgerMoneySchema, reuseGain: LedgerMoneySchema, allocated: LedgerMoneySchema, producedNone: LedgerMoneySchema }),
+    supportComplete: z.boolean().openapi({ description: "Every day of the range is stored WITH the support split (supportDaysMissing empty)." }),
+    supportDaysMissing: z.array(z.string()).openapi({ description: "Days not stored, or stored before the support split (migration 0064, until the refresher recomputes them): support reads 0 there, its spend sits in undeclared." }),
+    supportFunctions: z.record(SupportFunctionEnum, z.string()).openapi({ description: "What each support function means." }),
+    totals: z.object({
+      ledger: LedgerMoneySchema,
+      standard: LedgerMoneySchema,
+      reuseGain: LedgerMoneySchema,
+      allocated: LedgerMoneySchema,
+      producedNone: LedgerMoneySchema,
+      support: LedgerMoneySchema,
+      supportByFunction: z.record(SupportFunctionEnum, LedgerMoneySchema),
+      undeclared: LedgerMoneySchema,
+      outcomeSpend: LedgerMoneySchema.openapi({ description: "ledger - support: the spend expected to ride an outcome." }),
+      outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "allocated / outcomeSpend, 10 decimals (0..1): coverage on outcome spend only. Null on zero." }),
+    }),
     mismatches: z.array(LedgerCheckRowSchema),
     rows: z.array(LedgerCheckRowSchema).openapi({ description: "Every (day, org) row, day ascending. Omitted when rows=false." }),
   })
@@ -3021,6 +3152,10 @@ const CoveragePointSchema = z.object({
   spendNetCents: z.string(),
   coveredNetCents: z.string(),
   coveragePct: z.string().nullable().openapi({ description: "coveredGross / spendGross x 100, 2 decimals. Null when the day spent nothing." }),
+  supportGrossCents: z.string().openapi({ description: "Part of the spend that is support (never covered)." }),
+  supportNetCents: z.string(),
+  supportByFunction: z.record(SupportFunctionEnum, z.object({ grossCents: z.string(), netCents: z.string() })),
+  outcomeSpendCoveragePct: z.string().nullable().openapi({ description: "coveredGross / (spendGross - supportGross) x 100, 2 decimals: coverage on outcome spend only. Null when no outcome spend." }),
 });
 
 export const OutcomeCoverageResponseSchema = z
@@ -3029,6 +3164,8 @@ export const OutcomeCoverageResponseSchema = z
     since: z.string(),
     until: z.string(),
     daysMissing: z.array(z.string()),
+    supportComplete: z.boolean(),
+    supportDaysMissing: z.array(z.string()).openapi({ description: "Days stored before the support split: support reads 0 there until recomputed." }),
     fleet: z.array(CoveragePointSchema).openapi({ description: "One point per computed day." }),
     services: z.array(CoveragePointSchema.extend({ serviceName: z.string() })),
     tasks: z.array(CoveragePointSchema.extend({ serviceName: z.string(), taskName: z.string() })),
@@ -3071,6 +3208,8 @@ export const OutcomeCostTotalsResponseSchema = z
     maxGroups: z.number().int().openapi({ description: "Per-section cap. Above it the read is a 422 `too_many_groups`, never a truncated list." }),
     complete: z.boolean().openapi({ description: "Every day of the range holds stored totals (daysMissing empty)." }),
     daysMissing: z.array(z.string()),
+    supportComplete: z.boolean(),
+    supportDaysMissing: z.array(z.string()).openapi({ description: "Days stored before the support split: support reads 0 there until recomputed." }),
     produced: z.array(
       z.object({
         dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except the source* ones (consumed section only)." }),
@@ -3094,8 +3233,12 @@ export const OutcomeCostTotalsResponseSchema = z
         dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except outcomeKey and the source* ones." }),
         spend: ProductionCostSchema.openapi({ description: "Every actual + refunded cost row of the scope in the range = producedCost + producedNone." }),
         producedCost: ProductionCostSchema.openapi({ description: "Part spread on produced occurrences (Σ produced[].cost of the scope)." }),
-        producedNone: ProductionCostSchema.openapi({ description: "Part of runs with no declaring run at or above them, under the spending run's tags." }),
+        producedNone: ProductionCostSchema.openapi({ description: "Part of runs with no declaring run at or above them, under the spending run's tags = support + undeclared." }),
+        support: ProductionCostSchema.openapi({ description: "Part of producedNone that is support (spend that produces no outcome by design)." }),
+        supportByFunction: z.record(SupportFunctionEnum, ProductionCostSchema),
+        undeclared: ProductionCostSchema.openapi({ description: "producedNone - support." }),
         coverageShare: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "producedCost / spend, 10 decimals (0..1). Null when the scope spent nothing." }),
+        outcomeSpendCoverageShare: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "producedCost / (spend - support), 10 decimals: coverage on outcome spend only. Null on zero." }),
       }),
     ),
   })

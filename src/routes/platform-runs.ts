@@ -2,7 +2,8 @@ import { Router } from "express";
 import { eq, and, inArray } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
-import { runs, runsCosts } from "../db/schema.js";
+import { outcomeDeclarationEvents, runs, runsCosts } from "../db/schema.js";
+import { supportMarkEvent } from "../services/support-marks.js";
 import { requirePlatformAuth } from "../middleware/auth.js";
 import {
   resolveMultipleUnitCosts,
@@ -52,6 +53,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       serviceName,
       taskName,
       idempotencyKey,
+      support,
     } = parsed.data;
     const parentRunId = parsed.data.parentRunId ?? null;
 
@@ -132,6 +134,8 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
           sourceService: req.platformServiceName ?? null,
           idempotencyKey: idempotencyKey ?? null,
         });
+        // A support run (COST-SUPPORT-1024-RUNS) is marked in the same transaction: never an instant unmarked.
+        if (support) await tx.insert(outcomeDeclarationEvents).values(supportMarkEvent(id, { ...support, markedBy: serviceName }));
         const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
         return silver;
       });
