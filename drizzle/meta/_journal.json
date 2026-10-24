@@ -477,6 +477,13 @@
       "when": 1783210140000,
       "tag": "0067_outcome_cost_days_start_days",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1783210200000,
+      "tag": "0068_dated_facts_guard",
+      "breakpoints": true
     }
   ]
 }
