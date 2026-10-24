@@ -454,4 +454,51 @@ describe("Outcome occurrences: the production-cost ledger", () => {
     for (const g of totals.body.produced) expect(g.cost.grossCents).toBe("100.0000000000");
     expect(totals.body.produced.some((g: any) => g.dimensions.outcomeKey === "meeting_attended")).toBe(false);
   });
+
+  it("DECLARER-VOID-1024: a service takes back exactly the rows IT declared on a run another service owns, then re-declares on the same run", async () => {
+    const r = await insertTestRun({ organizationId: null, serviceName: "workflow", taskName: "execute-workflow", status: "completed", startedAt: new Date(`${DAY}T09:00:00Z`) });
+    const as = (serviceName: string) => getPlatformAuthHeaders({ serviceName });
+    const declareAs = (serviceName: string, body: unknown) => request(app).post(`/v1/platform-runs/${r.id}/outcomes`).set(as(serviceName)).send(body);
+    const voidAs = (serviceName: string, body: unknown) => request(app).post(`/v1/platform-runs/${r.id}/outcomes/void`).set(as(serviceName)).send(body);
+    const co = (outcomeKey: string, subjectId: string, subjectService = "company-service") => ({ outcomeKey, subjectService, subjectId });
+    const reason = { reason: "company_researched consumptions naming companies no run produced", voidedBy: "content-generation-service COMPANY-RESEARCHED-PROVENANCE-1024" };
+
+    // Owner A (workflow) declares its own consumed lead_found; B (content-generation) declares produced X + consumed Y.
+    expect((await declareAs("workflow", { consumed: [co("lead_found", "a-lead", "lead-service")] })).status).toBe(201);
+    expect((await declareAs("content-generation-service", { produced: [co("message_written", "msg-1", "content-generation-service")], consumed: [co("lead_found", "b-lead", "lead-service"), co("email_found", "c-1"), co("email_found", "c-2"), co("email_found", "c-3")] })).status).toBe(201);
+    const rows = async () =>
+      ((await db.execute(sql`SELECT direction, outcome_key, subject_id FROM run_outcomes WHERE run_id = ${r.id}::uuid ORDER BY direction, outcome_key, subject_id`)) as any[]).map((x) => `${x.direction}:${x.outcome_key}:${x.subject_id}`);
+    expect(await rows()).toHaveLength(6);
+
+    // Whole-run void stays owner-only; a service that declared nothing here is refused even scoped.
+    const whole = await voidAs("content-generation-service", reason);
+    expect(whole.status).toBe(403);
+    expect(whole.body.error).toBe("not_run_owner");
+    const third = await voidAs("instantly-service", { ...reason, scope: { direction: "consumed", outcomeKey: "email_found" } });
+    expect(third.status).toBe(403);
+    expect(third.body.error).toBe("not_run_declarer");
+
+    // B's scoped void of consumed lead_found removes B's row only, never A's on the same key.
+    const vl = await voidAs("content-generation-service", { ...reason, scope: { direction: "consumed", outcomeKey: "lead_found" } });
+    expect(vl.status).toBe(201);
+    expect(vl.body).toMatchObject({ status: "voided", voidedCount: 1 });
+    // B's scoped void of consumed Y (email_found) removes its 3 rows.
+    const vy = await voidAs("content-generation-service", { ...reason, scope: { direction: "consumed", outcomeKey: "email_found" } });
+    expect(vy.body).toMatchObject({ status: "voided", voidedCount: 3 });
+    expect(await rows()).toEqual(["consumed:lead_found:a-lead", "produced:message_written:msg-1"]);
+    // The owner's scoped void of a key only B declared takes nothing of B's.
+    const ownerTry = await voidAs("workflow", { ...reason, scope: { direction: "produced", outcomeKey: "message_written" } });
+    expect(ownerTry.body).toMatchObject({ status: "nothing_to_void", voidedCount: 0 });
+
+    // B re-declares a subset of Y on the SAME run (recorded), X replays as already_recorded (still once).
+    const re = await declareAs("content-generation-service", { produced: [co("message_written", "msg-1", "content-generation-service")], consumed: [co("email_found", "c-2")] });
+    expect(re.status).toBe(201);
+    const byKey = Object.fromEntries(re.body.occurrences.map((o: any) => [o.outcomeKey, o.status]));
+    expect(byKey).toEqual({ message_written: "already_recorded", email_found: "recorded" });
+    expect(await rows()).toEqual(["consumed:email_found:c-2", "consumed:lead_found:a-lead", "produced:message_written:msg-1"]);
+
+    // Audit: each scoped void is a bronze event naming the declaring service that took its rows back.
+    const evs = (await db.execute(sql`SELECT source_service, payload FROM outcome_declaration_events WHERE run_id = ${r.id}::uuid AND event_type = 'outcomes.voided_scoped' ORDER BY occurred_at`)) as any[];
+    expect(evs.map((e) => [e.source_service, e.payload.items.length])).toEqual([["content-generation-service", 1], ["content-generation-service", 3]]);
+  });
 });

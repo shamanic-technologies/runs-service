@@ -964,6 +964,10 @@ several keys and consumed their own, a cost loop) takes back the run's WHOLE dec
 - **Scoped void (migration 0074, SCOPED-VOID-1024)**: body `scope: {direction, outcomeKey}` takes back only those rows of the run
   (bronze `outcomes.voided_scoped`, projection deletes exactly the listed ids); the rest stays and the run stays OPEN to a corrected
   declaration (only a whole-run `outcomes.voided` is final). Matching nothing = 200 `nothing_to_void`. Re-stales days like a void.
+- **Declarer void (DECLARER-VOID-1024)**: a scoped void takes back only rows the CALLER declared (`outcomes.declared.source_service`
+  = x-service-name, matched on the row id), owner included: no service ever voids another's rows. So a NON-owner that declared on the run
+  may scoped-void (content-generation-service on workflow's `execute-workflow` runs, 58,885 declarations in prod 2026-10-24) and re-declare
+  on the same run; a non-owner with no declaration there = 403 `not_run_declarer`; whole-run void unchanged (owner only, 403 `not_run_owner`).
 - Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
 
 ## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)
