@@ -46,6 +46,7 @@ import { db, statsDb } from "../db/index.js";
 import { outcomeDeclarationEvents } from "../db/schema.js";
 import { fetchVendorCostCatalog, type VendorCostVersion } from "./vendor-costs.js";
 import { versionWindowsSql } from "../routes/vendor-costs.js";
+import type { SupportFunction } from "./support-marks.js";
 
 export const ALLOCATION_VERSION = 1;
 export const ALLOCATION_RULE =
@@ -287,41 +288,6 @@ export async function declareRunOutcomes(
 }
 
 // ---------------------------------------------------------------------------
-// Support marks (migration 0062): a staff experiment / probe produces nothing
-// ---------------------------------------------------------------------------
-
-export type SupportKind = "staff_experiment" | "support";
-
-/**
- * Marks runs SUPPORT: one bronze `run.support_marked` event per run not yet
- * marked (kind, reason, markedBy), projected into run_support_marks. The anchor
- * walk stops there, so the run's and its subtree's cost stay "produced none".
- * The caller has checked every run exists and declares no produced occurrence.
- * Idempotent: an already marked run writes nothing.
- */
-export async function markRunsSupport(
-  runIds: string[],
-  body: { kind: SupportKind; reason: string; markedBy: string },
-): Promise<{ marked: string[]; alreadyMarked: string[] }> {
-  const ids = `{${runIds.join(",")}}`;
-  const already = new Set(
-    ((await db.execute(sql`SELECT run_id FROM run_support_marks WHERE run_id = ANY(${ids}::uuid[])`)) as any[]).map((r) => r.run_id as string),
-  );
-  const fresh = runIds.filter((id) => !already.has(id));
-  for (let i = 0; i < fresh.length; i += 500) {
-    await db.insert(outcomeDeclarationEvents).values(
-      fresh.slice(i, i + 500).map((runId) => ({
-        runId,
-        eventType: "run.support_marked",
-        sourceService: body.markedBy,
-        payload: { allocationVersion: ALLOCATION_VERSION, kind: body.kind, reason: body.reason, markedBy: body.markedBy },
-      })),
-    );
-  }
-  return { marked: fresh, alreadyMarked: runIds.filter((id) => already.has(id)) };
-}
-
-// ---------------------------------------------------------------------------
 // Taking a declaration back (RUNS-VOID-1023)
 // ---------------------------------------------------------------------------
 
@@ -457,6 +423,12 @@ export interface LedgerDayOrgRow {
   ledger: Money;
   allocated: Money;
   producedNone: Money;
+  /**
+   * The part of producedNone that is SUPPORT, per support function (migration
+   * 0063): spend of runs marked support and their non-declaring subtrees.
+   * producedNone - Σ support = undeclared spend.
+   */
+  supportByFunction: SupportByFunction;
   /** Standard charges of the day's reuses = the reuse gain (no spend behind them). */
   reuse: Money;
   reuseCount: number;
@@ -472,6 +444,16 @@ export interface CoverageDayRow {
   coveredGross: string;
   spendNet: string;
   coveredNet: string;
+  /** Part of the spend that is support, per function (never covered: a support run anchors nothing). */
+  supportByFunction: Partial<Record<SupportFunction, { gross: string; net: string }>>;
+}
+
+/** Support money per support function (absent function = 0). */
+export type SupportByFunction = Partial<Record<SupportFunction, Money>>;
+
+/** Σ of a support split. */
+export function supportTotal(s: SupportByFunction): Money {
+  return Object.values(s).reduce<Money>((a, m) => plus(a, m!), ZERO());
 }
 
 export interface LedgerDay {
@@ -557,6 +539,14 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     walked AS MATERIALIZED (SELECT * FROM walk),
     -- A walk that stopped on a support mark has no anchor: produced none.
     anchor_of AS MATERIALIZED (SELECT run_id, cur_id AS anchor_id FROM walked WHERE found AND ${hasProducedSql(sql`cur_id`)}),
+    -- The walk stopped on a support mark: produced none BY DESIGN, named by its
+    -- support function (migration 0064). A marked run never declares a produced
+    -- occurrence, so a costed row is anchored, support or undeclared, never two.
+    support_of AS MATERIALIZED (
+      SELECT w.run_id, m.kind
+      FROM walked w JOIN run_support_marks m ON m.run_id = w.cur_id
+      WHERE w.found
+    ),
     g AS MATERIALIZED (
       SELECT a.anchor_id, c.org_key,
              SUM(c.gross) AS gross, SUM(c.net) AS net, SUM(c.vendor) AS vendor, SUM(c.unpriced) AS unpriced
@@ -603,10 +593,22 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
     ),
     none_cost AS (
       SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
-             ${sums("c", "m")}
+             sp.kind AS support_function, ${sums("c", "m")}
       FROM costed c
+      LEFT JOIN support_of sp ON sp.run_id = c.run_id
       WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
-      GROUP BY 1, 2, 3, 4, 5, 6
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    ),
+    support_split AS (
+      SELECT c.org_key, sp.kind, ${sums("c", "s")}
+      FROM costed c JOIN support_of sp ON sp.run_id = c.run_id
+      GROUP BY 1, 2
+    ),
+    cov_support AS (
+      SELECT c.service_name, c.task_name, sp.kind,
+             SUM(c.gross)::text AS gross, SUM(c.net)::text AS net
+      FROM costed c JOIN support_of sp ON sp.run_id = c.run_id
+      GROUP BY 1, 2, 3
     ),
     cov AS (
       SELECT c.service_name, c.task_name,
@@ -634,12 +636,16 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[]): SQL {
       ), '[]'::json) AS orgs,
       COALESCE((SELECT json_agg(row_to_json(cov) ORDER BY cov.service_name, cov.task_name) FROM cov), '[]'::json) AS coverage,
       COALESCE((SELECT json_agg(json_build_object(
+        'org_id', x.org_key, 'kind', x.kind,
+        's_gross', x.s_gross::text, 's_net', x.s_net::text, 's_vendor', x.s_vendor::text, 's_unpriced', x.s_unpriced::text)) FROM support_split x), '[]'::json) AS support,
+      COALESCE((SELECT json_agg(row_to_json(cs)) FROM cov_support cs), '[]'::json) AS coverage_support,
+      COALESCE((SELECT json_agg(json_build_object(
         'outcome_key', p.outcome_key, 'org', p.org, 'cost_org', p.cost_org, 'brand_ids', p.brand_ids, 'campaign_id', p.campaign_id,
         'workflow_slug', p.workflow_slug, 'feature_slug', p.feature_slug,
         'gross', p.m_gross::text, 'net', p.m_net::text, 'vendor', p.m_vendor::text, 'unpriced', p.m_unpriced::text)) FROM produced_cost p), '[]'::json) AS produced_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'org', n.org, 'cost_org', n.cost_org, 'brand_ids', n.brand_ids, 'campaign_id', n.campaign_id,
-        'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug,
+        'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug, 'support_function', n.support_function,
         'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       (SELECT COUNT(*) FROM walked WHERE NOT found AND parent_id IS NOT NULL AND depth >= ${MAX_WALK_DEPTH}) AS unplaced_runs
   `;
@@ -835,6 +841,8 @@ export interface OutcomeCostRow {
   consumedOutcomeKey: string | null;
   organizationId: string | null;
   costOrganizationId: string | null;
+  /** kind 'none' only: the support function of that spend (null = undeclared spend). Null on every other kind. */
+  supportFunction: SupportFunction | null;
   tags: RunTags;
   n: string;
   quantity: string;
@@ -866,12 +874,17 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
       ledger: money(r, "ledger"),
       allocated: money(r, "allocated"),
       producedNone: money(r, "none"),
+      supportByFunction: {},
       reuse: ZERO(),
       reuseCount: 0,
       unknownProvenance: 0,
       costRows: Number(r.cost_rows),
       occurrences: Number(r.occurrences),
     });
+  }
+  for (const r of row.support as any[]) {
+    // Every support row's org has ledger spend that day: its row exists.
+    orgs.get(r.org_id ?? "")!.supportByFunction[r.kind as SupportFunction] = money(r, "s");
   }
   // Reuse charges of the day's consumptions (rule 5), on the consuming run's org.
   const consumptions = await resolveConsumptions(sql`
@@ -885,7 +898,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     const key = c.orgId ?? "";
     if (!orgs.has(key)) {
       orgs.set(key, {
-        organizationId: c.orgId, ledger: ZERO(), allocated: ZERO(), producedNone: ZERO(), reuse: ZERO(),
+        organizationId: c.orgId, ledger: ZERO(), allocated: ZERO(), producedNone: ZERO(), supportByFunction: {}, reuse: ZERO(),
         reuseCount: 0, unknownProvenance: 0, costRows: 0, occurrences: 0,
       });
     }
@@ -904,6 +917,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     consumedOutcomeKey: null,
     organizationId: r.org ?? null,
     costOrganizationId: r.cost_org ?? null,
+    supportFunction: r.support_function ?? null,
     tags: tagsOf(r),
     n: fx(0),
     quantity: fx(0),
@@ -965,6 +979,11 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
       coveredGross: fx(r.covered_gross),
       spendNet: fx(r.spend_net),
       coveredNet: fx(r.covered_net),
+      supportByFunction: Object.fromEntries(
+        (row.coverage_support as any[])
+          .filter((x) => x.service_name === r.service_name && x.task_name === r.task_name)
+          .map((x) => [x.kind, { gross: fx(x.gross), net: fx(x.net) }]),
+      ),
     })),
     unplacedRuns: Number(row.unplaced_runs),
   };
@@ -982,10 +1001,10 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
         INSERT INTO outcome_cost_days (
           day, allocation_version, kind, outcome_key, consumed_outcome_key, organization_id, cost_organization_id,
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
-          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross
+          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross, support_function
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
-               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup
+               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup, x.sf
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -993,10 +1012,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             n: o.n, q: o.quantity, ru: o.reuses, up: o.unknown,
             g: o.money.gross, ne: o.money.net, v: o.money.vendor, u: o.money.unpricedGross,
             rg: o.reuseMoney.gross, rn: o.reuseMoney.net, rv: o.reuseMoney.vendor, rup: o.reuseMoney.unpricedGross,
+            sf: o.supportFunction,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
-                        rg numeric, rn numeric, rv numeric, rup numeric)
+                        rg numeric, rn numeric, rv numeric, rup numeric, sf text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -1007,11 +1027,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           allocated_gross, allocated_net, allocated_vendor, allocated_unpriced_gross,
           none_gross, none_net, none_vendor, none_unpriced_gross,
           reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross, reuse_count, unknown_provenance_count,
-          cost_rows, occurrences
+          cost_rows, occurrences, support_by_function
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.org,
                x.lg, x.ln, x.lv, x.lu, x.ag, x.an, x.av, x.au, x.ng, x.nn, x.nv, x.nu,
-               x.rg, x.rn, x.rv, x.ru, x.rc, x.up, x.rows, x.occ
+               x.rg, x.rn, x.rv, x.ru, x.rc, x.up, x.rows, x.occ, x.sbf
         FROM jsonb_to_recordset(${JSON.stringify(
           d.orgs.map((o) => ({
             org: o.organizationId,
@@ -1020,26 +1040,26 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             ng: o.producedNone.gross, nn: o.producedNone.net, nv: o.producedNone.vendor, nu: o.producedNone.unpricedGross,
             rg: o.reuse.gross, rn: o.reuse.net, rv: o.reuse.vendor, ru: o.reuse.unpricedGross,
             rc: o.reuseCount, up: o.unknownProvenance,
-            rows: o.costRows, occ: o.occurrences,
+            rows: o.costRows, occ: o.occurrences, sbf: o.supportByFunction,
           })),
         )}::jsonb) AS x(org uuid, lg numeric, ln numeric, lv numeric, lu numeric, ag numeric, an numeric, av numeric, au numeric,
                         ng numeric, nn numeric, nv numeric, nu numeric, rg numeric, rn numeric, rv numeric, ru numeric,
-                        rc bigint, up bigint, rows bigint, occ bigint)
+                        rc bigint, up bigint, rows bigint, occ bigint, sbf jsonb)
       `);
     }
     if (d.coverage.length > 0) {
       await tx.execute(sql`
-        INSERT INTO outcome_coverage_days (day, allocation_version, service_name, task_name, spend_gross, covered_gross, spend_net, covered_net)
-        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.s, x.t, x.sg, x.cg, x.sn, x.cn
+        INSERT INTO outcome_coverage_days (day, allocation_version, service_name, task_name, spend_gross, covered_gross, spend_net, covered_net, support_by_function)
+        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.s, x.t, x.sg, x.cg, x.sn, x.cn, x.sbf
         FROM jsonb_to_recordset(${JSON.stringify(
-          d.coverage.map((c) => ({ s: c.serviceName, t: c.taskName, sg: c.spendGross, cg: c.coveredGross, sn: c.spendNet, cn: c.coveredNet })),
-        )}::jsonb) AS x(s text, t text, sg numeric, cg numeric, sn numeric, cn numeric)
+          d.coverage.map((c) => ({ s: c.serviceName, t: c.taskName, sg: c.spendGross, cg: c.coveredGross, sn: c.spendNet, cn: c.coveredNet, sbf: c.supportByFunction })),
+        )}::jsonb) AS x(s text, t text, sg numeric, cg numeric, sn numeric, cn numeric, sbf jsonb)
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, support_split)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, support_split = true
     `);
   });
 }
@@ -1115,7 +1135,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string): Promis
   const rows = (await db.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
-      AND outcome_costs -- a day stored before the outcome totals (0058) is recomputed
+      AND outcome_costs AND support_split -- a day stored before the outcome totals (0058) or the support split (0064) is recomputed
   `)) as any[];
   const computed = new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)]));
   const out = new Set<string>();

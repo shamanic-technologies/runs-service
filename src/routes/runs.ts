@@ -3,7 +3,8 @@ import { eq, and, gte, lte, desc, sql, inArray, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, readDb } from "../db/index.js";
 import { uuidArray } from "../db/uuid-array.js";
-import { runs, runsCosts } from "../db/schema.js";
+import { outcomeDeclarationEvents, runs, runsCosts } from "../db/schema.js";
+import { supportMarkEvent } from "../services/support-marks.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
   resolveMultipleUnitCosts,
@@ -121,6 +122,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       serviceName,
       taskName,
       idempotencyKey,
+      support,
     } = parsed.data;
     const parentRunId = req.runId || null;
 
@@ -263,6 +265,8 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           identity,
           idempotencyKey: idempotencyKey ?? null,
         });
+        // A support run (COST-SUPPORT-1024-RUNS) is marked in the same transaction: never an instant unmarked.
+        if (support) await tx.insert(outcomeDeclarationEvents).values(supportMarkEvent(id, { ...support, markedBy: serviceName }));
         // Trigger project_run_lifecycle_to_silver fires AFTER the bronze insert
         // and creates the silver row synchronously. Read it back for the response.
         const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);

@@ -9,7 +9,8 @@
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { statsDb } from "../db/index.js";
-import { ALLOCATION_VERSION, addDays, type Money } from "./outcome-ledger.js";
+import { ALLOCATION_VERSION, addDays, supportTotal, type Money, type SupportByFunction } from "./outcome-ledger.js";
+import { SUPPORT_FUNCTIONS } from "./support-marks.js";
 
 export const OUTCOME_COST_DIMENSIONS = [
   "outcomeKey",
@@ -91,6 +92,16 @@ function baseSql(kinds: string[], groupsByBrand: boolean, f: OutcomeCostFilters,
   return sql`(SELECT d.*, b.brand_id FROM outcome_cost_days d ${brand} WHERE ${sql.join(where, sql` AND `)}${brandWhere}) x`;
 }
 
+/** Per support function: the 'none' rows' money carrying it (NULL when the group has none). */
+const supportSums = () =>
+  sql.raw(
+    SUPPORT_FUNCTIONS.map((fn) =>
+      ["gross", "net", "vendor", "unpriced_gross"]
+        .map((c) => `SUM(x.${c}) FILTER (WHERE x.kind = 'none' AND x.support_function = '${fn}')::text AS s_${fn}_${c === "unpriced_gross" ? "unpriced" : c}`)
+        .join(", "),
+    ).join(",\n        "),
+  );
+
 async function grouped(section: string, dims: Array<{ name: string; expr: string }>, select: SQL, from: SQL): Promise<any[]> {
   const cols = dims.map((d) => sql.raw(`${d.expr} AS "${d.name}"`));
   const head = cols.length > 0 ? sql`${sql.join(cols, sql`, `)}, ` : sql``;
@@ -129,8 +140,16 @@ export interface OutcomeCostTotals {
     spend: Money;
     producedCost: Money;
     producedNone: Money;
+    /** Part of producedNone that is support (migration 0064), total and per function; the rest is undeclared. */
+    support: Money;
+    supportByFunction: SupportByFunction;
+    undeclared: Money;
     coverageShare: { gross: string | null; net: string | null };
+    /** producedCost / (spend - support): coverage on outcome spend only. */
+    outcomeSpendCoverageShare: { gross: string | null; net: string | null };
   }>;
+  /** Days stored before the support split (support reads 0 there until recomputed). */
+  supportDaysMissing: string[];
 }
 
 /** First UTC day the refresher stored outcome totals for (null when none yet). */
@@ -177,23 +196,29 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
         SUM(x.vendor) FILTER (WHERE x.kind = 'produced_cost')::text AS p_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'produced_cost')::text AS p_unpriced,
         SUM(x.gross) FILTER (WHERE x.kind = 'none')::text AS z_gross, SUM(x.net) FILTER (WHERE x.kind = 'none')::text AS z_net,
         SUM(x.vendor) FILTER (WHERE x.kind = 'none')::text AS z_vendor, SUM(x.unpriced_gross) FILTER (WHERE x.kind = 'none')::text AS z_unpriced,
-        ${MONEY_SUMS()}, SUM(x.n)::text AS n`,
+        ${MONEY_SUMS()}, SUM(x.n)::text AS n,
+        ${supportSums()}`,
     baseSql(["produced_cost", "none"], byBrand, f, since, until, null),
   );
 
   const computed = (await statsDb.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
-  const have = new Set(computed.map((r) => r.day as string));
+  const split = new Map(computed.map((r) => [r.day as string, r.support_split === true]));
   const daysMissing: string[] = [];
-  for (let d = since; d <= until; d = addDays(d, 1)) if (!have.has(d)) daysMissing.push(d);
+  const supportDaysMissing: string[] = [];
+  for (let d = since; d <= until; d = addDays(d, 1)) {
+    if (!split.has(d)) daysMissing.push(d);
+    if (!split.get(d)) supportDaysMissing.push(d);
+  }
 
   const names = dims.map((d) => d.name);
   return {
     since,
     until,
     daysMissing,
+    supportDaysMissing,
     produced: produced.map((r) => ({
       dimensions: dimensionsOf(r, names),
       occurrences: new Decimal(r.n ?? 0).toNumber(),
@@ -212,12 +237,29 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
       const producedCost = moneyOf(r, "p_");
       const producedNone = moneyOf(r, "z_");
       const spend = moneyOf(r);
+      const supportByFunction: SupportByFunction = {};
+      for (const fn of SUPPORT_FUNCTIONS) if (r[`s_${fn}_gross`] !== null) supportByFunction[fn] = moneyOf(r, `s_${fn}_`);
+      const support = supportTotal(supportByFunction);
+      const sub = (a: string, b: string) => new Decimal(a).minus(b).toFixed(10);
+      const undeclared = {
+        gross: sub(producedNone.gross, support.gross),
+        net: sub(producedNone.net, support.net),
+        vendor: sub(producedNone.vendor, support.vendor),
+        unpricedGross: sub(producedNone.unpricedGross, support.unpricedGross),
+      };
       return {
         dimensions: dimensionsOf(r, nonOutcome.map((d) => d.name)),
         spend,
         producedCost,
         producedNone,
+        support,
+        supportByFunction,
+        undeclared,
         coverageShare: { gross: share(producedCost.gross, spend.gross), net: share(producedCost.net, spend.net) },
+        outcomeSpendCoverageShare: {
+          gross: share(producedCost.gross, sub(spend.gross, support.gross)),
+          net: share(producedCost.net, sub(spend.net, support.net)),
+        },
       };
     }),
   };

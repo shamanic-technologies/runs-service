@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { MarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
+import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -24,7 +24,8 @@ import {
   ledgerCheckInputOf,
   declareRunOutcomes,
   declareOutcomesBatch,
-  markRunsSupport,
+  supportTotal,
+  type SupportByFunction,
   effectiveDeclaredAt,
   listOccurrences,
   utcDay,
@@ -32,6 +33,14 @@ import {
   type Money,
 } from "../services/outcome-ledger.js";
 import { VendorCostCatalogError } from "../services/vendor-costs.js";
+import {
+  MAX_SUPPORT_MARK_RUNS,
+  SUPPORT_FUNCTIONS,
+  SUPPORT_FUNCTION_DESCRIPTIONS,
+  markRunsSupport,
+  selectSupportRuns,
+  type SupportFunction,
+} from "../services/support-marks.js";
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
 import {
   MAX_OUTCOME_COST_GROUPS,
@@ -43,6 +52,9 @@ import {
 } from "../services/outcome-cost-totals.js";
 
 const router = Router();
+
+const wireSupport = (s: SupportByFunction) =>
+  Object.fromEntries(SUPPORT_FUNCTIONS.filter((f) => s[f]).map((f) => [f, wireMoney(s[f]!)]));
 
 const wireMoney = (m: Money) => ({
   grossCents: m.gross,
@@ -249,36 +261,136 @@ router.post("/v1/platform-runs/:id/outcomes", requirePlatformAuth, (req, res) =>
 router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
 
-router.post("/internal/runs/support-marks", requireInternalAuth, async (req, res) => {
+// ---------------------------------------------------------------------------
+// Support marks (migrations 0062 + 0064): staff door (any service) and owner door
+// (the calling service's own runs). Rules: services/support-marks.ts.
+// ---------------------------------------------------------------------------
+
+type MarkBody = {
+  kind: SupportFunction;
+  reason: string;
+  markedBy: string;
+  runIds?: string[];
+  serviceName?: string;
+  taskNames?: string[];
+  startedAfter?: string;
+  startedBefore?: string;
+  topLevelOnly?: boolean;
+  withSpendOnly?: boolean;
+};
+
+/** runIds mode: every run must exist, belong to `owner` (owner door) and declare no produced outcome; all or nothing. */
+async function checkSupportRunIds(runIds: string[], owner: string | null) {
+  const found = (await db.execute(sql`
+    SELECT r.id, r.service_name, EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = r.id AND o.direction = 'produced') AS produces
+    FROM runs r WHERE r.id = ANY(${`{${runIds.join(",")}}`}::uuid[])
+  `)) as any[];
+  const byId = new Map(found.map((r) => [r.id as string, r]));
+  return runIds.flatMap((runId): Array<{ runId: string; reason: "run_not_found" | "not_run_owner" | "run_declares_outcomes" }> => {
+    const r = byId.get(runId);
+    if (!r) return [{ runId, reason: "run_not_found" as const }];
+    if (owner !== null && r.service_name !== owner) return [{ runId, reason: "not_run_owner" as const }];
+    if (r.produces) return [{ runId, reason: "run_declares_outcomes" as const }];
+    return [];
+  });
+}
+
+/** Preview or apply one mark request; `owner` = the calling service on the owner door, null on the staff door. */
+async function handleSupportMark(res: Response, body: MarkBody, owner: string | null, apply: boolean) {
+  const mark = { kind: body.kind, reason: body.reason, markedBy: body.markedBy };
+  const selection = [body.taskNames, body.startedAfter, body.startedBefore, body.topLevelOnly, body.withSpendOnly].some((v) => v !== undefined);
+  if (body.runIds) {
+    if (selection || body.serviceName) {
+      res.status(400).json({ error: "runIds and a selection (serviceName, taskNames, start window, topLevelOnly, withSpendOnly) are exclusive" });
+      return;
+    }
+    const runIds = [...new Set(body.runIds.map((id) => id.toLowerCase()))];
+    const invalid = await checkSupportRunIds(runIds, owner);
+    if (invalid.length > 0) {
+      res.status(422).json({ error: "invalid_runs", details: { invalid } });
+      return;
+    }
+    if (!apply) {
+      res.json(wireSelection(await selectSupportRuns({ runIds })));
+      return;
+    }
+    const out = await markRunsSupport(runIds, mark);
+    res.json({ markedCount: out.marked.length, alreadyMarkedCount: out.alreadyMarked.length });
+    return;
+  }
+  const serviceName = owner ?? body.serviceName;
+  if (!serviceName) {
+    res.status(400).json({ error: "state runIds or serviceName (+ optional selection)" });
+    return;
+  }
+  const sel = await selectSupportRuns({
+    serviceName,
+    taskNames: body.taskNames,
+    startedAfter: body.startedAfter,
+    startedBefore: body.startedBefore,
+    topLevelOnly: body.topLevelOnly,
+    withSpendOnly: body.withSpendOnly,
+  });
+  if (!apply) {
+    res.json(wireSelection(sel));
+    return;
+  }
+  if (sel.tooMany) {
+    res.status(422).json({ error: "too_many_runs", details: { toMarkCount: sel.toMark.length, maxRuns: MAX_SUPPORT_MARK_RUNS } });
+    return;
+  }
+  const out = await markRunsSupport(sel.toMark, mark);
+  res.json({ markedCount: out.marked.length, alreadyMarkedCount: sel.alreadyMarkedCount + out.alreadyMarked.length, declaresOutcomesCount: sel.declaresOutcomesCount });
+}
+
+const wireSelection = (sel: Awaited<ReturnType<typeof selectSupportRuns>>) => ({
+  matchedRunCount: sel.matchedRunCount,
+  toMarkCount: sel.toMark.length,
+  alreadyMarkedCount: sel.alreadyMarkedCount,
+  declaresOutcomesCount: sel.declaresOutcomesCount,
+  onOutcomeNowCount: sel.onOutcomeNowCount,
+  spend: sel.spend,
+  maxRuns: MAX_SUPPORT_MARK_RUNS,
+  tooMany: sel.tooMany,
+});
+
+const staffSupportMark = (apply: boolean) => async (req: Request, res: Response) => {
   try {
     const parsed = MarkRunsSupportRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
       return;
     }
-    const runIds = [...new Set(parsed.data.runIds.map((id) => id.toLowerCase()))];
-    const found = (await db.execute(sql`
-      SELECT r.id, EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = r.id AND o.direction = 'produced') AS produces
-      FROM runs r WHERE r.id = ANY(${`{${runIds.join(",")}}`}::uuid[])
-    `)) as any[];
-    const byId = new Map(found.map((r) => [r.id as string, r]));
-    const invalid = runIds.flatMap((runId) => {
-      const r = byId.get(runId);
-      if (!r) return [{ runId, reason: "run_not_found" }];
-      if (r.produces) return [{ runId, reason: "run_declares_outcomes" }];
-      return [];
-    });
-    if (invalid.length > 0) {
-      res.status(422).json({ error: "invalid_runs", details: { invalid } });
-      return;
-    }
-    const out = await markRunsSupport(runIds, parsed.data);
-    res.json({ markedCount: out.marked.length, alreadyMarkedCount: out.alreadyMarked.length });
+    await handleSupportMark(res, parsed.data, null, apply);
   } catch (err) {
     console.error("[Runs Service] support marks failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+};
+
+const ownerSupportMark = (apply: boolean) => async (req: Request, res: Response) => {
+  try {
+    const owner = req.platformServiceName ?? (req.headers["x-service-name"] as string | undefined)?.trim();
+    if (!owner) {
+      res.status(400).json({ error: "x-service-name header is required (the service that owns the runs)" });
+      return;
+    }
+    const parsed = OwnerMarkRunsSupportRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    await handleSupportMark(res, parsed.data, owner, apply);
+  } catch (err) {
+    console.error("[Runs Service] owner support marks failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+router.post("/internal/runs/support-marks/preview", requireInternalAuth, staffSupportMark(false));
+router.post("/internal/runs/support-marks", requireInternalAuth, staffSupportMark(true));
+router.post("/v1/platform-runs/support-marks/preview", requirePlatformAuth, ownerSupportMark(false));
+router.post("/v1/platform-runs/support-marks/apply", requirePlatformAuth, ownerSupportMark(true));
 
 const csv = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
@@ -381,15 +493,58 @@ function parseRange(q: Record<string, string | undefined>, defaultUntil: string,
 }
 
 async function missingDays(since: string, until: string): Promise<string[]> {
+  return (await dayStatus(since, until)).daysMissing;
+}
+
+/**
+ * Days not stored, and days stored without the support split (before migration
+ * 0063, until the refresher recomputes them): on those, support reads 0 and
+ * the spend sits in undeclared.
+ */
+async function dayStatus(since: string, until: string): Promise<{ daysMissing: string[]; supportDaysMissing: string[] }> {
   const rows = (await statsDb.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
-  const have = new Set(rows.map((r) => r.day as string));
-  const out: string[] = [];
-  for (let d = since; d <= until; d = addDays(d, 1)) if (!have.has(d)) out.push(d);
-  return out;
+  const split = new Map(rows.map((r) => [r.day as string, r.support_split === true]));
+  const daysMissing: string[] = [];
+  const supportDaysMissing: string[] = [];
+  for (let d = since; d <= until; d = addDays(d, 1)) {
+    if (!split.has(d)) daysMissing.push(d);
+    if (!split.get(d)) supportDaysMissing.push(d);
+  }
+  return { daysMissing, supportDaysMissing };
 }
+
+/** Money per function of a stored support_by_function jsonb (NULL = before 0064: none stated). */
+const supportOf = (j: unknown): SupportByFunction => {
+  const out: SupportByFunction = {};
+  for (const [k, v] of Object.entries((j ?? {}) as Record<string, any>)) {
+    out[k as SupportFunction] = {
+      gross: new Decimal(v.gross).toFixed(10),
+      net: new Decimal(v.net).toFixed(10),
+      vendor: new Decimal(v.vendor).toFixed(10),
+      unpricedGross: new Decimal(v.unpricedGross).toFixed(10),
+    };
+  }
+  return out;
+};
+const addSupport = (a: SupportByFunction, b: SupportByFunction): SupportByFunction => {
+  const out: SupportByFunction = { ...a };
+  for (const [k, m] of Object.entries(b)) out[k as SupportFunction] = addMoney(out[k as SupportFunction] ?? zeroMoney(), m!);
+  return out;
+};
+const subMoney = (a: Money, b: Money): Money => ({
+  gross: new Decimal(a.gross).minus(b.gross).toFixed(10),
+  net: new Decimal(a.net).minus(b.net).toFixed(10),
+  vendor: new Decimal(a.vendor).minus(b.vendor).toFixed(10),
+  unpricedGross: new Decimal(a.unpricedGross).minus(b.unpricedGross).toFixed(10),
+});
+/** part / whole as a 10-decimal fraction, null on a zero whole. */
+const fraction = (part: string, whole: string) => {
+  const w = new Decimal(whole);
+  return w.isZero() ? null : new Decimal(part).div(w).toDecimalPlaces(10, Decimal.ROUND_HALF_UP).toFixed(10);
+};
 
 const zeroMoney = (): Money => ({ gross: "0", net: "0", vendor: "0", unpricedGross: "0" });
 const addMoney = (a: Money, b: Money): Money => ({
@@ -417,7 +572,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
              allocated_gross::text, allocated_net::text, allocated_vendor::text, allocated_unpriced_gross::text,
              none_gross::text, none_net::text, none_vendor::text, none_unpriced_gross::text,
              reuse_gross::text, reuse_net::text, reuse_vendor::text, reuse_unpriced_gross::text,
-             reuse_count, unknown_provenance_count, cost_rows, occurrences
+             reuse_count, unknown_provenance_count, cost_rows, occurrences, support_by_function
       FROM cost_ledger_days
       WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${range.since}::date AND ${range.until}::date
       ORDER BY day, organization_id NULLS FIRST
@@ -429,6 +584,7 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       unpricedGross: new Decimal(r[u]).toFixed(10),
     });
     const totals = { ledger: zeroMoney(), standard: zeroMoney(), reuseGain: zeroMoney(), allocated: zeroMoney(), producedNone: zeroMoney() };
+    let totalSupport: SupportByFunction = {};
     const rows = stored.map((r) => {
       const row = {
         ledger: m(r, "ledger", "ledger_unpriced_gross"),
@@ -442,6 +598,9 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       totals.reuseGain = addMoney(totals.reuseGain, input.reuseGain);
       totals.allocated = addMoney(totals.allocated, row.allocated);
       totals.producedNone = addMoney(totals.producedNone, row.producedNone);
+      const supportByFunction = supportOf(r.support_by_function);
+      totalSupport = addSupport(totalSupport, supportByFunction);
+      const support = supportTotal(supportByFunction);
       const check = checkLedgerRow(input);
       return {
         day: r.day as string,
@@ -451,6 +610,9 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         reuseGain: wireMoney(input.reuseGain),
         allocated: wireMoney(row.allocated),
         producedNone: wireMoney(row.producedNone),
+        support: wireMoney(support),
+        supportByFunction: wireSupport(supportByFunction),
+        undeclared: wireMoney(subMoney(row.producedNone, support)),
         differences: wireMoney(check.differences),
         balanced: check.balanced,
         costRows: Number(r.cost_rows),
@@ -459,8 +621,10 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         unknownProvenanceCount: Number(r.unknown_provenance_count),
       };
     });
-    const daysMissing = await missingDays(range.since, range.until);
+    const { daysMissing, supportDaysMissing } = await dayStatus(range.since, range.until);
     const mismatches = rows.filter((r) => !r.balanced);
+    const support = supportTotal(totalSupport);
+    const outcomeSpend = subMoney(totals.ledger, support);
     res.json({
       allocationVersion: ALLOCATION_VERSION,
       allocationRule: ALLOCATION_RULE,
@@ -469,12 +633,20 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
       balanced: mismatches.length === 0,
       complete: daysMissing.length === 0,
       daysMissing,
+      supportComplete: supportDaysMissing.length === 0,
+      supportDaysMissing,
+      supportFunctions: SUPPORT_FUNCTION_DESCRIPTIONS,
       totals: {
         ledger: wireMoney(totals.ledger),
         standard: wireMoney(totals.standard),
         reuseGain: wireMoney(totals.reuseGain),
         allocated: wireMoney(totals.allocated),
         producedNone: wireMoney(totals.producedNone),
+        support: wireMoney(support),
+        supportByFunction: wireSupport(totalSupport),
+        undeclared: wireMoney(subMoney(totals.producedNone, support)),
+        outcomeSpend: wireMoney(outcomeSpend),
+        outcomeSpendCoverage: { gross: fraction(totals.allocated.gross, outcomeSpend.gross), net: fraction(totals.allocated.net, outcomeSpend.net) },
       },
       mismatches,
       rows: q.rows === "false" ? [] : rows,
@@ -507,28 +679,44 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
     ];
     const rows = (await statsDb.execute(sql`
       SELECT to_char(day, 'YYYY-MM-DD') AS day, service_name, task_name,
-             spend_gross::text, covered_gross::text, spend_net::text, covered_net::text
+             spend_gross::text, covered_gross::text, spend_net::text, covered_net::text, support_by_function
       FROM outcome_coverage_days
       WHERE ${sql.join(filters, sql` AND `)}
       ORDER BY day, service_name, task_name
     `)) as any[];
-    const daysMissing = await missingDays(range.since, range.until);
-    type Acc = { spendGross: Decimal; coveredGross: Decimal; spendNet: Decimal; coveredNet: Decimal };
-    const point = (day: string, a: Acc) => ({
-      day,
-      complete: day < today,
-      spendGrossCents: a.spendGross.toFixed(10),
-      coveredGrossCents: a.coveredGross.toFixed(10),
-      spendNetCents: a.spendNet.toFixed(10),
-      coveredNetCents: a.coveredNet.toFixed(10),
-      coveragePct: pct(a.coveredGross.toFixed(10), a.spendGross.toFixed(10)),
-    });
-    const empty = (): Acc => ({ spendGross: new Decimal(0), coveredGross: new Decimal(0), spendNet: new Decimal(0), coveredNet: new Decimal(0) });
+    const { daysMissing, supportDaysMissing } = await dayStatus(range.since, range.until);
+    type Acc = {
+      spendGross: Decimal; coveredGross: Decimal; spendNet: Decimal; coveredNet: Decimal;
+      support: Partial<Record<SupportFunction, { gross: Decimal; net: Decimal }>>;
+    };
+    const point = (day: string, a: Acc) => {
+      const fns = SUPPORT_FUNCTIONS.filter((f) => a.support[f]);
+      const supportGross = fns.reduce((x, f) => x.plus(a.support[f]!.gross), new Decimal(0));
+      const supportNet = fns.reduce((x, f) => x.plus(a.support[f]!.net), new Decimal(0));
+      return {
+        day,
+        complete: day < today,
+        spendGrossCents: a.spendGross.toFixed(10),
+        coveredGrossCents: a.coveredGross.toFixed(10),
+        spendNetCents: a.spendNet.toFixed(10),
+        coveredNetCents: a.coveredNet.toFixed(10),
+        coveragePct: pct(a.coveredGross.toFixed(10), a.spendGross.toFixed(10)),
+        supportGrossCents: supportGross.toFixed(10),
+        supportNetCents: supportNet.toFixed(10),
+        supportByFunction: Object.fromEntries(fns.map((f) => [f, { grossCents: a.support[f]!.gross.toFixed(10), netCents: a.support[f]!.net.toFixed(10) }])),
+        outcomeSpendCoveragePct: pct(a.coveredGross.toFixed(10), a.spendGross.minus(supportGross).toFixed(10)),
+      };
+    };
+    const empty = (): Acc => ({ spendGross: new Decimal(0), coveredGross: new Decimal(0), spendNet: new Decimal(0), coveredNet: new Decimal(0), support: {} });
     const add = (a: Acc, r: any) => {
       a.spendGross = a.spendGross.plus(r.spend_gross);
       a.coveredGross = a.coveredGross.plus(r.covered_gross);
       a.spendNet = a.spendNet.plus(r.spend_net);
       a.coveredNet = a.coveredNet.plus(r.covered_net);
+      for (const [k, v] of Object.entries((r.support_by_function ?? {}) as Record<string, { gross: string; net: string }>)) {
+        const cur = a.support[k as SupportFunction] ?? { gross: new Decimal(0), net: new Decimal(0) };
+        a.support[k as SupportFunction] = { gross: cur.gross.plus(v.gross), net: cur.net.plus(v.net) };
+      }
     };
     const fleet = new Map<string, Acc>();
     const services = new Map<string, { day: string; serviceName: string; acc: Acc }>();
@@ -548,6 +736,8 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
       since: range.since,
       until: range.until,
       daysMissing,
+      supportComplete: supportDaysMissing.length === 0,
+      supportDaysMissing,
       fleet: [...fleet.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([day, a]) => point(day, a)),
       services: [...services.values()].map((s) => ({ ...point(s.day, s.acc), serviceName: s.serviceName })),
       tasks,
@@ -604,6 +794,8 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
       maxGroups: MAX_OUTCOME_COST_GROUPS,
       complete: totals.daysMissing.length === 0,
       daysMissing: totals.daysMissing,
+      supportComplete: totals.supportDaysMissing.length === 0,
+      supportDaysMissing: totals.supportDaysMissing,
       produced: totals.produced.map((g) => ({ ...g, cost: wireMoney(g.cost) })),
       consumed: totals.consumed.map((g) => ({ ...g, standardCost: wireMoney(g.standardCost), reuseGain: wireMoney(g.reuseGain) })),
       scope: totals.scope.map((g) => ({
@@ -611,6 +803,9 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         spend: wireMoney(g.spend),
         producedCost: wireMoney(g.producedCost),
         producedNone: wireMoney(g.producedNone),
+        support: wireMoney(g.support),
+        supportByFunction: wireSupport(g.supportByFunction),
+        undeclared: wireMoney(g.undeclared),
       })),
     });
   } catch (err) {
