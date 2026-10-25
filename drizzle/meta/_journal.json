@@ -575,6 +575,13 @@
       "when": 1783340200000,
       "tag": "0081_repeat_production_mark",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1783350200000,
+      "tag": "0082_state_inputs",
+      "breakpoints": true
     }
   ]
 }
