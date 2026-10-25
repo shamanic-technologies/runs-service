@@ -5,7 +5,7 @@ import { createTestApp, getInternalAuthHeaders, getPlatformAuthHeaders } from ".
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
-import { computeLedgerDay, daysToCompute, storeLedgerDay } from "../../src/services/outcome-ledger.js";
+import { computeLedgerDay, daysToCompute, ensurePoolLines, storeLedgerDay } from "../../src/services/outcome-ledger.js";
 
 // LEDGER-HISTORY-1024-RUNS: allocation v3 (cross-run loss pooled per campaign),
 // the reconciliation readers gate on, and stale days (a fact recorded after a day
@@ -364,6 +364,39 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
       normalLoss: { grossCents: "5.0000000000" },
       undeclared: { grossCents: "0.0000000000" },
     });
+  });
+
+  it("a known production line that kept nothing on a day with no unit is unpooled loss, never undeclared", async () => {
+    const d1 = "2024-08-16";
+    const d2 = "2024-08-17";
+    const judge = (day: string, hour: string) => run(day, hour, { serviceName: "crm-service", taskName: "registry-judge" });
+    const kept = await judge(d1, "09:00");
+    await cost(kept.id, "1", at(d1, "09:01"));
+    expect((await declare("crm-service", [
+      { runId: kept.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "REL-1" }] },
+    ])).status).toBe(201);
+    const idle = await judge(d2, "09:00"); // kept nothing; its line produced the day before
+    const call = await run(d2, "09:01", { serviceName: "chat-service", taskName: "judgments", parentRunId: idle.id });
+    await cost(call.id, "4", at(d2, "09:02"));
+    const neverLine = await run(d2, "10:00", { serviceName: "crm-service", taskName: "never-produced" });
+    await cost(neverLine.id, "2", at(d2, "10:01"));
+    await refresh(d1);
+    await refresh(d2);
+    const r = await recon(d2, d2);
+    expect(r.totals).toMatchObject({
+      spend: { grossCents: "6.0000000000" },
+      unpooledLoss: { grossCents: "4.0000000000" },
+      undeclared: { grossCents: "2.0000000000" },
+      differences: { grossCents: "0.0000000000" },
+    });
+    // The one-time history fill finds the same line the trigger wrote.
+    await db.execute(sql`DELETE FROM stats_rollups WHERE name = 'pool_lines'`);
+    await db.execute(sql`DELETE FROM pool_lines`);
+    await ensurePoolLines();
+    const [line] = (await db.execute(sql`SELECT first_declared_at FROM pool_lines WHERE pool_key = 'task:crm-service/registry-judge'`)) as any[];
+    expect(new Date(line.first_declared_at).toISOString()).toBe(at(d1, "09:00").toISOString());
+    const [stamp] = (await db.execute(sql`SELECT 1 AS ok FROM stats_rollups WHERE name = 'pool_lines'`)) as any[];
+    expect(stamp).toBeTruthy();
   });
 
   it("refuses an unknown parameter", async () => {

@@ -876,7 +876,10 @@ concept, a value-based joint-cost split.
 - **Allocation v6 = v5 with a no-workflow cost row's LOSS keyed on its walk-end run**: a run with no workflow (a chat-service
   `complete` child of human-service's audience-refill) takes the pool key + campaign of the run its walk ended on (its production order)
   for rule 4b, never its own task (`loss_keyed` CTE): was undeclared beside the order's units that org-day (belgrade-v10, 2026-10-25).
-  A task pool with no unit that day stays UNDECLARED (refused: indistinguishable from a producer that never declared). No migration.
+  No migration. A pool with no unit that day is unpooled LOSS when its (org, pool key) is a known PRODUCTION LINE (produced on or
+  before that day: `pool_lines`, migration 0079, trigger on run_outcomes + one-time fill `ensurePoolLines` in the refresher, 27 s,
+  stamp `pool_lines`; `outcome_cost_days.loss_line`), else UNDECLARED (a line that never produced = a producer that never declared).
+  crm-service's registry Jev that identified nobody on most org-days read undeclared before (2026-10-25).
 - **Loss shares stored per occurrence (migration 0075, LOSS-SHARE-STORED-1024)**: the day statement also stores each produced
   occurrence's share of its pool (`cost_loss_occurrence_days`, flag `cost_ledger_computed_days.loss_occurrences`), and the
   per-occurrence read (`occurrenceCostSlices`) serves it by occurrence id. A day without the flag (stored before 0075) is ranked
