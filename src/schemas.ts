@@ -77,11 +77,12 @@ export const SUPPORT_FUNCTIONS = [
   "product_feature",
   "retired_product",
   "unattributed_production",
+  "repeat_production",
 ] as const;
 
 export const SupportFunctionEnum = z.enum(SUPPORT_FUNCTIONS).openapi({
   description:
-    "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread.",
+    "Which support function the run serves (spend that produces no outcome by design, reported apart): payment_fees = payment processor fees; brand_setup = reading/scraping a brand, extracting its fields; copilot = the Copilot (chat, WhatsApp); platform_llm = platform LLM calls / judgments made for no caller run; staff_experiment = a staff probe, test or experiment; product_feature = a product feature or onboarding step; retired_product = spend of a product no longer in the fleet; unattributed_production = real PRODUCTION work that belongs to no pipe and whose subject was never recorded (e.g. runs from before campaigns existed): not support, an unabsorbed period cost, stated on its own line by the reconciliation and never spread; repeat_production = work its owner states REDID what was already done (another service already produced that occurrence): booked as ABNORMAL loss (reason repeat_production), never support, in no unit cost.",
 });
 
 export const RunSupportOnCreateSchema = z
