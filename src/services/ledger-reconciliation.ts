@@ -142,7 +142,18 @@ export interface DayStatus {
 }
 
 export async function readReconciliation(since: string, until: string, status: DayStatus) {
-  const ledgerRows = (await statsDb.execute(sql`
+  // Its own transaction and statement budget: since inception it reads ~180k
+  // stored rows, 3 s quiet but past the 30 s stats timeout on the loaded box
+  // (500 statement timeout 57014, 2026-10-25, load ~53).
+  return statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+    return readReconciliationIn(tx, since, until, status);
+  });
+}
+
+async function readReconciliationIn(tx: { execute: (q: any) => Promise<unknown> }, since: string, until: string, status: DayStatus) {
+  const ledgerRows = (await tx.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day,
            ledger_gross::text, ledger_net::text, ledger_vendor::text, ledger_unpriced_gross::text,
            allocated_gross::text, allocated_net::text, allocated_vendor::text, allocated_unpriced_gross::text,
@@ -155,9 +166,10 @@ export async function readReconciliation(since: string, until: string, status: D
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
   // Produced-none split by the spending run's tags: support (named), unpooled loss
-  // (a pipe), undeclared (neither), per day and per spending service.
-  const noneRows = (await statsDb.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, service_name,
+  // (a pipe), undeclared (neither), per day and per OWNING service (the service of
+  // the run the walk ended on: who owes the declaration, never the called service).
+  const noneRows = (await tx.execute(sql`
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, owner_service_name AS service_name,
            CASE WHEN support_function = ${UNATTRIBUTED} THEN 'unattributed' WHEN support_function IS NOT NULL THEN 'support'
                 WHEN workflow_slug IS NOT NULL THEN 'unpooled' ELSE 'undeclared' END AS part,
            SUM(gross)::text AS gross, SUM(net)::text AS net, SUM(vendor)::text AS vendor, SUM(unpriced_gross)::text AS unpriced, SUM(n)::text AS runs
@@ -165,7 +177,7 @@ export async function readReconciliation(since: string, until: string, status: D
     WHERE allocation_version = ${ALLOCATION_VERSION} AND kind = 'none' AND day BETWEEN ${since}::date AND ${until}::date
     GROUP BY 1, 2, 3
   `)) as any[];
-  const consumedRows = (await statsDb.execute(sql`
+  const consumedRows = (await tx.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, consumed_outcome_key, service_name,
            SUM(n)::text AS n, SUM(unknown_provenance)::text AS unknown
     FROM outcome_cost_days

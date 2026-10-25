@@ -857,7 +857,14 @@ router.get("/internal/outcome-costs/reconciliation", requireInternalAuth, async 
       res.status(400).json({ error: range });
       return;
     }
-    res.json(await readReconciliation(range.since, range.until, await dayStatus(range.since, range.until)));
+    const status = await dayStatus(range.since, range.until);
+    // A day stored before its rows named the owning service (0077) is missing here until recomputed.
+    const noOwner = (await statsDb.execute(sql`
+      SELECT to_char(day, 'YYYY-MM-DD') AS day FROM cost_ledger_computed_days
+      WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${range.since}::date AND ${range.until}::date AND NOT owner_service
+    `)) as any[];
+    const daysMissing = [...new Set([...status.daysMissing, ...noOwner.map((r) => r.day as string)])].sort();
+    res.json(await readReconciliation(range.since, range.until, { ...status, daysMissing }));
   } catch (err) {
     console.error("[Runs Service] ledger reconciliation read failed:", err);
     res.status(500).json({ error: "Internal server error" });
