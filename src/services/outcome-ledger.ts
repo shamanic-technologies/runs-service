@@ -552,11 +552,12 @@ function allocationInputsCtes(inputs: AllocationInputs): SQL {
  *  - A share of an occurrence a run of the same (service, task, campaign) already
  *    produced for the same subject is ABNORMAL `repeat_production` (re-buying the
  *    same lead), whatever the pipe.
+ *  - A run that produced nothing but whose walk reaches a run of such a pipe that declared CONSUMING a
+ *    lead (cons_shares, via_consumption) is routed the same way, on the lead it consumed.
  *  - Every other share is unchanged (v4).
  */
-function stateRoutingSql(inputs: AllocationInputs): SQL {
+function stateRoutingSql(): SQL {
   return sql`
-    ${allocationInputsCtes(inputs)},
     bs_info AS MATERIALIZED (
       SELECT s.*, o.subject_service, o.subject_id, o.declared_at AS occ_declared_at,
              ar.organization_id AS a_org, ar.service_name AS a_service, ar.task_name AS a_task, ar.campaign_id AS a_campaign,
@@ -575,14 +576,14 @@ function stateRoutingSql(inputs: AllocationInputs): SQL {
     repeated AS MATERIALIZED (
       SELECT DISTINCT b.occurrence_id
       FROM (SELECT DISTINCT occurrence_id, outcome_key, subject_service, subject_id, occ_declared_at, a_service, a_task, a_campaign
-            FROM bs_info WHERE subject_service = 'lead-service' AND NOT reaches_state) b
+            FROM bs_info WHERE subject_service = 'lead-service' AND NOT reaches_state AND NOT via_consumption) b
       WHERE ${repeatedSql}
     ),
     routable AS MATERIALIZED (
       SELECT b.*, pt.family AS t_family, pt.rank AS t_rank
       FROM bs_info b
       JOIN pt ON pt.workflow_slug = b.a_workflow AND pt.feature_slug = b.a_feature
-      WHERE b.subject_service = 'lead-service' AND NOT b.reaches_state
+      WHERE b.subject_service = 'lead-service' AND (NOT b.reaches_state OR b.via_consumption)
         AND NOT EXISTS (SELECT 1 FROM repeated r WHERE r.occurrence_id = b.occurrence_id)
     ),
     routed AS MATERIALIZED (
@@ -868,6 +869,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
   return sql`
     WITH RECURSIVE
     v AS MATERIALIZED (${versionWindowsSql(versions)}),
+    ${allocationInputsCtes(inputs)},
     -- The day's spend: every actual or refunded row (provisioned holds are not
     -- spend yet, cancelled ones never were). OFFSET 0 keeps the scan on
     -- idx_runs_costs_created_at, and the run lookups as PK probes.
@@ -946,6 +948,42 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
              ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
       FROM g JOIN o ON o.anchor_id = g.anchor_id
     ),
+    -- v5: a run that produced nothing (a "not now", a cap refusal) but whose walk reaches a run of a pipe
+    -- targeting a lead state that declared CONSUMING a lead (the occurrence its pipe starts from) acted on
+    -- that lead: its cost rides that lead's next state (stateRoutingSql), split over the leads it consumed.
+    cons_of AS MATERIALIZED (
+      SELECT DISTINCT ON (w.run_id) w.run_id, w.cur_id AS consumer_id
+      FROM (
+        -- Index probes first (idx_run_outcomes_occurrence), a run lookup only for a node that consumed a lead.
+        SELECT w.run_id, w.cur_id, w.depth FROM walked w
+        WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = w.run_id)
+          AND NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = w.run_id)
+          AND EXISTS (SELECT 1 FROM run_outcomes co WHERE co.run_id = w.cur_id AND co.direction = 'consumed' AND co.subject_service = 'lead-service')
+        OFFSET 0
+      ) w
+      CROSS JOIN LATERAL (SELECT workflow_slug, feature_slug FROM runs WHERE id = w.cur_id OFFSET 0) cr
+      WHERE EXISTS (SELECT 1 FROM pt WHERE pt.workflow_slug = cr.workflow_slug AND pt.feature_slug = cr.feature_slug)
+      ORDER BY w.run_id, w.depth
+    ),
+    cg AS MATERIALIZED (
+      SELECT k.consumer_id AS anchor_id, c.org_key,
+             SUM(c.gross) AS gross, SUM(c.net) AS net, SUM(c.vendor) AS vendor, SUM(c.unpriced) AS unpriced
+      FROM costed c JOIN cons_of k ON k.run_id = c.run_id
+      GROUP BY 1, 2
+    ),
+    co AS MATERIALIZED (
+      SELECT o.id, o.run_id AS anchor_id, o.outcome_key, o.quantity,
+             SUM(o.quantity) OVER (PARTITION BY o.run_id ORDER BY o.id) AS cum_q,
+             SUM(o.quantity) OVER (PARTITION BY o.run_id) AS q_total
+      FROM run_outcomes o
+      WHERE o.direction = 'consumed' AND o.subject_service = 'lead-service' AND o.run_id IN (SELECT anchor_id FROM cg)
+    ),
+    cons_shares AS MATERIALIZED (
+      SELECT g.org_key, o.id AS occurrence_id, o.anchor_id, o.outcome_key, true AS is_loss,
+             ${shareSql("gross")} AS gross, ${shareSql("net")} AS net,
+             ${shareSql("vendor")} AS vendor, ${shareSql("unpriced")} AS unpriced
+      FROM cg g JOIN co o ON o.anchor_id = g.anchor_id
+    ),
     -- Rule 4b: loss of pool P (workflow, else task) in campaign C (no anchor, no
     -- support) per (cost org, P, C), split over the units P produced in C that day in that org.
     lost AS MATERIALIZED (
@@ -954,6 +992,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       FROM costed c
       WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
         AND NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
+        AND NOT EXISTS (SELECT 1 FROM cons_of k WHERE k.run_id = c.run_id)
       GROUP BY c.org_key, c.pool_key, c.campaign_id
     ),
     pipe_units AS MATERIALIZED (${pipeUnitsSql(day, "lost")}),
@@ -967,14 +1006,19 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     ),
     -- The v4 shares (rules 1-4b), each one row: what v5 re-routes.
     base_shares AS MATERIALIZED (
-      SELECT ROW_NUMBER() OVER () AS share_id, x.* FROM (SELECT * FROM own_shares UNION ALL SELECT * FROM loss_shares) x
+      SELECT ROW_NUMBER() OVER () AS share_id, x.* FROM (
+        SELECT *, false AS via_consumption FROM own_shares
+        UNION ALL SELECT *, false FROM loss_shares
+        UNION ALL SELECT *, true FROM cons_shares
+      ) x
     ),
-    ${stateRoutingSql(inputs)},
+    ${stateRoutingSql()},
     anchors AS MATERIALIZED (SELECT DISTINCT anchor_id FROM shares),
     -- A costed row is CARRIED when anchored, or loss of a pipe that produced that day.
     carried AS MATERIALIZED (
       SELECT DISTINCT c.run_id, c.org_key FROM costed c
       WHERE EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
+         OR EXISTS (SELECT 1 FROM cons_of k WHERE k.run_id = c.run_id)
          OR (NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
              AND EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM c.org_key AND p.pool_key = c.pool_key
                          AND p.campaign_id IS NOT DISTINCT FROM c.campaign_id))
