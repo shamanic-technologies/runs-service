@@ -318,7 +318,7 @@ describe("Support functions: support spend named and reported apart", () => {
 
     await storeLedgerDay(await computeLedgerDay(DAY4, VERSIONS as any));
     const res = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY4}&until=${DAY4}`).set(getInternalAuthHeaders());
-    expect(res.body.allocationVersion).toBe(5);
+    expect(res.body.allocationVersion).toBe(6);
     expect(res.body.balanced).toBe(true);
     const row = res.body.rows.find((r: any) => r.organizationId === ORG);
     expect(row.ledger.grossCents).toBe("13.0000000000");
