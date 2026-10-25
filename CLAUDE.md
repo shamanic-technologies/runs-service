@@ -966,8 +966,13 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   brand's reach ranked r - 1 ('consumed' row, no money: priced at the lower state's unit cost by the reader's rule-4 rollup; meeting =
   interested leads it took + its own follow-ups). A DECLARED occurrence of a state key (lead-service `outcome-recording` meeting_booked)
   is evidence: never a unit in produced_count, its consumptions dropped. Ledger money unchanged: only outcome-costs lists a day stored
-  without the stamp in daysMissing. A pipe's runs that declare no lead (ai-meeting-booking chat-service writes, $34 / 439 runs) cannot
-  be tied to a lead: unpooled loss of the pipe until their producer declares per lead.
+  without the stamp in daysMissing.
+- **A run that kept nothing still acts on a lead (`cons_of`)**: a cost row with no anchor and no mark whose walk reaches a run of a
+  pipe with a state target that declared CONSUMING a lead-service subject (the pipe's from-step: a "not now" follow-up, a cap
+  refusal) is routed like a production share, split over the leads that run consumed (`via_consumption`): the meeting pipe's
+  follow-up after the yes pays meeting_booked, a cold email "not now" after the yes is abnormal. Runs that declare no lead at all
+  (ai-meeting-booking execute-workflow "not now" runs, ~$34 of chat-service writes before 2026-10-25) stay unpooled loss until their
+  producer declares the lead (workflow-service brief LEAD-STATES-1024-MEETING-WRITES); those declarations stale the days they move.
 - Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
   `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
   visit priced apart, a moved reach stales the day).
