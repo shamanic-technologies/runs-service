@@ -38,6 +38,7 @@ export const SUPPORT_FUNCTION_DESCRIPTIONS: Record<SupportFunction, string> = {
   product_feature: "a product feature or onboarding step (audience suggestions, split confirm...)",
   retired_product: "spend of a product no longer in the fleet",
   unattributed_production: "production work that belongs to no pipe and whose subject was never recorded (before campaigns existed): an unabsorbed period cost, its own line",
+  repeat_production: "work that redid what was already done (another service already produced that occurrence): abnormal loss, never support",
 };
 
 /** Runs one bulk mark may write; a wider selection is narrowed (422), never cut. */

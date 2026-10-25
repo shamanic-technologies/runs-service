@@ -967,6 +967,10 @@ stored produced-none sources agree) AND complete AND declarationsComplete (no un
   subject never recorded, e.g. Feb 2026 runs from before campaigns): its own line on the reconciliation (totals/days/services), never
   support, never undeclared, never spread; never inferred from a missing campaign. `declarationsComplete` = complete AND no undeclared AND
   no unknown provenance (never vacuous over missing days).
+- **Owner-stated repeat (migration 0080, owner 2026-10-25)**: mark kind `repeat_production` through the support-mark doors =
+  work its OWNER states redid what was already done (lead-service relationship-sweep re-judging relations crm-service already
+  identified). The day statement moves it from produced-none to ABNORMAL (`abnormalByReason.repeat_production`, 'abnormal' rows):
+  never support, never a second producer of the same occurrence, in no unit cost.
 - **services[] names who OWES the gap (migration 0077)**: `outcome_cost_days.owner_service_name` = the service of the run the
   spending run's walk ENDED on (top run, or the mark/anchor it stopped on); a chat-service call made for crm-service's people.build is
   crm-service's undeclared spend (was read as chat-service's, $15.45, 2026-10-25). Days stored before it are in daysMissing until

@@ -798,6 +798,15 @@ export interface CoverageDayRow {
 /** Support money per support function (absent function = 0). */
 export type SupportByFunction = Partial<Record<SupportFunction, Money>>;
 
+/** The mark kind its owner states on work that redid what was already done: booked abnormal (repeat_production), never support. */
+export const OWNER_REPEAT = "repeat_production";
+const minusMoney = (a: Money, b: Money): Money => ({
+  gross: new Decimal(a.gross).minus(b.gross).toFixed(10),
+  net: new Decimal(a.net).minus(b.net).toFixed(10),
+  vendor: new Decimal(a.vendor).minus(b.vendor).toFixed(10),
+  unpricedGross: new Decimal(a.unpricedGross).minus(b.unpricedGross).toFixed(10),
+});
+
 /** Why spend is abnormal loss (v5): a pipe acting on a lead past its target state, or a run re-buying the same lead. */
 export const ABNORMAL_REASONS = ["target_already_reached", "repeat_production"] as const;
 export type AbnormalReason = (typeof ABNORMAL_REASONS)[number];
@@ -1550,6 +1559,17 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   for (const r of row.abnormal as any[]) {
     orgs.get(r.org_id ?? "")!.abnormalByReason[r.reason as AbnormalReason] = money(r, "s");
   }
+  // OWNER-STATED repeat (mark kind `repeat_production`, owner 2026-10-25): work its owner
+  // states redid what was already done. Never support: it leaves produced-none for the
+  // ABNORMAL line (reason repeat_production), in no unit cost, never spread.
+  for (const o of orgs.values()) {
+    const m = o.supportByFunction[OWNER_REPEAT as SupportFunction];
+    if (!m) continue;
+    delete o.supportByFunction[OWNER_REPEAT as SupportFunction];
+    o.producedNone = minusMoney(o.producedNone, m);
+    o.abnormal = plus(o.abnormal, m);
+    o.abnormalByReason.repeat_production = plus(o.abnormalByReason.repeat_production ?? ZERO(), m);
+  }
   // Reuse charges of the day's consumptions (rule 5), on the consuming run's org.
   const consumptions = await resolveConsumptions(sql`
     SELECT id FROM run_outcomes
@@ -1602,7 +1622,13 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   });
   for (const r of row.produced_cost as any[]) outcomeCosts.push(blank("produced_cost", r));
   // 'none' rows: n = distinct spending runs (the reconciliation's undeclared run count).
-  for (const r of row.none_cost as any[]) outcomeCosts.push({ ...blank("none", r), n: fx(r.runs) });
+  for (const r of row.none_cost as any[]) {
+    outcomeCosts.push(
+      r.support_function === OWNER_REPEAT
+        ? { ...blank("abnormal", { ...r, support_function: null, abnormal_reason: "repeat_production" }), n: fx(r.runs) }
+        : { ...blank("none", r), n: fx(r.runs) },
+    );
+  }
   // v5: abnormal loss per reason and the parallel family, under the paying run's tags (n = distinct paying runs).
   for (const r of [...(row.abnormal_cost as any[]), ...(row.parallel_cost as any[])]) outcomeCosts.push({ ...blank(r.kind, r), n: fx(r.runs) });
   // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state.
@@ -1694,7 +1720,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
       coveredNet: fx(r.covered_net),
       supportByFunction: Object.fromEntries(
         (row.coverage_support as any[])
-          .filter((x) => x.service_name === r.service_name && x.task_name === r.task_name)
+          .filter((x) => x.service_name === r.service_name && x.task_name === r.task_name && x.kind !== OWNER_REPEAT)
           .map((x) => [x.kind, { gross: fx(x.gross), net: fx(x.net) }]),
       ),
     })),

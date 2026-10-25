@@ -399,6 +399,26 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect(stamp).toBeTruthy();
   });
 
+  it("work its owner states redid what was done is abnormal loss (repeat_production), never support nor undeclared", async () => {
+    const day = "2024-08-18";
+    const sweep = await run(day, "09:00", { serviceName: "lead-service", taskName: "relationship-sweep" });
+    await cost(sweep.id, "3", at(day, "09:01"));
+    expect(
+      (await request(app).post("/v1/platform-runs/support-marks/apply").set(getPlatformAuthHeaders({ serviceName: "lead-service" }))
+        .send({ kind: "repeat_production", reason: "re-judges relations crm-service already identified", markedBy: "t", runIds: [sweep.id] })).status,
+    ).toBe(200);
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals).toMatchObject({
+      spend: { grossCents: "3.0000000000" },
+      abnormalLoss: { grossCents: "3.0000000000" },
+      support: { grossCents: "0.0000000000" },
+      undeclared: { grossCents: "0.0000000000" },
+      differences: { grossCents: "0.0000000000" },
+    });
+    expect(r.balanced).toBe(true);
+  });
+
   it("refuses an unknown parameter", async () => {
     const res = await request(app).get(`/internal/outcome-costs/reconciliation?since=${DAY}&foo=1`).set(getInternalAuthHeaders());
     expect(res.status).toBe(400);
