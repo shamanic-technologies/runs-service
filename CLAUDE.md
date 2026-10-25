@@ -949,6 +949,10 @@ stored produced-none sources agree) AND complete AND declarationsComplete (no un
   subject never recorded, e.g. Feb 2026 runs from before campaigns): its own line on the reconciliation (totals/days/services), never
   support, never undeclared, never spread; never inferred from a missing campaign. `declarationsComplete` = complete AND no undeclared AND
   no unknown provenance (never vacuous over missing days).
+- **services[] names who OWES the gap (migration 0077)**: `outcome_cost_days.owner_service_name` = the service of the run the
+  spending run's walk ENDED on (top run, or the mark/anchor it stopped on); a chat-service call made for crm-service's people.build is
+  crm-service's undeclared spend (was read as chat-service's, $15.45, 2026-10-25). Days stored before it are in daysMissing until
+  recomputed (`cost_ledger_computed_days.owner_service`). The read runs in its own transaction, 120 s budget (30 s timed out at load 53).
 - Guard: `tests/integration/ledger-reconciliation.test.ts` (red if the campaign key is dropped from the pool).
 
 ## Subject equivalence — one occurrence, two subject spaces (migration 0073, SUBJECT-EQUIVALENCE-1024)

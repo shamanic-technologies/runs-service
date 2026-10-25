@@ -884,6 +884,14 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       WHERE NOT w.found AND w.parent_id IS NOT NULL AND w.depth < ${MAX_WALK_DEPTH}
     ),
     walked AS MATERIALIZED (SELECT * FROM walk),
+    -- Where each walk ENDED (the top run reached, or the mark / anchor it stopped
+    -- on): its service OWNS the spend's declaration. A chat-service call made for
+    -- crm-service's people.build is crm-service's gap, not chat-service's.
+    walk_top AS MATERIALIZED (
+      SELECT t.run_id, r.service_name AS owner_service
+      FROM (SELECT DISTINCT ON (run_id) run_id, cur_id FROM walked ORDER BY run_id, depth DESC) t
+      CROSS JOIN LATERAL (SELECT service_name FROM runs WHERE id = t.cur_id OFFSET 0) r
+    ),
     -- A walk that stopped on a support mark has no anchor: produced none.
     anchor_of AS MATERIALIZED (SELECT run_id, cur_id AS anchor_id FROM walked WHERE found AND ${hasProducedSql(sql`cur_id`)}),
     -- The walk stopped on a support mark: produced none BY DESIGN, named by its
@@ -996,22 +1004,23 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     ),
     none_cost AS (
       SELECT x.org, x.cost_org, x.brand_ids, x.campaign_id, x.workflow_slug, x.feature_slug, x.support_function,
-             x.run_start_day, x.audience_id, x.service_name, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
+             x.run_start_day, x.audience_id, x.service_name, x.owner_service, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
       FROM (
         SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
-               sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name, c.run_id,
+               sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name, wt.owner_service, c.run_id,
                c.gross, c.net, c.vendor, c.unpriced
         FROM costed c
         LEFT JOIN support_of sp ON sp.run_id = c.run_id
+        LEFT JOIN walk_top wt ON wt.run_id = c.run_id
         WHERE NOT EXISTS (SELECT 1 FROM carried k WHERE k.run_id = c.run_id AND k.org_key IS NOT DISTINCT FROM c.org_key)
         UNION ALL
         -- v5 unpooled state loss: under the paying (anchor) run's tags; it carries a workflow, so it reads as unpooled loss.
         SELECT t.a_org::text, u.org_key, t.a_brands, t.a_campaign, t.a_workflow, t.a_feature, NULL::text, t.a_start_day,
-               t.a_audience, t.a_service, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
+               t.a_audience, t.a_service, t.a_service, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
         FROM state_unpooled u JOIN atags t ON t.anchor_id = u.anchor_id
         WHERE u.is_primary
       ) x
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
     ),
     -- v5: abnormal loss (in no unit cost) and the other family's view of the routed spend, under the paying run's tags.
     abnormal_cost AS (
@@ -1100,7 +1109,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       COALESCE((SELECT json_agg(json_build_object(
         'org', n.org, 'cost_org', n.cost_org, 'brand_ids', n.brand_ids, 'campaign_id', n.campaign_id,
         'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug, 'support_function', n.support_function, 'run_start_day', n.run_start_day,
-        'audience_id', n.audience_id, 'service_name', n.service_name, 'runs', n.runs,
+        'audience_id', n.audience_id, 'service_name', n.service_name, 'owner_service_name', n.owner_service, 'runs', n.runs,
         'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'org_id', l.org_key, 'pool_key', l.pool_key, 'workflow_slug', l.workflow_slug, 'campaign_id', l.campaign_id,
@@ -1377,6 +1386,8 @@ export interface OutcomeCostRow {
   tags: RunTags;
   /** Service of the run whose tags the row carries (declaring / consuming / spending run). */
   serviceName: string | null;
+  /** kind 'none' only: the service of the run the spending run's walk ENDED on (its top run, or the mark it stopped on): who owes the declaration. */
+  ownerServiceName: string | null;
   /** consumed only: the run that produced the consumed occurrence (null otherwise, and on unknown provenance). */
   sourceOrganizationId: string | null;
   sourceTags: RunTags | null;
@@ -1470,6 +1481,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     abnormalReason: r.abnormal_reason ?? null,
     tags: tagsOf(r),
     serviceName: r.service_name ?? null,
+    ownerServiceName: r.owner_service_name ?? null,
     sourceOrganizationId: null,
     sourceTags: null,
     runStartDay: r.run_start_day ?? null,
@@ -1619,11 +1631,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
           gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
           source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason
+          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
                x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar
+               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -1635,13 +1647,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
             sf: o.supportFunction,
             rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
-            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason,
+            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
                         rg numeric, rn numeric, rv numeric, rup numeric,
                         sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                        aud text, saud text, svc text, ar text)
+                        aud text, saud text, svc text, ar text, osvc text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -1687,9 +1699,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, stale = false
     `);
   });
 }
@@ -1768,7 +1780,7 @@ export async function firstLedgerDay(today: string): Promise<string> {
 }
 
 /** The columns a day must be stored with under the current version (else it is recomputed). */
-const CURRENT_DAY_SQL = sql`outcome_costs AND consumed_sources AND support_split AND start_days`;
+const CURRENT_DAY_SQL = sql`outcome_costs AND consumed_sources AND support_split AND start_days AND owner_service`;
 
 /**
  * Stored days whose figures predate a fact recorded after them, so they read
