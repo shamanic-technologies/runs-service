@@ -948,6 +948,12 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   interested leads it took + its own follow-ups). A DECLARED occurrence of a state key (lead-service `outcome-recording` meeting_booked)
   is evidence: never a unit in produced_count, its consumptions dropped. Ledger money unchanged: only outcome-costs lists a day stored
   without the stamp in daysMissing.
+- **A pipe takes in the lower state of EVERY lead it works on (migration 0082, `state_inputs`; owner: « meeting = 100 interested x
+  $148 + $500 of follow-ups, / 10 »)**: a consumption of a lead-service subject by a run whose pipe targets a state counts, as consuming
+  outcome, the next state that lead had not reached (null = abnormal) and, as consumed outcome, the state the consumed step reaches
+  (conversation -> lead_interested), ONCE per lead x consuming state (a later consumption by a pipe aiming at the same state is dropped);
+  the 0078 ladder row of a reach is kept only when no such pipe took that lead's lower state in. So the leads that never booked feed the
+  meeting price as transferred-in normal loss.
 - **A run that kept nothing still acts on a lead (`cons_of`)**: a cost row with no anchor and no mark whose walk reaches a run of a
   pipe with a state target that declared CONSUMING a lead-service subject (the pipe's from-step: a "not now" follow-up, a cap
   refusal) is routed like a production share, split over the leads that run consumed (`via_consumption`): the meeting pipe's

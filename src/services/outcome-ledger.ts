@@ -726,23 +726,74 @@ const stateKeysOf = (inputs: AllocationInputs) => [...new Set(inputs.stepStates.
  * the lower state's unit cost by the reader's rollup (rule 4), never a per-unit figure here.
  */
 async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) {
-  const states = inputs.stepStates.filter((s) => s.stepKey === s.state);
   return (await tx.execute(sql`
-    WITH st AS (
-      SELECT * FROM jsonb_to_recordset(${JSON.stringify(states.map((s) => ({ state: s.state, family: s.family, rank: s.rank })))}::jsonb)
-        AS x(state text, family text, rank integer)
-    )
+    WITH ${allocationInputsCtes(inputs)}
     SELECT r.state, lo.state AS lower, r.organization_id::text AS org, r.brand_id,
            to_char((l.reached_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS lower_day, COUNT(*)::text AS n
     FROM lead_state_reaches r
-    JOIN st lo ON lo.family = r.family AND lo.rank = r.rank - 1
+    JOIN st_states lo ON lo.family = r.family AND lo.rank = r.rank - 1
     LEFT JOIN lead_state_reaches l
       ON l.lead_id = r.lead_id AND l.brand_id = r.brand_id AND l.state = lo.state AND l.removed_at IS NULL
     WHERE r.removed_at IS NULL AND r.rank > 1
       AND r.reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND r.reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      -- A pipe aiming at this state (or higher) that took this lead's lower state in is where that state was
+      -- transferred (stateInputRoutes, counted on its own day): never counted twice.
+      AND NOT EXISTS (
+        SELECT 1 FROM run_outcomes co
+        CROSS JOIN LATERAL (SELECT workflow_slug, feature_slug, brand_ids FROM runs WHERE id = co.run_id OFFSET 0) cr
+        JOIN pt ON pt.workflow_slug = cr.workflow_slug AND pt.feature_slug = cr.feature_slug
+               AND pt.family = r.family AND pt.rank >= r.rank
+        WHERE co.direction = 'consumed' AND co.subject_service = 'lead-service' AND co.subject_id = r.lead_id
+          AND EXISTS (SELECT 1 FROM st x WHERE x.step_key = co.outcome_key AND x.state = lo.state)
+          AND r.brand_id = ANY(cr.brand_ids) AND co.declared_at <= r.reached_at
+      )
     GROUP BY 1, 2, 3, 4, 5
   `)) as Array<{ state: string; lower: string; org: string | null; brand_id: string; lower_day: string | null; n: string }>;
+}
+
+/**
+ * Rule 4 (LEAD-STATES-1024, owner: « meeting = 100 interested x $148 + $500 of follow-ups, / 10 »): a pipe
+ * aiming at a state takes in the LOWER state of every lead it works on, booked or not. Per consumption of a
+ * lead-service subject by a run whose pipe targets a state: `dest` = the next state that lead had not reached
+ * at the run's start (null = abnormal: past the target), `consumedState` = the state the consumed step reaches
+ * (conversation -> lead_interested), null for a production input (message_written). A lead's lower state is
+ * transferred once per consuming state: a later consumption of it by a pipe aiming at the same state is not counted again.
+ */
+async function stateInputRoutes(tx: Exec, ids: string[], inputs: AllocationInputs) {
+  const out = new Map<string, { dest: string | null; consumedState: string | null; first: boolean }>();
+  if (ids.length === 0 || inputs.pipeTargets.length === 0) return out;
+  const rows = (await tx.execute(sql`
+    WITH ${allocationInputsCtes(inputs)},
+    c AS MATERIALIZED (
+      SELECT o.id, o.outcome_key, o.subject_id, o.declared_at, r.workflow_slug, r.feature_slug, r.brand_ids, r.started_at
+      FROM run_outcomes o
+      CROSS JOIN LATERAL (SELECT workflow_slug, feature_slug, brand_ids, started_at FROM runs WHERE id = o.run_id OFFSET 0) r
+      WHERE o.id = ANY(${`{${ids.join(",")}}`}::uuid[]) AND o.subject_service = 'lead-service'
+    )
+    SELECT c.id, CASE WHEN pt.rank <= rr.reached_rank THEN NULL ELSE ns.state END AS dest, cs.state AS consumed_state,
+           -- The lead's state already taken in by an earlier run of a pipe aiming at the same state, at one of these brands?
+           NOT EXISTS (
+             SELECT 1 FROM run_outcomes e
+             JOIN st es ON es.step_key = e.outcome_key AND es.state = cs.state
+             CROSS JOIN LATERAL (SELECT workflow_slug, feature_slug, brand_ids FROM runs WHERE id = e.run_id OFFSET 0) er
+             JOIN pt ept ON ept.workflow_slug = er.workflow_slug AND ept.feature_slug = er.feature_slug AND ept.state = pt.state
+             WHERE e.direction = 'consumed' AND e.subject_service = 'lead-service' AND e.subject_id = c.subject_id
+               AND er.brand_ids && c.brand_ids
+               AND (e.declared_at < c.declared_at OR (e.declared_at = c.declared_at AND e.id < c.id))
+           ) AS first
+    FROM c
+    JOIN pt ON pt.workflow_slug = c.workflow_slug AND pt.feature_slug = c.feature_slug
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(MAX(l.rank), 0) AS reached_rank FROM lead_state_reaches l
+      WHERE l.lead_id = c.subject_id AND l.brand_id = ANY(c.brand_ids) AND l.family = pt.family
+        AND l.removed_at IS NULL AND l.reached_at <= c.started_at
+    ) rr
+    LEFT JOIN st_states ns ON ns.family = pt.family AND ns.rank = rr.reached_rank + 1
+    LEFT JOIN st cs ON cs.step_key = c.outcome_key
+  `)) as any[];
+  for (const r of rows) out.set(r.id, { dest: r.dest ?? null, consumedState: r.consumed_state ?? null, first: r.first === true });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,22 +1727,27 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
   }
   const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId), inputs, tx);
+  const stateRoutes = await stateInputRoutes(tx, consumptions.map((c) => c.id), inputs);
   const consumed = new Map<string, OutcomeCostRow>();
   for (const c of consumptions) {
     const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
+    const route = stateRoutes.get(c.id);
+    // A lead's lower state enters a pipe once: a reuse of it by the same pipe is not another input.
+    if (route?.consumedState && !route.first) continue;
     const all = consumingKeys.get(c.runId) ?? [];
     // A declared state event's inputs are not the state's (the lower state is: stateLadderRows).
-    const keys = all.filter((k) => !k.stateEvent);
-    if (all.length > 0 && keys.length === 0) continue;
+    const keys = route ? [{ outcomeKey: route.dest, quantity: "1", stateEvent: false }] : all.filter((k) => !k.stateEvent);
+    if (!route && all.length > 0 && keys.length === 0) continue;
+    const consumedKey = route?.consumedState ?? c.outcomeKey;
     for (const part of splitConsumption(keys, std)) {
       const k = JSON.stringify([
-        part.outcomeKey, c.outcomeKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug,
+        part.outcomeKey, consumedKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug,
         c.tags.audienceId, c.serviceName, c.sourceOrgId, c.sourceTags, c.runStartDay, c.sourceDay, c.sourceRunStartDay,
       ]);
       if (!consumed.has(k)) {
         consumed.set(k, {
           ...blank("consumed", { outcome_key: part.outcomeKey, org: c.orgId, cost_org: c.orgId, ...{ brand_ids: c.tags.brandIds, campaign_id: c.tags.campaignId, workflow_slug: c.tags.workflowSlug, feature_slug: c.tags.featureSlug, audience_id: c.tags.audienceId, service_name: c.serviceName, run_start_day: c.runStartDay } }),
-          consumedOutcomeKey: c.outcomeKey,
+          consumedOutcomeKey: consumedKey,
           sourceOrganizationId: c.sourceOrgId,
           sourceTags: c.sourceTags,
           sourceDay: c.sourceDay,
@@ -1874,9 +1930,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, stale = false
     `);
   });
 }
@@ -2147,7 +2203,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -2166,7 +2222,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const noLossShares = new Set(rows.filter((r) => !r.loss_occurrences || !r.anchor_spend).map((r) => r.day as string));
   for (const day of noLossShares) out.add(day);
   // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
-  const noLadder = new Set(rows.filter((r) => !r.state_ladder).map((r) => r.day as string));
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs).map((r) => r.day as string));
   for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers
