@@ -173,6 +173,38 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     for (const x of occ.body.occurrences) expect(money(x.cost)).toBe("0.0000000000");
   });
 
+  it("a booked meeting consumes the lead's interest (the lower state), never the event lead-service declared", async () => {
+    const DAY2 = "2024-08-14";
+    const at2 = (h: string) => new Date(`${DAY2}T${h}:00Z`);
+    // L5 says yes on DAY2 09:00 and books at 15:00; lead-service also DECLARED the booking as an event
+    // consuming the positive reply (the pre-v5 shape).
+    setLeadStatesSourceForTests([
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L5", states: {
+        lead_interested: { reachedAt: at2("09:00").toISOString(), basis: "positive_reply", impliedBy: null },
+        meeting_booked: { reachedAt: at2("15:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+      } },
+    ]);
+    await syncLeadStates(TEST_STEP_STATES);
+    const rec = await insertTestRun({ organizationId: ORG, serviceName: "lead-service", taskName: "outcome-recording", brandIds: [BRAND], status: "completed", startedAt: at2("15:05") });
+    const res = await request(app)
+      .post("/v1/platform-runs/outcomes/batch")
+      .set(getPlatformAuthHeaders({ serviceName: "lead-service" }))
+      .send({ runs: [{ runId: rec.id, occurredAt: "run_started_at",
+        produced: [{ outcomeKey: "meeting_booked", subjectService: "lead-service", subjectId: "L5" }],
+        consumed: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: "L5" }] }] });
+    expect(res.status).toBe(201);
+    const d = await computeLedgerDay(DAY2, VERSIONS as any, INPUTS);
+    const booked = d.outcomeCosts.filter((r) => r.outcomeKey === "meeting_booked" && r.organizationId === ORG);
+    // One unit: lead-service's first reach, the declared event is not counted again.
+    expect(booked.filter((r) => r.kind === "produced_count").reduce((n, r) => n + Number(r.n), 0)).toBe(1);
+    const inputs = booked.filter((r) => r.kind === "consumed");
+    expect(inputs.map((r) => [r.consumedOutcomeKey, Number(r.n)])).toEqual([["lead_interested", 1]]);
+    expect(inputs[0].sourceDay).toBe(DAY2);
+  });
+
   it("a reach lead-service moves after a day was computed makes the day STALE until recomputed", async () => {
     await storeLedgerDay(await computeLedgerDay(DAY, VERSIONS as any, INPUTS));
     expect(await daysToCompute(new Date(`2024-08-17T12:00:00Z`), DAY)).not.toContain(DAY);
@@ -184,7 +216,7 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
       { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
     ]);
     const synced = await syncLeadStates(TEST_STEP_STATES);
-    expect(synced.changed).toBe(1);
+    expect(synced.changed).toBe(1); // L2 only (L5 was synced by the previous test)
     expect(await daysToCompute(new Date(`2024-08-17T12:00:00Z`), DAY)).toContain(DAY);
     const d = await computeLedgerDay(DAY, VERSIONS as any, INPUTS);
     const units = d.outcomeCosts.filter((r) => r.kind === "produced_cost" && r.outcomeKey === "lead_interested");

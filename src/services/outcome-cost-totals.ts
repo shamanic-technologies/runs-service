@@ -330,6 +330,8 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
   const computed = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs AND day BETWEEN ${since}::date AND ${until}::date
+      -- a day stored before the state ladder (0078) holds the old state inputs: missing until recomputed
+      AND state_ladder
       AND (consumed_sources OR NOT ${sourced})
       AND (start_days OR NOT ${startDays})
   `)) as any[];

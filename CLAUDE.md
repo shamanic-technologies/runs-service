@@ -958,6 +958,12 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   `abnormal` (dimensions + `abnormalReason`) and `parallel`. produced_count rows for states = reaches dated that UTC day.
 - **Per-occurrence read**: a re-routed occurrence reads cost $0 (its share is on the state, stored days only); a consumption by
   a re-routed run counts under the state it rides (`consumingOutcomes`), null when abnormal.
+- **State inputs = the lower state (migration 0078, `state_ladder`)**: each first reach of a state ranked r > 1 CONSUMES that lead x
+  brand's reach ranked r - 1 ('consumed' row, no money: priced at the lower state's unit cost by the reader's rule-4 rollup; meeting =
+  interested leads it took + its own follow-ups). A DECLARED occurrence of a state key (lead-service `outcome-recording` meeting_booked)
+  is evidence: never a unit in produced_count, its consumptions dropped. Ledger money unchanged: only outcome-costs lists a day stored
+  without the stamp in daysMissing. A pipe's runs that declare no lead (ai-meeting-booking chat-service writes, $34 / 439 runs) cannot
+  be tied to a lead: unpooled loss of the pipe until their producer declares per lead.
 - Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
   `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
   visit priced apart, a moved reach stales the day).

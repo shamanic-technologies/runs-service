@@ -714,6 +714,36 @@ function occurrenceRoutesSql(occCte: string): SQL {
     )`;
 }
 
+/** The lead STATE keys (catalogue steps that are their own state). */
+const stateKeysOf = (inputs: AllocationInputs) => [...new Set(inputs.stepStates.filter((s) => s.stepKey === s.state).map((s) => s.state))];
+
+/**
+ * Rule 4 inputs of the lead states (LEAD-STATES-1024, owner 2026-10-24: « a meeting costs the interested
+ * leads it took + the follow-ups after the yes »): each first reach on `day` of a state ranked r > 1 in its
+ * family CONSUMES that lead x brand's reach of the state ranked r - 1 (lead-service dates every lower
+ * state, a booking with no yes included). Stored as 'consumed' rows with no money: the input is priced at
+ * the lower state's unit cost by the reader's rollup (rule 4), never a per-unit figure here.
+ */
+async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) {
+  const states = inputs.stepStates.filter((s) => s.stepKey === s.state);
+  return (await tx.execute(sql`
+    WITH st AS (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(states.map((s) => ({ state: s.state, family: s.family, rank: s.rank })))}::jsonb)
+        AS x(state text, family text, rank integer)
+    )
+    SELECT r.state, lo.state AS lower, r.organization_id::text AS org, r.brand_id,
+           to_char((l.reached_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS lower_day, COUNT(*)::text AS n
+    FROM lead_state_reaches r
+    JOIN st lo ON lo.family = r.family AND lo.rank = r.rank - 1
+    LEFT JOIN lead_state_reaches l
+      ON l.lead_id = r.lead_id AND l.brand_id = r.brand_id AND l.state = lo.state AND l.removed_at IS NULL
+    WHERE r.removed_at IS NULL AND r.rank > 1
+      AND r.reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND r.reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3, 4, 5
+  `)) as Array<{ state: string; lower: string; org: string | null; brand_id: string; lower_day: string | null; n: string }>;
+}
+
 // ---------------------------------------------------------------------------
 // One UTC day: ledger vs spread vs produced none, and coverage
 // ---------------------------------------------------------------------------
@@ -1294,8 +1324,12 @@ const round10 = (x: Decimal.Value) => new D(x).toDecimalPlaces(10, Decimal.ROUND
  * the state), or under null when that cost is abnormal (its inputs ride no unit).
  * `inputs` null = the declared keys as stated (a caller asking only WHETHER a run rides an outcome).
  */
-export async function anchorKeysOf(runIds: string[], inputs: AllocationInputs | null, exec: Exec = statsDb): Promise<Map<string, Array<{ outcomeKey: string | null; quantity: string }>>> {
-  const out = new Map<string, Array<{ outcomeKey: string | null; quantity: string }>>();
+export async function anchorKeysOf(
+  runIds: string[],
+  inputs: AllocationInputs | null,
+  exec: Exec = statsDb,
+): Promise<Map<string, Array<{ outcomeKey: string | null; quantity: string; stateEvent: boolean }>>> {
+  const out = new Map<string, Array<{ outcomeKey: string | null; quantity: string; stateEvent: boolean }>>();
   if (runIds.length === 0) return out;
   const ids = [...new Set(runIds)];
   for (const id of ids) out.set(id, []);
@@ -1318,12 +1352,15 @@ export async function anchorKeysOf(runIds: string[], inputs: AllocationInputs | 
       WHERE w.found
     ),
     ${inputs ? occurrenceRoutesSql("anchored") : sql`oroute AS (SELECT occurrence_id, outcome_key AS dest_key FROM anchored)`}
-    SELECT a.run_id, r.dest_key AS outcome_key, SUM(a.quantity)::text AS quantity
+    SELECT a.run_id, r.dest_key AS outcome_key, SUM(a.quantity)::text AS quantity,
+           -- A declared occurrence of a lead STATE key (lead-service recording a booking) is evidence, not the unit:
+           -- the state's inputs are the lower state (stateLadderRows), so its consumptions are dropped.
+           (r.dest_key = a.outcome_key AND EXISTS (SELECT 1 FROM st_states s WHERE s.state = a.outcome_key)) AS state_event
     FROM anchored a JOIN oroute r ON r.occurrence_id = a.occurrence_id
-    GROUP BY a.run_id, r.dest_key
-    ORDER BY a.run_id, r.dest_key NULLS LAST
+    GROUP BY a.run_id, r.dest_key, a.outcome_key
+    ORDER BY a.run_id, r.dest_key NULLS LAST, a.outcome_key
   `)) as any[];
-  for (const r of rows) out.get(r.run_id)!.push({ outcomeKey: r.outcome_key, quantity: r.quantity });
+  for (const r of rows) out.get(r.run_id)!.push({ outcomeKey: r.outcome_key, quantity: r.quantity, stateEvent: r.state_event === true });
   return out;
 }
 
@@ -1523,6 +1560,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     WHERE o.direction = 'produced'
       AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
+      AND NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
   `)) as any[];
   for (const r of declared) {
@@ -1532,7 +1571,11 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   const consumed = new Map<string, OutcomeCostRow>();
   for (const c of consumptions) {
     const std = c.producerId ? standard.get(c.producerId) ?? ZERO() : null;
-    for (const part of splitConsumption(consumingKeys.get(c.runId) ?? [], std)) {
+    const all = consumingKeys.get(c.runId) ?? [];
+    // A declared state event's inputs are not the state's (the lower state is: stateLadderRows).
+    const keys = all.filter((k) => !k.stateEvent);
+    if (all.length > 0 && keys.length === 0) continue;
+    for (const part of splitConsumption(keys, std)) {
       const k = JSON.stringify([
         part.outcomeKey, c.outcomeKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug,
         c.tags.audienceId, c.serviceName, c.sourceOrgId, c.sourceTags, c.runStartDay, c.sourceDay, c.sourceRunStartDay,
@@ -1559,6 +1602,15 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     }
   }
   outcomeCosts.push(...consumed.values());
+  outcomeCosts.push(...(await stateLadderRows(tx, day, inputs)).map((r) => ({
+    ...blank("consumed", { outcome_key: r.state, org: r.org, cost_org: r.org, brand_ids: [r.brand_id] }),
+    consumedOutcomeKey: r.lower,
+    sourceOrganizationId: r.org,
+    sourceTags: { brandIds: [r.brand_id], campaignId: null, workflowSlug: null, featureSlug: null, audienceId: null },
+    sourceDay: r.lower_day,
+    n: fx(r.n),
+    money: ZERO(),
+  })));
   return {
     day,
     computedAt,
@@ -1699,9 +1751,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, stale = false
     `);
   });
 }
@@ -1972,7 +2024,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, state_ladder FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -1989,6 +2041,9 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   // complete for every ledger read, only the occurrence read stays live on them.
   const noLossShares = new Set(rows.filter((r) => !r.loss_occurrences).map((r) => r.day as string));
   for (const day of noLossShares) out.add(day);
+  // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder).map((r) => r.day as string));
+  for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers
   // backfill, the newest days stay stale on every tick, and ranked by date alone
@@ -1996,7 +2051,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   // 8 days stored out of 265).
   const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(today, -i)));
   const staleSet = new Set(stale);
-  const rank = (d: string) => (recent.has(d) ? 0 : !computed.has(d) ? 1 : staleSet.has(d) || !noLossShares.has(d) ? 2 : 3);
+  const rank = (d: string) => (recent.has(d) ? 0 : !computed.has(d) ? 1 : staleSet.has(d) || noLadder.has(d) || !noLossShares.has(d) ? 2 : 3);
   return [...out].sort((a, b) => rank(a) - rank(b) || (a < b ? 1 : -1));
 }
 
