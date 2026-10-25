@@ -171,7 +171,7 @@ async function readReconciliationIn(tx: { execute: (q: any) => Promise<unknown> 
   const noneRows = (await tx.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, owner_service_name AS service_name,
            CASE WHEN support_function = ${UNATTRIBUTED} THEN 'unattributed' WHEN support_function IS NOT NULL THEN 'support'
-                WHEN workflow_slug IS NOT NULL THEN 'unpooled' ELSE 'undeclared' END AS part,
+                WHEN workflow_slug IS NOT NULL OR loss_line THEN 'unpooled' ELSE 'undeclared' END AS part,
            SUM(gross)::text AS gross, SUM(net)::text AS net, SUM(vendor)::text AS vendor, SUM(unpriced_gross)::text AS unpriced, SUM(n)::text AS runs
     FROM outcome_cost_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND kind = 'none' AND day BETWEEN ${since}::date AND ${until}::date
