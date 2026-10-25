@@ -267,4 +267,42 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     expect(booked.reduce((x, r) => x.plus(r.money.gross), new Decimal(0)).toFixed(10)).toBe("4.0000000000");
     expect(booked[0].tags.workflowSlug).toBe(MEET);
   });
+
+  it("a meeting takes in the interest of EVERY lead its pipe worked on, booked or not, once per lead (rule 4)", async () => {
+    const DAY4 = "2024-08-18";
+    const at4 = (h: string) => new Date(`${DAY4}T${h}:00Z`);
+    setLeadStatesSourceForTests([
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L7", states: {
+        lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null },
+        meeting_booked: { reachedAt: at4("20:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+      } },
+      { orgId: ORG, brandId: BRAND, leadId: "L8", states: { lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+    ]);
+    await syncLeadStates(TEST_STEP_STATES);
+    // The meeting pipe follows up L7 once and L8 twice (each run consumes the lead's reply, pays $3); only L7 books.
+    const followUp = async (hour: string, lead: string) => {
+      const wf = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "execute-workflow", brandIds: [BRAND], campaignId: "cmp-marie",
+        workflowSlug: MEET, featureSlug: "ai-meeting-booking", status: "completed", startedAt: at4(hour) });
+      await insertTestRunCost({ runId: wf.id, costName: "tok", quantity: "0.6", unitCostInUsdCents: "5", totalCostInUsdCents: "3.0000000000", createdAt: new Date(at4(hour).getTime() + 60_000) });
+      return { runId: wf.id, occurredAt: "run_started_at", consumed: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: lead }] };
+    };
+    const res = await request(app)
+      .post("/v1/platform-runs/outcomes/batch")
+      .set(getPlatformAuthHeaders({ serviceName: "workflow" }))
+      .send({ runs: [await followUp("10:00", "L7"), await followUp("10:00", "L8"), await followUp("12:00", "L8")] });
+    expect(res.status).toBe(201);
+    const d = await computeLedgerDay(DAY4, VERSIONS as any, INPUTS);
+    // Own production: the three follow-ups ride L7's booking (L8's are normal loss of the same pipe that day).
+    const own = d.outcomeCosts.filter((r) => r.kind === "produced_cost" && r.outcomeKey === "meeting_booked");
+    expect(own.reduce((x, r) => x.plus(r.money.gross), new Decimal(0)).toFixed(10)).toBe("9.0000000000");
+    // Inputs: the interest of the two leads worked on, once each (L8's second follow-up is not a second input); no ladder twin for L7.
+    const inputs = d.outcomeCosts.filter((r) => r.kind === "consumed" && r.outcomeKey === "meeting_booked");
+    expect(inputs.every((r) => r.consumedOutcomeKey === "lead_interested")).toBe(true);
+    expect(inputs.reduce((n, r) => n + Number(r.n), 0)).toBe(2);
+    expect(d.outcomeCosts.filter((r) => r.kind === "produced_count" && r.outcomeKey === "meeting_booked").reduce((n, r) => n + Number(r.n), 0)).toBe(1);
+  });
 });
