@@ -886,6 +886,14 @@ concept, a value-based joint-cost split.
   live (one runs PK probe per produced occurrence of the day: 64k probes for 150 runs, 35 s at load ~50, a 500 on the 30 s timeout,
   2026-10-24) and recomputed by the refresher AFTER every missing / stale day; the flag is not part of day completeness, so no other
   read moves. Guard: `tests/integration/ledger-reconciliation.test.ts` (v4 test: stored == live body).
+- **Anchor spend stored per day (migration 0080, OCC-READ-ANCHOR-SPEND-1025)**: the day statement also stores each anchor's
+  spend per cost org (its `g`: `cost_anchor_spend_days`, flag `cost_ledger_computed_days.anchor_spend`). `listOccurrences` passes
+  `storedSpend`: an anchor whose EVERY UTC day from its start to today is flagged, each computed after the anchor started AND
+  declared its first produced occurrence, is priced from those rows and NEVER walked (a newsletter with 18,250 children walked
+  > 30 s: every read whose consumption resolved to one of its sends 500'd, 2026-10-25); any other anchor is walked live. Served
+  as of the day's last computation (≤ one refresher tick), like the loss shares. The refresher's own `standardCostsOf` stays
+  live. Unflagged days recompute last. Guard: `tests/integration/occurrence-anchor-spend.test.ts` (stored == walked body, a
+  stored anchor is not walked, flag off / late anchor = live).
 - **Standard cost on reuse** (owner 2026-10-23): a consumption resolves to the latest produced occurrence of the same
   (key, subject) declared at or before it (else the earliest later), among those declared before the end of the
   consumption's UTC day. The first consumption is paid by the spend; every later one is charged the same production
