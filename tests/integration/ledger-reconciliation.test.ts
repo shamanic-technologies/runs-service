@@ -27,7 +27,7 @@ vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
 const VERSIONS = [
   { costName: "tok", provider: "acme", servedFrom: "2024-01-01T00:00:00Z", billedUnitCostInUsdCents: "5", vendorUnitCostInUsdCents: "1" },
 ];
-const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified", "email_checked", "email_found"]);
+const CATALOGUE = new Set(["lead_found", "message_sent", "conversation", "lead_identified", "email_checked", "email_found", "audience_built"]);
 
 // Days of their own: no other test file writes spend on them (the reconciliation is fleet-wide).
 const DAY = "2024-08-05";
@@ -106,7 +106,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     await refresh(DAY);
 
     const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${DAY}&until=${DAY}`).set(getInternalAuthHeaders());
-    expect(check.body.allocationVersion).toBe(5);
+    expect(check.body.allocationVersion).toBe(6);
     expect(check.body.balanced).toBe(true);
     const row = check.body.rows.find((r: any) => r.organizationId === ORG);
     expect(row.ledger.grossCents).toBe("16.0000000000");
@@ -173,7 +173,7 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
 
     // The refresher's sweep flags it and moves its window past the backfill: still stale (by the flag).
     expect(await daysToCompute(new Date("2024-08-20T12:00:00Z"), DAY2, true)).toContain(DAY2);
-    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 5`)) as any[];
+    const [flag] = (await db.execute(sql`SELECT stale FROM cost_ledger_computed_days WHERE day = ${DAY2}::date AND allocation_version = 6`)) as any[];
     expect(flag.stale).toBe(true);
     expect(await recon(DAY2, DAY2)).toMatchObject({ complete: false, daysStale: [DAY2] });
 
@@ -343,6 +343,27 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect(r.totals.undeclared.grossCents).toBe("3.0000000000");
     expect(r.services.map((x: any) => x.serviceName)).toEqual(["crm-service"]);
     expect(r.services[0]).toMatchObject({ undeclaredRuns: 1, undeclared: { grossCents: "3.0000000000" } });
+  });
+
+  it("v6: a no-workflow child call that kept nothing is loss of the run its walk ENDED on, never of its own task", async () => {
+    const day = "2024-08-14";
+    const refill = (hour: string) => run(day, hour, { serviceName: "human-service", taskName: "audience-refill" });
+    const kept = await refill("09:00");
+    await cost(kept.id, "2", at(day, "09:01"));
+    const empty = await refill("10:00"); // built no list; its spend sits on a chat child
+    const call = await run(day, "10:01", { serviceName: "chat-service", taskName: "complete", parentRunId: empty.id });
+    await cost(call.id, "5", at(day, "10:02"));
+    expect((await declare("human-service", [
+      { runId: kept.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "AUD-1" }] },
+    ])).status).toBe(201);
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals).toMatchObject({
+      spend: { grossCents: "7.0000000000" },
+      declaredProduction: { grossCents: "2.0000000000" },
+      normalLoss: { grossCents: "5.0000000000" },
+      undeclared: { grossCents: "0.0000000000" },
+    });
   });
 
   it("refuses an unknown parameter", async () => {
