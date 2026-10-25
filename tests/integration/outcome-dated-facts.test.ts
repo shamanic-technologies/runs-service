@@ -71,7 +71,7 @@ const bookedCount = async (until: string) => {
     .get(`/internal/stats/outcome-costs?orgId=${ORG}&since=${addDays(TODAY, -60)}&until=${until}&groupBy=outcomeKey`)
     .set(getInternalAuthHeaders());
   expect(res.status).toBe(200);
-  return res.body.produced.find((g: any) => g.dimensions.outcomeKey === "meeting_booked")?.occurrences ?? 0;
+  return res.body.produced.find((g: any) => g.dimensions.outcomeKey === "booking_call")?.occurrences ?? 0;
 };
 
 describe("Recorded past facts: a spend-free run dates an occurrence before its own start", () => {
@@ -98,7 +98,7 @@ describe("Recorded past facts: a spend-free run dates an occurrence before its o
   it("AC 1: a recording run holds an occurrence dated on a past day, owner only; outcome-costs as of a past day counts it; the run then takes no cost and no child", async () => {
     const run = await recordingRun();
     const at = `${PAST}T10:00:00.000Z`;
-    const body = { occurredAt: at, produced: [lead("meeting_booked", "M1")] };
+    const body = { occurredAt: at, produced: [lead("booking_call", "M1")] };
     // Not the run's service: refused, nothing written.
     expect((await declare(run.id, body)).status).toBe(403);
     expect((await declare(run.id, body, "instantly-service")).status).toBe(403);
@@ -125,7 +125,7 @@ describe("Recorded past facts: a spend-free run dates an occurrence before its o
 
   it("AC 2: an occurrence recorded on time on a recording run moves to its own day as the SAME occurrence; each occurrence gets its own time; the count never changes", async () => {
     const run = await recordingRun();
-    const today = await declare(run.id, { produced: [lead("meeting_booked", "M2"), lead("meeting_booked", "M3")] });
+    const today = await declare(run.id, { produced: [lead("booking_call", "M2"), lead("booking_call", "M3")] });
     expect(today.status).toBe(201);
     const before = await occurrencesOf(run.id);
     await refresh(PAST, PAST2, CUT, TODAY);
@@ -133,13 +133,13 @@ describe("Recorded past facts: a spend-free run dates an occurrence before its o
     expect(await bookedCount(CUT)).toBe(1); // only M1 of the previous test
 
     // One batch call per time: only the listed occurrence moves.
-    const m2 = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST}T09:00:00.000Z`, redate: true, produced: [lead("meeting_booked", "M2")] }] });
+    const m2 = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST}T09:00:00.000Z`, redate: true, produced: [lead("booking_call", "M2")] }] });
     expect(m2.status).toBe(201);
     expect(m2.body).toMatchObject({ redatedCount: 1, recordedCount: 0 });
-    const m3 = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST2}T15:00:00.000Z`, redate: true, produced: [lead("meeting_booked", "M3")] }] });
+    const m3 = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST2}T15:00:00.000Z`, redate: true, produced: [lead("booking_call", "M3")] }] });
     expect(m3.body).toMatchObject({ redatedCount: 1, recordedCount: 0 });
     // Another service may not move it.
-    const foreign = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST}T08:00:00.000Z`, redate: true, produced: [lead("meeting_booked", "M2")] }] }, "instantly-service");
+    const foreign = await batch({ runs: [{ runId: run.id, occurredAt: `${PAST}T08:00:00.000Z`, redate: true, produced: [lead("booking_call", "M2")] }] }, "instantly-service");
     expect(foreign.status).toBe(422);
     expect(foreign.body.details.invalid[0].reason).toBe("not_run_owner");
 
