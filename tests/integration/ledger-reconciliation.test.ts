@@ -333,6 +333,18 @@ describe("Ledger reconciliation (LEDGER-HISTORY-1024-RUNS)", () => {
     expect((await recon(day, day)).daysStale).toEqual([day]);
   });
 
+  it("undeclared spend is owed by the service whose run the walk ENDED on, never the called service", async () => {
+    const day = "2024-08-13";
+    const root = await run(day, "09:00", { serviceName: "crm-service", taskName: "people.build" }); // declares nothing, no cost of its own
+    const call = await run(day, "09:01", { serviceName: "chat-service", taskName: "platform-judgments", parentRunId: root.id });
+    await cost(call.id, "3", at(day, "09:02"));
+    await refresh(day);
+    const r = await recon(day, day);
+    expect(r.totals.undeclared.grossCents).toBe("3.0000000000");
+    expect(r.services.map((x: any) => x.serviceName)).toEqual(["crm-service"]);
+    expect(r.services[0]).toMatchObject({ undeclaredRuns: 1, undeclared: { grossCents: "3.0000000000" } });
+  });
+
   it("refuses an unknown parameter", async () => {
     const res = await request(app).get(`/internal/outcome-costs/reconciliation?since=${DAY}&foo=1`).set(getInternalAuthHeaders());
     expect(res.status).toBe(400);
