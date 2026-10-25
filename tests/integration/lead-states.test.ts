@@ -223,4 +223,48 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     expect(units.reduce((s, r) => s.plus(r.money.gross), new Decimal(0)).toFixed(10)).toBe("30.0000000000");
     expect(checkLedgerRow(ledgerCheckInputOf(d.orgs.find((x) => x.organizationId === ORG)!)).balanced).toBe(true);
   });
+
+  it("a run that kept nothing but declares the lead it consumed rides that lead's next state (a follow-up after the yes pays the meeting)", async () => {
+    const DAY3 = "2024-08-16";
+    const at3 = (h: string) => new Date(`${DAY3}T${h}:00Z`);
+    setLeadStatesSourceForTests([
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L6", states: {
+        lead_interested: { reachedAt: at3("08:00").toISOString(), basis: "positive_reply", impliedBy: null },
+        meeting_booked: { reachedAt: at3("18:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+      } },
+    ]);
+    await syncLeadStates(TEST_STEP_STATES);
+    // The meeting pipe's workflow run judged "not now" for L6 at 10:00: it wrote nothing, consumed L6's reply, its chat call paid $4.
+    const wf = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "execute-workflow", brandIds: [BRAND], campaignId: "cmp-marie",
+      workflowSlug: MEET, featureSlug: "ai-meeting-booking", status: "completed", startedAt: at3("10:00") });
+    const chat = await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", brandIds: [BRAND], campaignId: "cmp-marie",
+      workflowSlug: MEET, featureSlug: "ai-meeting-booking", parentRunId: wf.id, status: "completed", startedAt: at3("10:00") });
+    await insertTestRunCost({ runId: chat.id, costName: "tok", quantity: "0.8", unitCostInUsdCents: "5", totalCostInUsdCents: "4.0000000000", createdAt: at3("10:01") });
+    // The cold pipe's run judged "not now" for L6 at 11:00, after her yes: abnormal.
+    const cold = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "execute-workflow", brandIds: [BRAND], campaignId: "cmp-marie",
+      workflowSlug: COLD, featureSlug: "sales-cold-email-outreach", status: "completed", startedAt: at3("11:00") });
+    await insertTestRunCost({ runId: cold.id, costName: "tok", quantity: "0.4", unitCostInUsdCents: "5", totalCostInUsdCents: "2.0000000000", createdAt: at3("11:01") });
+    const res = await request(app)
+      .post("/v1/platform-runs/outcomes/batch")
+      .set(getPlatformAuthHeaders({ serviceName: "workflow" }))
+      .send({ runs: [
+        { runId: wf.id, occurredAt: "run_started_at", consumed: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: "L6" }] },
+        { runId: cold.id, occurredAt: "run_started_at", consumed: [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: "L6" }] },
+      ] });
+    expect(res.status).toBe(201);
+    const d = await computeLedgerDay(DAY3, VERSIONS as any, INPUTS);
+    const o = d.orgs.find((x) => x.organizationId === ORG)!;
+    expect(o.ledger.gross).toBe("6.0000000000");
+    expect(o.allocated.gross).toBe("4.0000000000");
+    expect(o.abnormal.gross).toBe("2.0000000000");
+    expect(o.producedNone.gross).toBe("0.0000000000");
+    expect(checkLedgerRow(ledgerCheckInputOf(o)).balanced).toBe(true);
+    const booked = d.outcomeCosts.filter((r) => r.kind === "produced_cost" && r.outcomeKey === "meeting_booked");
+    expect(booked.reduce((x, r) => x.plus(r.money.gross), new Decimal(0)).toFixed(10)).toBe("4.0000000000");
+    expect(booked[0].tags.workflowSlug).toBe(MEET);
+  });
 });
