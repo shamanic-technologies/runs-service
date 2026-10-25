@@ -903,6 +903,10 @@ concept, a value-based joint-cost split.
   `workflow:<slug>`, else `task:<service>/<task>`; per (UTC day, cost org, pool key, campaign). A crm judging run that kept nothing
   (no workflow, no campaign) rides the same task's lead_identified that org-day; only a pool that produced nothing that day stays
   produced-none (`unpooledLoss` when it carries a workflow, else `undeclared`). `cost_loss_pool_days.pool_key`.
+- **Allocation v6 = v5 with a no-workflow cost row's LOSS keyed on its walk-end run**: a run with no workflow (a chat-service
+  `complete` child of human-service's audience-refill) takes the pool key + campaign of the run its walk ended on (its production order)
+  for rule 4b, never its own task (`loss_keyed` CTE): was undeclared beside the order's units that org-day (belgrade-v10, 2026-10-25).
+  A task pool with no unit that day stays UNDECLARED (refused: indistinguishable from a producer that never declared). No migration.
 - **Loss shares stored per occurrence (migration 0075, LOSS-SHARE-STORED-1024)**: the day statement also stores each produced
   occurrence's share of its pool (`cost_loss_occurrence_days`, flag `cost_ledger_computed_days.loss_occurrences`), and the
   per-occurrence read (`occurrenceCostSlices`) serves it by occurrence id. A day without the flag (stored before 0075) is ranked
