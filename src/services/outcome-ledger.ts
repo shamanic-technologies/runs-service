@@ -65,9 +65,9 @@ import { versionWindowsSql } from "../routes/vendor-costs.js";
 import type { SupportFunction } from "./support-marks.js";
 import { fetchAllocationInputs, syncLeadStates, type AllocationInputs } from "./lead-states.js";
 
-export const ALLOCATION_VERSION = 5;
+export const ALLOCATION_VERSION = 6;
 export const ALLOCATION_RULE =
-  "v5: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2; keyed on the campaign since v3; on the task when there is no workflow since v4): a cost row with no such run and no support mark on its walk is loss of its run's POOL KEY P (its workflow slug, else its own task = service + task name) in its run's campaign C (null = no campaign); per (UTC day of the cost row, org of the cost row, P, C) it is split the same way over the occurrences produced that day by runs of the same P and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags. Lead states (v5, LEAD-STATES-1024): a share of an occurrence whose subject is a lead (lead-service) and whose outcome reaches no lead state, when its run's pipe (channel x the leg its workflow is assigned to, features-service) targets a lead state, leaves that occurrence (a by-product at $0) and goes, in each family (interest: lead_interested < meeting_booked < meeting_attended < paid_client; visit: lead_visited), to the next state the lead had not reached at that run's start (lead-service first reaches, at any of the run's brands): in the pipe's own family, the target already reached = ABNORMAL loss (target_already_reached, in no unit cost), else the lead's later reach of that state (the unit), else loss of (cost org, pool key, campaign, state) split equally over that day's units of the same key in unit-id order (none = produced none); in the other family the same is stated apart (parallel), never summed. A share of an occurrence a run of the same service, task and campaign already produced for the same subject is ABNORMAL loss (repeat_production). Check: allocated + produced none + abnormal = ledger.";
+  "v6: every actual or refunded cost row goes to its nearest run (itself or an ancestor) that declared a produced occurrence; per (that run, UTC day of the cost row, org of the cost row) it is split over the run's produced occurrences in proportion to quantity (default 1 = equal shares) by cumulative rounding at 10 decimals in occurrence-id order, so the shares sum exactly to the cost; same split on billed gross, frozen net and vendor actual; no such run = produced none. Standard cost on reuse: a consumption resolves to the latest producing occurrence of the same (outcome, subject) declared at or before it (else the earliest declared later), among those declared before the end of the consumption's UTC day; the first consumption of an occurrence is paid by its spend, every later one is charged the same production cost as a reuse gain, on the consuming run's org and UTC day. 'Declared' = the occurrence's effective declaration time: when it was recorded, or the past instant a backfill stated (occurredAt, within its run's start and the recording). Cross-run normal loss (v2; keyed on the campaign since v3; on the task when there is no workflow since v4): a cost row with no such run and no support mark on its walk is loss of its run's POOL KEY P (its workflow slug, else its own task = service + task name) in its run's campaign C (null = no campaign); since v6 a run with NO workflow takes the key and campaign of the run its walk ENDED on (its top run: a chat-service call made for human-service's audience-refill is loss of audience-refill, never of chat-service/complete); per (UTC day of the cost row, org of the cost row, P, C) it is split the same way over the occurrences produced that day by runs of the same P and C in that org (occurrence-id order); none = it stays produced none, under its own run's tags. Lead states (v5, LEAD-STATES-1024): a share of an occurrence whose subject is a lead (lead-service) and whose outcome reaches no lead state, when its run's pipe (channel x the leg its workflow is assigned to, features-service) targets a lead state, leaves that occurrence (a by-product at $0) and goes, in each family (interest: lead_interested < meeting_booked < meeting_attended < paid_client; visit: lead_visited), to the next state the lead had not reached at that run's start (lead-service first reaches, at any of the run's brands): in the pipe's own family, the target already reached = ABNORMAL loss (target_already_reached, in no unit cost), else the lead's later reach of that state (the unit), else loss of (cost org, pool key, campaign, state) split equally over that day's units of the same key in unit-id order (none = produced none); in the other family the same is stated apart (parallel), never summed. A share of an occurrence a run of the same service, task and campaign already produced for the same subject is ABNORMAL loss (repeat_production). Check: allocated + produced none + abnormal = ledger.";
 
 /** Legacy keys accepted on input and stored under their successor (never emitted). */
 export const LEGACY_OUTCOME_KEYS: Readonly<Record<string, string>> = { email_sent: "message_sent" };
@@ -920,9 +920,20 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     -- on): its service OWNS the spend's declaration. A chat-service call made for
     -- crm-service's people.build is crm-service's gap, not chat-service's.
     walk_top AS MATERIALIZED (
-      SELECT t.run_id, r.service_name AS owner_service
+      SELECT t.run_id, r.service_name AS owner_service, ${poolKeySql("r.")} AS top_pool_key, r.campaign_id AS top_campaign_id
       FROM (SELECT DISTINCT ON (run_id) run_id, cur_id FROM walked ORDER BY run_id, depth DESC) t
-      CROSS JOIN LATERAL (SELECT service_name FROM runs WHERE id = t.cur_id OFFSET 0) r
+      CROSS JOIN LATERAL (SELECT service_name, workflow_slug, task_name, campaign_id FROM runs WHERE id = t.cur_id OFFSET 0) r
+    ),
+    -- v6: the LOSS key of a cost row = its run's pool key and campaign when the run
+    -- carries a workflow (v3/v4), else those of the run its walk ended on (its
+    -- production order): a no-workflow child call (chat-service complete under
+    -- human-service audience-refill) is loss of the order's pool, never of its own task.
+    loss_keyed AS MATERIALIZED (
+      SELECT c.run_id, c.org_key,
+             CASE WHEN c.workflow_slug IS NOT NULL OR wt.run_id IS NULL THEN c.pool_key ELSE wt.top_pool_key END AS loss_key,
+             CASE WHEN c.workflow_slug IS NOT NULL OR wt.run_id IS NULL THEN c.campaign_id ELSE wt.top_campaign_id END AS loss_campaign
+      FROM (SELECT DISTINCT run_id, org_key, workflow_slug, pool_key, campaign_id FROM costed) c
+      LEFT JOIN walk_top wt ON wt.run_id = c.run_id
     ),
     -- A walk that stopped on a support mark has no anchor: produced none.
     anchor_of AS MATERIALIZED (SELECT run_id, cur_id AS anchor_id FROM walked WHERE found AND ${hasProducedSql(sql`cur_id`)}),
@@ -987,13 +998,14 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     -- Rule 4b: loss of pool P (workflow, else task) in campaign C (no anchor, no
     -- support) per (cost org, P, C), split over the units P produced in C that day in that org.
     lost AS MATERIALIZED (
-      SELECT c.org_key, c.pool_key, MIN(c.workflow_slug) AS workflow_slug, c.campaign_id,
+      SELECT c.org_key, lk.loss_key AS pool_key, MIN(c.workflow_slug) AS workflow_slug, lk.loss_campaign AS campaign_id,
              SUM(c.gross) AS gross, SUM(c.net) AS net, SUM(c.vendor) AS vendor, SUM(c.unpriced) AS unpriced
       FROM costed c
+      JOIN loss_keyed lk ON lk.run_id = c.run_id AND lk.org_key IS NOT DISTINCT FROM c.org_key
       WHERE NOT EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
         AND NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
         AND NOT EXISTS (SELECT 1 FROM cons_of k WHERE k.run_id = c.run_id)
-      GROUP BY c.org_key, c.pool_key, c.campaign_id
+      GROUP BY c.org_key, lk.loss_key, lk.loss_campaign
     ),
     pipe_units AS MATERIALIZED (${pipeUnitsSql(day, "lost")}),
     pooled AS MATERIALIZED (SELECT DISTINCT org_key, pool_key, campaign_id FROM pipe_units),
@@ -1020,8 +1032,9 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       WHERE EXISTS (SELECT 1 FROM anchor_of a WHERE a.run_id = c.run_id)
          OR EXISTS (SELECT 1 FROM cons_of k WHERE k.run_id = c.run_id)
          OR (NOT EXISTS (SELECT 1 FROM support_of sp WHERE sp.run_id = c.run_id)
-             AND EXISTS (SELECT 1 FROM pooled p WHERE p.org_key IS NOT DISTINCT FROM c.org_key AND p.pool_key = c.pool_key
-                         AND p.campaign_id IS NOT DISTINCT FROM c.campaign_id))
+             AND EXISTS (SELECT 1 FROM loss_keyed lk JOIN pooled p ON p.pool_key = lk.loss_key
+                           AND p.campaign_id IS NOT DISTINCT FROM lk.loss_campaign AND p.org_key IS NOT DISTINCT FROM lk.org_key
+                         WHERE lk.run_id = c.run_id AND lk.org_key IS NOT DISTINCT FROM c.org_key))
     ),
     ledger AS (
       SELECT org_key, MIN(org_id::text) AS org_id, COUNT(*) AS cost_rows, ${sums("costed", "ledger")}
