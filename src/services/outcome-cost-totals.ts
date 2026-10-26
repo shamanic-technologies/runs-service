@@ -400,3 +400,82 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
     parallel: parallel.map((r) => ({ dimensions: dimensionsOf(r, names), cost: moneyOf(r), unpooled: moneyOf(r, "u_") })),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Weighted-average price per pipe (LEDGER-PIPE-WEIGHTED-AVERAGE-1027)
+// ---------------------------------------------------------------------------
+
+export interface PipeCostRow {
+  featureSlug: string;
+  /** The outcome the pipe produces (a lead state, else its leg's step). */
+  outcomeKey: string;
+  /** Distinct units the pipe's spend reached in the range. */
+  units: number;
+  /** Spend spread on those units the day it happened (produced_cost of the pipe's channel, evidence steps mapped to their state). */
+  cost: Money;
+  /** The pipe's spend that reached no unit the day it happened (its campaign got no result that day, or never). */
+  pooledLoss: Money;
+  /** (cost + pooledLoss) / units, 10 decimals; null with no unit (the loss then has nothing to ride: stated, never hidden). */
+  unitCost: Money | null;
+}
+
+/**
+ * By-the-book process costing, weighted average: a pipe (channel x the outcome it produces) gathers ALL its spend
+ * over the range, whatever the day or campaign, and divides it by ALL the units it produced. Read from the stored days
+ * (outcome_cost_days + pipe_unit_days), units counted distinct over the range.
+ */
+export async function readPipeCosts(since: string, until: string, stepStates: Array<{ stepKey: string; state: string }>): Promise<PipeCostRow[]> {
+  const stateOf = new Map(stepStates.map((s) => [s.stepKey, s.state]));
+  const own = (await statsDb.execute(sql`
+    SELECT feature_slug, outcome_key, SUM(gross)::text AS gross, SUM(net)::text AS net, SUM(vendor)::text AS vendor, SUM(unpriced_gross)::text AS unpriced
+    FROM outcome_cost_days
+    WHERE allocation_version = ${ALLOCATION_VERSION} AND kind = 'produced_cost' AND feature_slug IS NOT NULL
+      AND day BETWEEN ${since}::date AND ${until}::date
+    GROUP BY 1, 2
+  `)) as any[];
+  const loss = (await statsDb.execute(sql`
+    SELECT feature_slug, pipe_target AS outcome_key, SUM(gross)::text AS gross, SUM(net)::text AS net, SUM(vendor)::text AS vendor, SUM(unpriced_gross)::text AS unpriced
+    FROM outcome_cost_days
+    WHERE allocation_version = ${ALLOCATION_VERSION} AND kind = 'none' AND pipe_target IS NOT NULL AND feature_slug IS NOT NULL
+      AND day BETWEEN ${since}::date AND ${until}::date
+    GROUP BY 1, 2
+  `)) as any[];
+  const units = (await statsDb.execute(sql`
+    SELECT feature_slug, target AS outcome_key, COUNT(DISTINCT unit_id)::int AS n
+    FROM pipe_unit_days
+    WHERE allocation_version = ${ALLOCATION_VERSION} AND day BETWEEN ${since}::date AND ${until}::date
+    GROUP BY 1, 2
+  `)) as any[];
+  const D = Decimal.clone({ precision: 60, rounding: Decimal.ROUND_HALF_UP });
+  const zero = () => ({ gross: new D(0), net: new D(0), vendor: new D(0), unpricedGross: new D(0) });
+  const pipes = new Map<string, { featureSlug: string; outcomeKey: string; units: number; cost: ReturnType<typeof zero>; loss: ReturnType<typeof zero> }>();
+  const at = (f: string, k: string) => {
+    const key = `${f}|${k}`;
+    return pipes.get(key) ?? pipes.set(key, { featureSlug: f, outcomeKey: k, units: 0, cost: zero(), loss: zero() }).get(key)!;
+  };
+  const add = (m: ReturnType<typeof zero>, r: any) => {
+    m.gross = m.gross.plus(r.gross ?? 0); m.net = m.net.plus(r.net ?? 0); m.vendor = m.vendor.plus(r.vendor ?? 0); m.unpricedGross = m.unpricedGross.plus(r.unpriced ?? 0);
+  };
+  for (const r of own) add(at(r.feature_slug, stateOf.get(r.outcome_key) ?? r.outcome_key).cost, r);
+  for (const r of loss) add(at(r.feature_slug, r.outcome_key).loss, r);
+  for (const r of units) at(r.feature_slug, r.outcome_key).units = r.n;
+  const f10 = (x: Decimal) => x.toFixed(10);
+  return [...pipes.values()]
+    .filter((p) => p.units > 0 || !p.loss.gross.isZero() || !p.cost.gross.isZero())
+    .map((p) => ({
+      featureSlug: p.featureSlug,
+      outcomeKey: p.outcomeKey,
+      units: p.units,
+      cost: { gross: f10(p.cost.gross), net: f10(p.cost.net), vendor: f10(p.cost.vendor), unpricedGross: f10(p.cost.unpricedGross) },
+      pooledLoss: { gross: f10(p.loss.gross), net: f10(p.loss.net), vendor: f10(p.loss.vendor), unpricedGross: f10(p.loss.unpricedGross) },
+      unitCost: p.units > 0
+        ? {
+            gross: f10(p.cost.gross.plus(p.loss.gross).div(p.units)),
+            net: f10(p.cost.net.plus(p.loss.net).div(p.units)),
+            vendor: f10(p.cost.vendor.plus(p.loss.vendor).div(p.units)),
+            unpricedGross: f10(p.cost.unpricedGross.plus(p.loss.unpricedGross).div(p.units)),
+          }
+        : null,
+    }))
+    .sort((a, b) => a.featureSlug.localeCompare(b.featureSlug) || a.outcomeKey.localeCompare(b.outcomeKey));
+}
