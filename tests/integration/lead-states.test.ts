@@ -45,6 +45,10 @@ const INPUTS = {
     { workflowSlug: COLD, featureSlug: "sales-cold-email-outreach", toStep: "conversation", state: "lead_interested", family: "interest" as const, rank: 1 },
     { workflowSlug: MEET, featureSlug: "ai-meeting-booking", toStep: "meeting_booked", state: "meeting_booked", family: "interest" as const, rank: 2 },
   ],
+  pipeSteps: [
+    { workflowSlug: COLD, featureSlug: "sales-cold-email-outreach", target: "lead_interested" },
+    { workflowSlug: MEET, featureSlug: "ai-meeting-booking", target: "meeting_booked" },
+  ],
 };
 const app = createTestApp();
 const at = (hour: string) => new Date(`${DAY}T${hour}:00Z`);
@@ -304,5 +308,38 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     expect(inputs.every((r) => r.consumedOutcomeKey === "lead_interested")).toBe(true);
     expect(inputs.reduce((n, r) => n + Number(r.n), 0)).toBe(2);
     expect(d.outcomeCosts.filter((r) => r.kind === "produced_count" && r.outcomeKey === "meeting_booked").reduce((n, r) => n + Number(r.n), 0)).toBe(1);
+  });
+
+  it("weighted average: a pipe's send on a day with no result rides the yes it gets another day (by-the-book process costing)", async () => {
+    const D1 = "2024-08-20";
+    const D2 = "2024-08-21";
+    setLeadStatesSourceForTests([
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L11", states: { lead_interested: { reachedAt: new Date(`${D2}T15:00:00Z`).toISOString(), basis: "positive_reply", impliedBy: null } } },
+    ]);
+    await syncLeadStates(TEST_STEP_STATES);
+    const sendOn = async (day: string, lead: string, task: string) => {
+      const r = await insertTestRun({ organizationId: ORG, serviceName: "instantly-service", taskName: task, brandIds: [BRAND], campaignId: "cmp-wavg",
+        workflowSlug: COLD, featureSlug: "sales-cold-email-outreach", status: "completed", startedAt: new Date(`${day}T09:00:00Z`) });
+      await insertTestRunCost({ runId: r.id, costName: "tok", quantity: "2", unitCostInUsdCents: "5", totalCostInUsdCents: "10.0000000000", createdAt: new Date(`${day}T09:01:00Z`) });
+      return { runId: r.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: lead }] };
+    };
+    // Day 1: L10 never answers (no result that day). Day 2: L11 is emailed and says yes.
+    const res = await request(app).post("/v1/platform-runs/outcomes/batch").set(getPlatformAuthHeaders({ serviceName: "instantly-service" }))
+      .send({ runs: [await sendOn(D1, "L10", "email-send-wavg-1"), await sendOn(D2, "L11", "email-send-wavg-2")] });
+    expect(res.status).toBe(201);
+    for (const day of [D1, D2]) await storeLedgerDay(await computeLedgerDay(day, VERSIONS as any, INPUTS));
+    const totals = await request(app).get(`/internal/stats/outcome-costs?since=${D1}&until=${D2}&orgId=${ORG}`).set(getInternalAuthHeaders());
+    expect(totals.status).toBe(200);
+    const pipe = totals.body.pipes.find((p: any) => p.featureSlug === "sales-cold-email-outreach" && p.outcomeKey === "lead_interested");
+    expect(pipe.units).toBe(1);
+    expect(money(pipe.cost)).toBe("10.0000000000");
+    expect(money(pipe.pooledLoss)).toBe("10.0000000000");
+    expect(money(pipe.unitCost)).toBe("20.0000000000");
+    const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${D1}&until=${D2}`).set(getInternalAuthHeaders());
+    expect(money(check.body.totals.pooledLoss)).toBe("10.0000000000");
   });
 });

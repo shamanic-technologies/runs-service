@@ -3219,7 +3219,8 @@ export const LedgerCheckResponseSchema = z
       abnormal: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
       abnormalByReason: z.record(AbnormalReasonEnum, LedgerMoneySchema),
       outcomeSpend: LedgerMoneySchema.openapi({ description: "ledger - support: the spend expected to ride an outcome." }),
-      outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "(allocated + abnormal) / outcomeSpend, 10 decimals (0..1): the declared part of outcome spend (abnormal spend is declared, priced in no unit). Null on zero." }),
+      pooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027). Part of producedNone." }),
+      outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "(allocated + abnormal + pooledLoss) / outcomeSpend, 10 decimals (0..1): the part of outcome spend in a price or stated abnormal. Null on zero." }),
     }),
     mismatches: z.array(LedgerCheckRowSchema),
     rows: z.array(LedgerCheckRowSchema).openapi({ description: "Every (day, org) row, day ascending. Omitted when rows=false." }),
@@ -3361,6 +3362,16 @@ export const OutcomeCostTotalsResponseSchema = z
         unpooled: ProductionCostSchema.openapi({ description: "The same, for leads that never reached the state when no lead of the pipe reached it that day (not spread)." }),
       }),
     ).openapi({ description: "Allocation v5: the routed spend priced in the other state family (interest vs visit)." }),
+    pipes: z.array(
+      z.object({
+        featureSlug: z.string(),
+        outcomeKey: z.string().openapi({ description: "The outcome the pipe produces: a lead state, else its leg's step." }),
+        units: z.number().int().openapi({ description: "Distinct units the pipe's spend reached in the range." }),
+        cost: ProductionCostSchema.openapi({ description: "Spend spread on those units the day it happened." }),
+        pooledLoss: ProductionCostSchema.openapi({ description: "The pipe's spend that reached no unit the day it happened (no result that day in that campaign, or a campaign with none)." }),
+        unitCost: ProductionCostSchema.nullable().openapi({ description: "(cost + pooledLoss) / units: weighted-average process costing. Null with no unit." }),
+      }),
+    ).openapi({ description: "Weighted-average price per pipe over the range (channel x outcome), ignoring groupBy and filters: ALL its spend, every day and campaign, over ALL its units (LEDGER-PIPE-WEIGHTED-AVERAGE-1027)." }),
   })
   .openapi("OutcomeCostTotalsResponse");
 

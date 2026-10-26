@@ -527,7 +527,11 @@ function allocationInputsCtes(inputs: AllocationInputs): SQL {
         AS x(workflow_slug text, feature_slug text, state text, family text, rank integer)
     ),
     st_states AS MATERIALIZED (SELECT DISTINCT state, family, rank FROM st WHERE step_key = state),
-    fam AS MATERIALIZED (SELECT DISTINCT family FROM st_states)`;
+    fam AS MATERIALIZED (SELECT DISTINCT family FROM st_states),
+    ps AS MATERIALIZED (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify((inputs.pipeSteps ?? []).map((p) => ({ workflow_slug: p.workflowSlug, feature_slug: p.featureSlug, target: p.target })))}::jsonb)
+        AS x(workflow_slug text, feature_slug text, target text)
+    )`;
 }
 
 /**
@@ -881,6 +885,8 @@ export interface LedgerDay {
   coverage: CoverageDayRow[];
   /** Rule 4b pools of the day: loss of pipe W in a cost org, carried by `units` occurrences W produced there that day. */
   lossPools: LossPool[];
+  /** Units a pipe's spend reached that day, by channel x outcome (0083): the weighted-average price counts them distinct. */
+  pipeUnits: Array<{ featureSlug: string; target: string; unitId: string; organizationId: string | null }>;
   /** Each produced occurrence's share of its pool's loss (0075): what the occurrence read serves for this day. */
   lossOccurrences: LossOccurrenceShare[];
   /** Each anchor's spend of the day per cost org (0080, rules 1-3): what the occurrence read prices from. */
@@ -1168,11 +1174,13 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     ),
     none_cost AS (
       SELECT x.org, x.cost_org, x.brand_ids, x.campaign_id, x.workflow_slug, x.feature_slug, x.support_function,
-             x.run_start_day, x.audience_id, x.service_name, x.owner_service, x.loss_line, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
+             x.run_start_day, x.audience_id, x.service_name, x.owner_service, x.loss_line, x.pipe_target, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
       FROM (
         SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
                sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name, wt.owner_service,
                (sp.kind IS NULL AND EXISTS (SELECT 1 FROM loss_lines ll WHERE ll.run_id = c.run_id AND ll.org_key IS NOT DISTINCT FROM c.org_key)) AS loss_line,
+               -- The pipe this spend works for (weighted-average price): its run's pipe output; support never.
+               CASE WHEN sp.kind IS NULL THEN (SELECT ps.target FROM ps WHERE ps.workflow_slug = c.workflow_slug AND ps.feature_slug = c.feature_slug LIMIT 1) END AS pipe_target,
                c.run_id, c.gross, c.net, c.vendor, c.unpriced
         FROM costed c
         LEFT JOIN support_of sp ON sp.run_id = c.run_id
@@ -1181,11 +1189,11 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
         UNION ALL
         -- v5 unpooled state loss: under the paying (anchor) run's tags; it carries a workflow, so it reads as unpooled loss.
         SELECT t.a_org::text, u.org_key, t.a_brands, t.a_campaign, t.a_workflow, t.a_feature, NULL::text, t.a_start_day,
-               t.a_audience, t.a_service, t.a_service, true, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
+               t.a_audience, t.a_service, t.a_service, true, u.next_state, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
         FROM state_unpooled u JOIN atags t ON t.anchor_id = u.anchor_id
         WHERE u.is_primary
       ) x
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
     ),
     -- v5: abnormal loss (in no unit cost) and the other family's view of the routed spend, under the paying run's tags.
     abnormal_cost AS (
@@ -1274,7 +1282,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       COALESCE((SELECT json_agg(json_build_object(
         'org', n.org, 'cost_org', n.cost_org, 'brand_ids', n.brand_ids, 'campaign_id', n.campaign_id,
         'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug, 'support_function', n.support_function, 'run_start_day', n.run_start_day,
-        'audience_id', n.audience_id, 'service_name', n.service_name, 'owner_service_name', n.owner_service, 'loss_line', n.loss_line, 'runs', n.runs,
+        'audience_id', n.audience_id, 'service_name', n.service_name, 'owner_service_name', n.owner_service, 'loss_line', n.loss_line, 'pipe_target', n.pipe_target, 'runs', n.runs,
         'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'org_id', l.org_key, 'pool_key', l.pool_key, 'workflow_slug', l.workflow_slug, 'campaign_id', l.campaign_id,
@@ -1291,6 +1299,14 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
         'anchor_id', x.anchor_id, 'org_id', x.org_key,
         'gross', x.gross::text, 'net', x.net::text, 'vendor', x.vendor::text, 'unpriced', x.unpriced::text) ORDER BY x.anchor_id, x.org_key)
         FROM g x), '[]'::json) AS anchor_spend,
+      -- Each unit a pipe's spend reached that day (primary shares), by the paying run's channel and the outcome
+      -- the share went to (as its state when it reaches one): the weighted-average price counts them DISTINCT.
+      COALESCE((SELECT json_agg(json_build_object('f', u.feature_slug, 't', u.target, 'u', u.unit_id, 'o', u.org_key)) FROM (
+        SELECT DISTINCT t.a_feature AS feature_slug, COALESCE(sm.state, s.outcome_key) AS target, s.occurrence_id AS unit_id, s.org_key
+        FROM shares s JOIN atags t ON t.anchor_id = s.anchor_id
+        LEFT JOIN st sm ON sm.step_key = s.outcome_key
+        WHERE t.a_feature IS NOT NULL
+      ) u), '[]'::json) AS pipe_units,
       (SELECT COUNT(*) FROM walked WHERE NOT found AND parent_id IS NOT NULL AND depth >= ${MAX_WALK_DEPTH}) AS unplaced_runs
   `;
 }
@@ -1566,6 +1582,8 @@ export interface OutcomeCostRow {
   ownerServiceName: string | null;
   /** kind 'none' only: the spend sits on a known production line that had no unit that day (unpooled loss, 0079). */
   lossLine: boolean | null;
+  /** kind 'none' only: the outcome of the pipe this spend works for (its lead's next state, else the pipe's leg step): its weighted-average price carries it (0083). */
+  pipeTarget: string | null;
   /** consumed only: the run that produced the consumed occurrence (null otherwise, and on unknown provenance). */
   sourceOrganizationId: string | null;
   sourceTags: RunTags | null;
@@ -1672,6 +1690,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     serviceName: r.service_name ?? null,
     ownerServiceName: r.owner_service_name ?? null,
     lossLine: r.loss_line ?? null,
+    pipeTarget: r.pipe_target ?? null,
     sourceOrganizationId: null,
     sourceTags: null,
     runStartDay: r.run_start_day ?? null,
@@ -1793,6 +1812,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
           .map((x) => [x.kind, { gross: fx(x.gross), net: fx(x.net) }]),
       ),
     })),
+    pipeUnits: (row.pipe_units as any[]).map((r) => ({ featureSlug: r.f, target: r.t, unitId: r.u, organizationId: r.o ?? null })),
     lossOccurrences: (row.loss_occurrences as any[]).map((r) => ({
       occurrenceId: r.id,
       organizationId: r.org_id ?? null,
@@ -1824,6 +1844,16 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
     await tx.execute(sql`DELETE FROM outcome_cost_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     await tx.execute(sql`DELETE FROM cost_loss_pool_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     await tx.execute(sql`DELETE FROM cost_loss_occurrence_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    await tx.execute(sql`DELETE FROM pipe_unit_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
+    if (d.pipeUnits.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO pipe_unit_days (day, allocation_version, feature_slug, target, unit_id, organization_id)
+        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.f, x.t, x.u, x.o
+        FROM jsonb_to_recordset(${JSON.stringify(d.pipeUnits.map((u) => ({ f: u.featureSlug, t: u.target, u: u.unitId, o: u.organizationId })))}::jsonb)
+          AS x(f text, t text, u uuid, o uuid)
+        ON CONFLICT DO NOTHING
+      `);
+    }
     await tx.execute(sql`DELETE FROM cost_anchor_spend_days WHERE day = ${d.day}::date AND allocation_version = ${ALLOCATION_VERSION}`);
     if (d.anchorSpend.length > 0) {
       await tx.execute(sql`
@@ -1862,11 +1892,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
           gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
           source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line
+          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
                x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll
+               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -1878,13 +1908,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
             sf: o.supportFunction,
             rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
-            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine,
+            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
                         rg numeric, rn numeric, rv numeric, rup numeric,
                         sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                        aud text, saud text, svc text, ar text, osvc text, ll boolean)
+                        aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -1930,9 +1960,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, stale = false
     `);
   });
 }
@@ -2203,7 +2233,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -2222,7 +2252,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const noLossShares = new Set(rows.filter((r) => !r.loss_occurrences || !r.anchor_spend).map((r) => r.day as string));
   for (const day of noLossShares) out.add(day);
   // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
-  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs).map((r) => r.day as string));
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units).map((r) => r.day as string));
   for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers

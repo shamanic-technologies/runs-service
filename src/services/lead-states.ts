@@ -50,6 +50,18 @@ export interface AllocationInputs {
   stepStates: StepState[];
   /** Every (workflow version slug, channel) whose pipe targets a state. */
   pipeTargets: PipeTarget[];
+  /**
+   * Every (workflow version slug, channel) on a pipe, with the outcome the pipe produces: its leg's `to` step,
+   * as its lead state when it reaches one (conversation -> lead_interested), else the step key (lead_found).
+   * The weighted-average price groups a pipe's spend and units on it. Absent = none known (tests).
+   */
+  pipeSteps?: PipeStep[];
+}
+
+export interface PipeStep {
+  workflowSlug: string;
+  featureSlug: string;
+  target: string;
 }
 
 export class AllocationInputsError extends Error {}
@@ -108,6 +120,11 @@ interface Assignment {
  * keeps allocation v4.
  */
 export async function fetchPipeTargets(stepStates: StepState[]): Promise<PipeTarget[]> {
+  return (await fetchPipes(stepStates)).targets;
+}
+
+/** Both views of the pipes (see fetchPipeTargets): the state targets and every pipe's produced step. */
+export async function fetchPipes(stepStates: StepState[]): Promise<{ targets: PipeTarget[]; steps: PipeStep[] }> {
   const [assign, channels] = await Promise.all([
     getJson<{ assignments: Assignment[] }>(`${env("FEATURES_SERVICE_URL")}/internal/workflow-leg-assignments`, process.env.FEATURES_SERVICE_API_KEY),
     getJson<{ channels: Array<{ slug: string; stepTransitions?: Array<{ legKey: string; to?: { key?: string } | null }> }> }>(
@@ -141,19 +158,25 @@ export async function fetchPipeTargets(stepStates: StepState[]): Promise<PipeTar
     if (!prev || na > pa || (na === pa && nd > pd)) legOf.set(k, a);
   }
   const out: PipeTarget[] = [];
+  const steps: PipeStep[] = [];
   const seen = new Set<string>();
+  const seenStep = new Set<string>();
   for (const w of wf.workflows) {
     // A merged dynasty's versions run on the survivor's leg when their own has none.
     const a = legOf.get(`${w.workflowDynastySlug}|${w.featureSlug}`) ?? (w.mergedIntoDynastySlug ? legOf.get(`${w.mergedIntoDynastySlug}|${w.featureSlug}`) : undefined);
     const to = a ? toStep.get(`${a.featureSlug}|${a.legKey}`) : undefined;
     const st = to ? stateOf.get(to) : undefined;
+    if (a && to && !seenStep.has(`${w.workflowSlug}|${w.featureSlug}`)) {
+      seenStep.add(`${w.workflowSlug}|${w.featureSlug}`);
+      steps.push({ workflowSlug: w.workflowSlug, featureSlug: w.featureSlug, target: st?.state ?? to });
+    }
     if (!a || !to || !st) continue;
     const k = `${w.workflowSlug}|${w.featureSlug}`;
     if (seen.has(k)) continue;
     seen.add(k);
     out.push({ workflowSlug: w.workflowSlug, featureSlug: w.featureSlug, toStep: to, state: st.state, family: st.family, rank: st.rank });
   }
-  return out;
+  return { targets: out, steps };
 }
 
 let cache: { at: number; inputs: AllocationInputs } | null = null;
@@ -168,8 +191,8 @@ export async function fetchAllocationInputs(): Promise<AllocationInputs> {
   const now = Date.now();
   if (cache && (cache.at === Number.POSITIVE_INFINITY || now - cache.at < CACHE_TTL_MS)) return cache.inputs;
   const stepStates = await fetchStepStates();
-  const pipeTargets = await fetchPipeTargets(stepStates);
-  cache = { at: now, inputs: { stepStates, pipeTargets } };
+  const { targets: pipeTargets, steps: pipeSteps } = await fetchPipes(stepStates);
+  cache = { at: now, inputs: { stepStates, pipeTargets, pipeSteps } };
   return cache.inputs;
 }
 
