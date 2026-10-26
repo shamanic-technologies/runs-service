@@ -5940,6 +5940,30 @@
                 ],
                 "description": "ledger - support: the spend expected to ride an outcome."
               },
+              "pooledLoss": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027). Part of producedNone."
+              },
               "outcomeSpendCoverage": {
                 "type": "object",
                 "properties": {
@@ -5956,7 +5980,7 @@
                   "gross",
                   "net"
                 ],
-                "description": "(allocated + abnormal) / outcomeSpend, 10 decimals (0..1): the declared part of outcome spend (abnormal spend is declared, priced in no unit). Null on zero."
+                "description": "(allocated + abnormal + pooledLoss) / outcomeSpend, 10 decimals (0..1): the part of outcome spend in a price or stated abnormal. Null on zero."
               }
             },
             "required": [
@@ -5972,6 +5996,7 @@
               "abnormal",
               "abnormalByReason",
               "outcomeSpend",
+              "pooledLoss",
               "outcomeSpendCoverage"
             ]
           },
@@ -7595,6 +7620,64 @@
               ]
             },
             "description": "Allocation v5: the routed spend priced in the other state family (interest vs visit)."
+          },
+          "pipes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "featureSlug": {
+                  "type": "string"
+                },
+                "outcomeKey": {
+                  "type": "string",
+                  "description": "The outcome the pipe produces: a lead state, else its leg's step."
+                },
+                "units": {
+                  "type": "integer",
+                  "description": "Distinct units the pipe's spend reached in the range."
+                },
+                "cost": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "Spend spread on those units the day it happened."
+                    }
+                  ]
+                },
+                "pooledLoss": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "The pipe's spend that reached no unit the day it happened (no result that day in that campaign, or a campaign with none)."
+                    }
+                  ]
+                },
+                "unitCost": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductionCost"
+                    },
+                    {
+                      "description": "(cost + pooledLoss) / units: weighted-average process costing. Null with no unit."
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "featureSlug",
+                "outcomeKey",
+                "units",
+                "cost",
+                "pooledLoss",
+                "unitCost"
+              ]
+            },
+            "description": "Weighted-average price per pipe over the range (channel x outcome), ignoring groupBy and filters: ALL its spend, every day and campaign, over ALL its units (LEDGER-PIPE-WEIGHTED-AVERAGE-1027)."
           }
         },
         "required": [
@@ -7613,7 +7696,8 @@
           "consumed",
           "scope",
           "abnormal",
-          "parallel"
+          "parallel",
+          "pipes"
         ]
       },
       "LedgerReconciliationResponse": {

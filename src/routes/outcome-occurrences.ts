@@ -4,6 +4,7 @@
 // (GET /internal/outcome-costs/ledger-check) and the coverage series
 // (GET /internal/stats/outcome-coverage). Rules: services/outcome-ledger.ts.
 
+import { fetchAllocationInputs } from "../services/lead-states.js";
 import { Router, type Request, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
@@ -49,7 +50,7 @@ import {
 import { OutcomeCatalogueError, unknownOutcomeKeys } from "../services/outcome-catalogue.js";
 import { readReconciliation } from "../services/ledger-reconciliation.js";
 import { EquivalenceRefusedError, stateEquivalences } from "../services/subject-equivalences.js";
-import {
+import { readPipeCosts,
   MAX_OUTCOME_COST_GROUPS,
   OUTCOME_COST_DIMENSIONS,
   TooManyGroupsError,
@@ -794,6 +795,10 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
     const mismatches = rows.filter((r) => !r.balanced);
     const support = supportTotal(totalSupport);
     const outcomeSpend = subMoney(totals.ledger, support);
+    // Weighted average (LEDGER-PIPE-WEIGHTED-AVERAGE-1027): a pipe's spend that reached no unit the day it happened is
+    // carried by the units that pipe produced over the range; only a pipe with no unit at all leaves it uncovered.
+    const pipes = await readPipeCosts(range.since, range.until, (await fetchAllocationInputs()).stepStates);
+    const pooledLoss = pipes.filter((p) => p.units > 0).reduce((m, p) => addMoney(m, p.pooledLoss), zeroMoney());
     res.json({
       allocationVersion: ALLOCATION_VERSION,
       allocationRule: ALLOCATION_RULE,
@@ -819,9 +824,10 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
         abnormal: wireMoney(totals.abnormal),
         abnormalByReason: Object.fromEntries(Object.entries(totalAbnormal).map(([k, v]) => [k, wireMoney(v)])),
         outcomeSpend: wireMoney(outcomeSpend),
+        pooledLoss: wireMoney(pooledLoss),
         outcomeSpendCoverage: {
-          gross: fraction(addMoney(totals.allocated, totals.abnormal).gross, outcomeSpend.gross),
-          net: fraction(addMoney(totals.allocated, totals.abnormal).net, outcomeSpend.net),
+          gross: fraction(addMoney(addMoney(totals.allocated, totals.abnormal), pooledLoss).gross, outcomeSpend.gross),
+          net: fraction(addMoney(addMoney(totals.allocated, totals.abnormal), pooledLoss).net, outcomeSpend.net),
         },
       },
       mismatches,
@@ -1049,6 +1055,12 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
       })),
       abnormal: totals.abnormal.map((g) => ({ ...g, cost: wireMoney(g.cost) })),
       parallel: totals.parallel.map((g) => ({ ...g, cost: wireMoney(g.cost), unpooled: wireMoney(g.unpooled) })),
+      pipes: (await readPipeCosts(totals.since, totals.until, (await fetchAllocationInputs()).stepStates)).map((p) => ({
+        ...p,
+        cost: wireMoney(p.cost),
+        pooledLoss: wireMoney(p.pooledLoss),
+        unitCost: p.unitCost ? wireMoney(p.unitCost) : null,
+      })),
     });
   } catch (err) {
     if (err instanceof TooManyGroupsError) {

@@ -984,6 +984,14 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   (conversation -> lead_interested), ONCE per lead x consuming state (a later consumption by a pipe aiming at the same state is dropped);
   the 0078 ladder row of a reach is kept only when no such pipe took that lead's lower state in. So the leads that never booked feed the
   meeting price as transferred-in normal loss.
+- **Weighted-average price per pipe (migration 0083, LEDGER-PIPE-WEIGHTED-AVERAGE-1027; owner 2026-10-27: « of course you take that
+  cost in the price of building outcomes », by the book = process costing per production line)**: the day statement's per-(day,
+  campaign) pools are a storage grain, never the price. A 'none' row of a pipe's spend carries `pipe_target` (its lead's next state,
+  else the pipe's leg step, from features' leg assignments: `pipeSteps`), and `pipe_unit_days` stores each unit a pipe's spend
+  reached per day (channel x outcome). outcome-costs `pipes[]` = per (channel, outcome) over the range: cost + pooledLoss over
+  DISTINCT units; ledger-check `pooledLoss` = the part of produced-none carried by a pipe that has units in the range, counted in
+  `outcomeSpendCoverage`. A pipe with no unit at all keeps its loss visible (unitCost null). Days stored before the stamp
+  (`pipe_units`) are recomputed; only outcome-costs lists them missing.
 - **A run that kept nothing still acts on a lead (`cons_of`)**: a cost row with no anchor and no mark whose walk reaches a run of a
   pipe with a state target that declared CONSUMING a lead-service subject (the pipe's from-step: a "not now" follow-up, a cap
   refusal) is routed like a production share, split over the leads that run consumed (`via_consumption`): the meeting pipe's
