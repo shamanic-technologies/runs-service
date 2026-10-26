@@ -3219,7 +3219,7 @@ export const LedgerCheckResponseSchema = z
       abnormal: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
       abnormalByReason: z.record(AbnormalReasonEnum, LedgerMoneySchema),
       outcomeSpend: LedgerMoneySchema.openapi({ description: "ledger - support: the spend expected to ride an outcome." }),
-      pooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027). Part of producedNone." }),
+      pooledLoss: LedgerMoneySchema.openapi({ description: "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027), or, for a pipe that produced none of its outcome, by that outcome's units from the other pipes. Part of producedNone." }),
       outcomeSpendCoverage: z.object({ gross: z.string().nullable(), net: z.string().nullable() }).openapi({ description: "(allocated + abnormal + pooledLoss) / outcomeSpend, 10 decimals (0..1): the part of outcome spend in a price or stated abnormal. Null on zero." }),
     }),
     mismatches: z.array(LedgerCheckRowSchema),

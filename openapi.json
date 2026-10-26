@@ -5962,7 +5962,7 @@
                   "vendorCents",
                   "unpricedGrossCents"
                 ],
-                "description": "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027). Part of producedNone."
+                "description": "Spend of a pipe that reached no unit the day it happened, carried by the units that pipe produced over the range (weighted-average process costing, LEDGER-PIPE-WEIGHTED-AVERAGE-1027), or, for a pipe that produced none of its outcome, by that outcome's units from the other pipes. Part of producedNone."
               },
               "outcomeSpendCoverage": {
                 "type": "object",
