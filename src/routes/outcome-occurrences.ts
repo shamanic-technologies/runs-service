@@ -798,7 +798,10 @@ router.get("/internal/outcome-costs/ledger-check", requireInternalAuth, async (r
     // Weighted average (LEDGER-PIPE-WEIGHTED-AVERAGE-1027): a pipe's spend that reached no unit the day it happened is
     // carried by the units that pipe produced over the range; only a pipe with no unit at all leaves it uncovered.
     const pipes = await readPipeCosts(range.since, range.until, (await fetchAllocationInputs()).stepStates);
-    const pooledLoss = pipes.filter((p) => p.units > 0).reduce((m, p) => addMoney(m, p.pooledLoss), zeroMoney());
+    // A pipe that never produced its outcome in the range: its spend rides that outcome's units made by the other
+    // pipes (the outcome's fleet price); only an outcome nobody produced leaves it uncovered.
+    const producedOutcomes = new Set(pipes.filter((p) => p.units > 0).map((p) => p.outcomeKey));
+    const pooledLoss = pipes.filter((p) => producedOutcomes.has(p.outcomeKey)).reduce((m, p) => addMoney(m, p.pooledLoss), zeroMoney());
     res.json({
       allocationVersion: ALLOCATION_VERSION,
       allocationRule: ALLOCATION_RULE,

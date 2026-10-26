@@ -960,7 +960,8 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   else the pipe's leg step, from features' leg assignments: `pipeSteps`), and `pipe_unit_days` stores each unit a pipe's spend
   reached per day (channel x outcome). outcome-costs `pipes[]` = per (channel, outcome) over the range: cost + pooledLoss over
   DISTINCT units; ledger-check `pooledLoss` = the part of produced-none carried by a pipe that has units in the range, counted in
-  `outcomeSpendCoverage`. A pipe with no unit at all keeps its loss visible (unitCost null). Days stored before the stamp
+  `outcomeSpendCoverage`. A pipe that produced none of its outcome keeps unitCost null; its loss rides that outcome's units from the
+  other pipes (counted in pooledLoss), only an outcome nobody produced stays uncovered. Days stored before the stamp
   (`pipe_units`) are recomputed; only outcome-costs lists them missing.
 - **A run that kept nothing still acts on a lead (`cons_of`)**: a cost row with no anchor and no mark whose walk reaches a run of a
   pipe with a state target that declared CONSUMING a lead-service subject (the pipe's from-step: a "not now" follow-up, a cap
