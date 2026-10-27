@@ -40,6 +40,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
+- `src/services/run-subtree-cost.ts` + `src/services/stats-rollup-subtree-cost.ts` — `include=subtreeCost` from `run_subtree_costs` (migration 0086). See "Subtree cost per run".
 - `src/services/run-events-retention.ts` — 30-day retention sweep for the `run_events` leaf telemetry log. Started after `app.listen()`, every 6h. Never touches the bronze lifecycle logs.
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
@@ -1252,6 +1253,24 @@ empty answer, 500 past the timeout, campaign 8d3d1ade failed 224 runs in a row (
 (org, service, task, status), all KEY columns (btree dedup keeps it small; disk at 93 %), never partial (the status is a bound
 parameter: a generic plan cannot use a `WHERE status = 'running'` index). Built CONCURRENTLY out-of-band on prod.
 Guard: `tests/integration/runs-list-running-index.test.ts` (plan names the index, red without it).
+
+## Subtree cost per run, kept at write time (migration 0086, BOX-DB-LOAD-1027-RUNS)
+
+`GET /v1/runs?include=subtreeCost` was this database's heaviest statement: 89k calls / 1,041 min in ~23 h
+(2026-10-26/27), ~0.7-1 s each (a 200-run page walked ~1.7k runs, three cold random reads each, box in swap).
+Main caller: features-service's Research catalogue (`readWorkflowRuns`, newest 200 execute-workflow runs per org per pipe).
+
+- **`run_subtree_costs`**: per run with an actual/provisioned cost row in its subtree (itself included): n_rows, gross +
+  frozen net (`COALESCE(net, gross)`) per status. Cancelled/refunded are in no served figure, so not kept.
+- **Triggers**: a cost write adds its delta to its run and every ancestor, upserted ROOT FIRST (two writers in one tree
+  meet on the root, so a multi-row statement cannot deadlock a single write); a run delete (BEFORE, still visible) takes
+  its still-visible subtree out of its visible ancestors and drops its own row (exact in any row order, 0054's rule); a
+  reparent moves the subtree. Same walk as 0054's root_of on every cost write.
+- **Read** (`services/run-subtree-cost.ts`): stamp `subtree_cost` and rows in ONE statement (a rebuild cannot un-stamp
+  between them); unstamped = the live walk, unchanged. The route formats every figure with `toFixed(10)`, so the body is
+  byte-identical either way (guard: `tests/integration/run-subtree-costs-rollup.test.ts`, red if a trigger is off).
+- **Readiness**: `scripts/rebuild-stats-rollup.ts subtree_cost` after the deploy (prod: inside the container against `dist/`).
+  TRUNCATE in global-setup. Other tree reads (`GET /v1/runs/:id`, batch, `/internal/runs/subtree-costs`) still walk.
 
 ## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
 

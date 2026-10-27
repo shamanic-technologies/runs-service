@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { readDb } from "../db/index.js";
 import { costAggregateNetSelectSql, costAggregateSelectSql } from "./cost-aggregator.js";
+import { SUBTREE_COST_ROLLUP_NAME } from "./stats-rollup-subtree-cost.js";
 
 /** Tokens GET /v1/runs accepts in `include`. */
 export const RUN_LIST_INCLUDES = ["subtreeCost"] as const;
@@ -50,7 +51,39 @@ export interface SubtreeBilledCost {
 export async function subtreeBilledCostByRoot(runIds: string[]): Promise<Map<string, SubtreeBilledCost>> {
   const out = new Map<string, SubtreeBilledCost>();
   if (runIds.length === 0) return out;
+  const stored = await storedSubtreeCosts(runIds);
+  const rows = stored ?? (await liveSubtreeCosts(runIds));
+  for (const row of rows) out.set(row.root_run_id as string, row as SubtreeBilledCost);
+  return out;
+}
+
+/**
+ * From run_subtree_costs (migration 0086, maintained at cost-write time): one PK probe per run,
+ * or null while the rollup is not stamped (a rebuild is clearing it, or it never ran). Stamp and
+ * rows are read in ONE statement, so a rebuild cannot un-stamp between them.
+ * Live walk: ~1 s per 200-run page on the loaded box, 89k calls a day (2026-10-27).
+ */
+async function storedSubtreeCosts(runIds: string[]): Promise<any[] | null> {
   const rows = (await readDb.execute(sql`
+    WITH ready AS (SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUBTREE_COST_ROLLUP_NAME}) AS ok)
+    SELECT NULL::uuid AS root_run_id, NULL AS total_cost, NULL AS actual_cost, NULL AS provisioned_cost,
+      NULL AS net_total_cost, NULL AS net_actual_cost, NULL AS net_provisioned_cost, ready.ok AS ready
+    FROM ready
+    UNION ALL
+    SELECT s.run_id,
+      (s.gross_actual + s.gross_provisioned)::text, s.gross_actual::text, s.gross_provisioned::text,
+      (s.net_actual + s.net_provisioned)::text, s.net_actual::text, s.net_provisioned::text, true
+    FROM run_subtree_costs s, ready
+    WHERE ready.ok AND s.n_rows > 0
+      AND s.run_id = ANY(string_to_array(${runIds.join(",")}, ',')::uuid[])
+  `)) as any[];
+  const flag = rows.find((r) => r.root_run_id === null);
+  if (!flag?.ready) return null;
+  return rows.filter((r) => r.root_run_id !== null);
+}
+
+async function liveSubtreeCosts(runIds: string[]): Promise<any[]> {
+  return (await readDb.execute(sql`
     WITH RECURSIVE descendants AS (
       SELECT id, id AS root_run_id FROM runs
       WHERE id = ANY(string_to_array(${runIds.join(",")}, ',')::uuid[])
@@ -77,6 +110,4 @@ export async function subtreeBilledCostByRoot(runIds: string[]): Promise<Map<str
     WHERE c.n > 0
     GROUP BY d.root_run_id
   `)) as any[];
-  for (const row of rows) out.set(row.root_run_id as string, row as SubtreeBilledCost);
-  return out;
 }
