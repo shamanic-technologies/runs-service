@@ -605,6 +605,8 @@ function stateRoutingSql(): SQL {
         SELECT l.id AS unit_id FROM lead_state_reaches l
         WHERE l.lead_id = r.subject_id AND l.brand_id = ANY(r.a_brands) AND l.state = ns.state
           AND l.removed_at IS NULL AND l.reached_at > r.a_started
+          -- OUR-FACTORY-OUTCOMES-1027: only a reach OUR outreach produced is a unit of our process.
+          AND l.caused_by_outreach IS TRUE
         ORDER BY l.reached_at, l.brand_id, l.id LIMIT 1
       ) u ON TRUE
     ),
@@ -727,7 +729,8 @@ const stateKeysOf = (inputs: AllocationInputs) => [...new Set(inputs.stepStates.
  * leads it took + the follow-ups after the yes »): each first reach on `day` of a state ranked r > 1 in its
  * family CONSUMES that lead x brand's reach of the state ranked r - 1 (lead-service dates every lower
  * state, a booking with no yes included). Stored as 'consumed' rows with no money: the input is priced at
- * the lower state's unit cost by the reader's rollup (rule 4), never a per-unit figure here.
+ * the lower state's unit cost by the reader's rollup (rule 4), never a per-unit figure here. Both reaches
+ * must be OURS (OUR-FACTORY-OUTCOMES-1027): another factory's lower state enters free, at $0.
  */
 async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) {
   return (await tx.execute(sql`
@@ -736,9 +739,12 @@ async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) 
            to_char((l.reached_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS lower_day, COUNT(*)::text AS n
     FROM lead_state_reaches r
     JOIN st_states lo ON lo.family = r.family AND lo.rank = r.rank - 1
-    LEFT JOIN lead_state_reaches l
+    JOIN lead_state_reaches l
       ON l.lead_id = r.lead_id AND l.brand_id = r.brand_id AND l.state = lo.state AND l.removed_at IS NULL
     WHERE r.removed_at IS NULL AND r.rank > 1
+      -- OUR-FACTORY-OUTCOMES-1027: only a unit of ours takes an input, and only a lower state of ours is
+      -- priced; another factory's lower state is free-issue material ($0, no row).
+      AND r.caused_by_outreach IS TRUE AND l.caused_by_outreach IS TRUE
       AND r.reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND r.reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
       -- A pipe aiming at this state (or higher) that took this lead's lower state in is where that state was
@@ -765,7 +771,7 @@ async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) 
  * transferred once per consuming state: a later consumption of it by a pipe aiming at the same state is not counted again.
  */
 async function stateInputRoutes(tx: Exec, ids: string[], inputs: AllocationInputs) {
-  const out = new Map<string, { dest: string | null; consumedState: string | null; first: boolean }>();
+  const out = new Map<string, { dest: string | null; consumedState: string | null; first: boolean; freeIssue: boolean }>();
   if (ids.length === 0 || inputs.pipeTargets.length === 0) return out;
   const rows = (await tx.execute(sql`
     WITH ${allocationInputsCtes(inputs)},
@@ -785,7 +791,14 @@ async function stateInputRoutes(tx: Exec, ids: string[], inputs: AllocationInput
              WHERE e.direction = 'consumed' AND e.subject_service = 'lead-service' AND e.subject_id = c.subject_id
                AND er.brand_ids && c.brand_ids
                AND (e.declared_at < c.declared_at OR (e.declared_at = c.declared_at AND e.id < c.id))
-           ) AS first
+           ) AS first,
+           -- OUR-FACTORY-OUTCOMES-1027: the lead's lower state was produced by ANOTHER factory (its reach at these
+           -- brands is not ours): free-issue material, taken in at $0 (no input row).
+           (cs.state IS NOT NULL
+             AND EXISTS (SELECT 1 FROM lead_state_reaches f WHERE f.lead_id = c.subject_id AND f.brand_id = ANY(c.brand_ids)
+                           AND f.state = cs.state AND f.removed_at IS NULL AND f.caused_by_outreach IS NOT TRUE)
+             AND NOT EXISTS (SELECT 1 FROM lead_state_reaches f WHERE f.lead_id = c.subject_id AND f.brand_id = ANY(c.brand_ids)
+                               AND f.state = cs.state AND f.removed_at IS NULL AND f.caused_by_outreach IS TRUE)) AS free_issue
     FROM c
     JOIN pt ON pt.workflow_slug = c.workflow_slug AND pt.feature_slug = c.feature_slug
     CROSS JOIN LATERAL (
@@ -796,7 +809,9 @@ async function stateInputRoutes(tx: Exec, ids: string[], inputs: AllocationInput
     LEFT JOIN st_states ns ON ns.family = pt.family AND ns.rank = rr.reached_rank + 1
     LEFT JOIN st cs ON cs.step_key = c.outcome_key
   `)) as any[];
-  for (const r of rows) out.set(r.id, { dest: r.dest ?? null, consumedState: r.consumed_state ?? null, first: r.first === true });
+  for (const r of rows) {
+    out.set(r.id, { dest: r.dest ?? null, consumedState: r.consumed_state ?? null, first: r.first === true, freeIssue: r.free_issue === true });
+  }
   return out;
 }
 
@@ -1714,11 +1729,14 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   }
   // v5: abnormal loss per reason and the parallel family, under the paying run's tags (n = distinct paying runs).
   for (const r of [...(row.abnormal_cost as any[]), ...(row.parallel_cost as any[])]) outcomeCosts.push({ ...blank(r.kind, r), n: fx(r.runs) });
-  // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state.
+  // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state,
+  // only the reaches our outreach produced (OUR-FACTORY-OUTCOMES-1027).
   const reached = (await tx.execute(sql`
     SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids, COUNT(*)::text AS n
     FROM lead_state_reaches
     WHERE removed_at IS NULL
+      -- OUR-FACTORY-OUTCOMES-1027: another factory's reach (or one with no proof) is no unit of ours.
+      AND caused_by_outreach IS TRUE
       AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
       AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
     GROUP BY 1, 2, 3
@@ -1753,6 +1771,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     const route = stateRoutes.get(c.id);
     // A lead's lower state enters a pipe once: a reuse of it by the same pipe is not another input.
     if (route?.consumedState && !route.first) continue;
+    // Another factory's lower state enters free (OUR-FACTORY-OUTCOMES-1027): no input, $0.
+    if (route?.freeIssue) continue;
     const all = consumingKeys.get(c.runId) ?? [];
     // A declared state event's inputs are not the state's (the lower state is: stateLadderRows).
     const keys = route ? [{ outcomeKey: route.dest, quantity: "1", stateEvent: false }] : all.filter((k) => !k.stateEvent);
@@ -1960,9 +1980,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, stale = false
     `);
   });
 }
@@ -2137,6 +2157,15 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   for (const [day, at] of computed) {
     if (reaches.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
   }
+  // A reach's own day holds its unit (and its ladder input): a reach of a lead nobody declared on (another
+  // factory's, OUR-FACTORY-OUTCOMES-1027) moves that day too when it changes.
+  const reachDays = (await db.execute(sql`
+    SELECT to_char(reached_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(changed_at) AS last_recorded
+    FROM lead_state_reaches WHERE changed_at > ${oldest}::timestamptz AND reached_at IS NOT NULL GROUP BY 1
+  `)) as any[];
+  for (const [day, at] of computed) {
+    if (reachDays.some((l) => l.day === day && new Date(l.last_recorded) > at)) out.add(day);
+  }
   // Spend that landed on an EARLIER day than the one it was recorded on: only those
   // rows can move a stored day (a cost row written on time lands on today).
   const spend = (await db.execute(sql`
@@ -2233,7 +2262,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units, our_factory FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -2252,7 +2281,8 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const noLossShares = new Set(rows.filter((r) => !r.loss_occurrences || !r.anchor_spend).map((r) => r.day as string));
   for (const day of noLossShares) out.add(day);
   // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
-  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units).map((r) => r.day as string));
+  // Same for days computed before only OUR reaches counted (0084, OUR-FACTORY-OUTCOMES-1027).
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units || !r.our_factory).map((r) => r.day as string));
   for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers

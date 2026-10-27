@@ -17,6 +17,13 @@
 //     GET /internal/lead-states (real instants), synced into lead_state_reaches
 //     by the ledger refresher. A changed or removed reach stamps changed_at, so
 //     the refresher recomputes every stored day it can move.
+//  4. WHOSE WIN each reach was (OUR-FACTORY-OUTCOMES-1027, owner 2026-10-27):
+//     lead-service's `causedByOutreach` (true = our outreach produced it, false =
+//     another factory: the client's CRM, team or site, or before our first
+//     touch, null = no proof) + `causeReason`, stored as served. Only a reach
+//     of OURS is a unit of our process (process costing: equivalent units are
+//     what the process completed); a reach of another factory is free-issue
+//     material when our pipe takes it in, priced $0.
 
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -204,7 +211,10 @@ export interface LeadStateRow {
   orgId: string | null;
   brandId: string;
   leadId: string;
-  states: Record<string, { reachedAt: string | null; basis?: string | null; impliedBy?: string | null } | null>;
+  states: Record<
+    string,
+    { reachedAt: string | null; basis?: string | null; impliedBy?: string | null; causedByOutreach?: boolean | null; causeReason?: string | null } | null
+  >;
 }
 
 export interface ReachInput {
@@ -217,9 +227,15 @@ export interface ReachInput {
   reachedAt: string | null;
   basis: string | null;
   impliedBy: string | null;
+  /** lead-service's whose-win answer: true = ours, false = another factory, null = no proof. */
+  causedByOutreach: boolean | null;
+  causeReason: string | null;
 }
 
-/** Flattens lead-service rows to one reach per (brand, lead, reached state). An unknown state key fails loud. */
+/**
+ * Flattens lead-service rows to one reach per (brand, lead, reached state). An unknown state key fails loud,
+ * and so does a reach served WITHOUT the whose-win answer (an older lead-service): never read as "not ours".
+ */
 export function reachesOf(rows: LeadStateRow[], stepStates: StepState[]): ReachInput[] {
   const states = new Map(stepStates.filter((s) => s.stepKey === s.state).map((s) => [s.state, s]));
   const out: ReachInput[] = [];
@@ -228,6 +244,9 @@ export function reachesOf(rows: LeadStateRow[], stepStates: StepState[]): ReachI
       if (v == null) continue;
       const s = states.get(state);
       if (!s) throw new AllocationInputsError(`lead-service state ${state} is not a catalogue lead state`);
+      if (v.causedByOutreach === undefined) {
+        throw new AllocationInputsError(`lead-service served ${state} of lead ${r.leadId} without causedByOutreach`);
+      }
       out.push({
         organizationId: r.orgId ?? null,
         brandId: r.brandId,
@@ -238,6 +257,8 @@ export function reachesOf(rows: LeadStateRow[], stepStates: StepState[]): ReachI
         reachedAt: v.reachedAt ?? null,
         basis: v.basis ?? null,
         impliedBy: v.impliedBy ?? null,
+        causedByOutreach: v.causedByOutreach,
+        causeReason: v.causeReason ?? null,
       });
     }
   }
@@ -271,7 +292,7 @@ export async function fetchLeadStates(): Promise<LeadStateRow[]> {
 
 /**
  * Writes the served reaches into lead_state_reaches: a new or changed reach (date,
- * basis, family/rank) stamps changed_at; a reach no longer served gets removed_at
+ * family/rank, whose win) stamps changed_at; a reach no longer served gets removed_at
  * (and changed_at). One transaction; returns the counts.
  */
 export async function storeLeadStateReaches(reaches: ReachInput[]): Promise<{ upserted: number; changed: number; removed: number }> {
@@ -279,23 +300,25 @@ export async function storeLeadStateReaches(reaches: ReachInput[]): Promise<{ up
     const payload = JSON.stringify(
       reaches.map((r) => ({
         org: r.organizationId, b: r.brandId, l: r.leadId, s: r.state, f: r.family, k: r.rank,
-        at: r.reachedAt, basis: r.basis, imp: r.impliedBy,
+        at: r.reachedAt, basis: r.basis, imp: r.impliedBy, ours: r.causedByOutreach, why: r.causeReason,
       })),
     );
     const changed = (await tx.execute(sql`
       WITH x AS (
         SELECT * FROM jsonb_to_recordset(${payload}::jsonb)
-          AS x(org uuid, b text, l text, s text, f text, k integer, at timestamptz, basis text, imp text)
+          AS x(org uuid, b text, l text, s text, f text, k integer, at timestamptz, basis text, imp text, ours boolean, why text)
       )
-      INSERT INTO lead_state_reaches AS t (organization_id, brand_id, lead_id, state, family, rank, reached_at, basis, implied_by)
-      SELECT org, b, l, s, f, k, at, basis, imp FROM x
+      INSERT INTO lead_state_reaches AS t (organization_id, brand_id, lead_id, state, family, rank, reached_at, basis, implied_by, caused_by_outreach, cause_reason)
+      SELECT org, b, l, s, f, k, at, basis, imp, ours, why FROM x
       ON CONFLICT (brand_id, lead_id, state) DO UPDATE SET
         organization_id = EXCLUDED.organization_id, family = EXCLUDED.family, rank = EXCLUDED.rank,
         reached_at = EXCLUDED.reached_at, basis = EXCLUDED.basis, implied_by = EXCLUDED.implied_by,
+        caused_by_outreach = EXCLUDED.caused_by_outreach, cause_reason = EXCLUDED.cause_reason,
         synced_at = now(),
         changed_at = CASE WHEN t.removed_at IS NOT NULL
                             OR t.reached_at IS DISTINCT FROM EXCLUDED.reached_at
                             OR t.family IS DISTINCT FROM EXCLUDED.family OR t.rank IS DISTINCT FROM EXCLUDED.rank
+                            OR t.caused_by_outreach IS DISTINCT FROM EXCLUDED.caused_by_outreach
                           THEN now() ELSE t.changed_at END,
         removed_at = NULL
       RETURNING (xmax = 0) AS inserted, changed_at = now() AS changed
