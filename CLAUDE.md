@@ -1224,6 +1224,15 @@ empty answer, 500 past the timeout, campaign 8d3d1ade failed 224 runs in a row (
 parameter: a generic plan cannot use a `WHERE status = 'running'` index). Built CONCURRENTLY out-of-band on prod.
 Guard: `tests/integration/runs-list-running-index.test.ts` (plan names the index, red without it).
 
+## A campaign's runs of one service — `idx_runs_campaign_service_started` (migration 0087, BOX-DB-LOAD-1027-RUNS)
+
+`GET /v1/runs?campaignId|campaignIds&serviceName=…&limit` (campaign-service's gate check with `status`, features-service's
+observedPicks per family member) wants the newest runs of one service in a campaign. A campaign's runs are ~1/3 each
+campaign-service / workflow / lead-service, so `idx_runs_campaign_started` filtered row by row (3.7 s) and the
+campaignId form bitmap-ANDed with the org's 173k service runs then heap-fetched 9.9k matches to keep 51 (2.9 s); ~75 s
+of DB time per 5 min (2026-10-27). (campaign_id, service_name, started_at DESC, id DESC) reads the page and stops.
+Built CONCURRENTLY out-of-band on prod. Guard: `tests/integration/runs-campaign-service-index.test.ts` (red without it).
+
 ## Subtree cost per run, kept at write time (migration 0086, BOX-DB-LOAD-1027-RUNS)
 
 `GET /v1/runs?include=subtreeCost` was this database's heaviest statement: 89k calls / 1,041 min in ~23 h

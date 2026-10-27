@@ -610,6 +610,13 @@
       "when": 1783390200000,
       "tag": "0086_run_subtree_costs",
       "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1783400200000,
+      "tag": "0087_runs_campaign_service_started",
+      "breakpoints": true
     }
   ]
 }
