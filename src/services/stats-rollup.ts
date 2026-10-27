@@ -151,8 +151,12 @@ export async function rebuildRollup(
   url: string,
   spec: RollupRebuildSpec,
 ): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
-  const a = postgres(url, { max: 1, connect_timeout: 10, connection: { jit: "off" } });
-  const b = postgres(url, { max: 1, connect_timeout: 10, connection: { jit: "off" } });
+  // `max_lifetime: null`: B's temp tables live in its SESSION, and postgres.js
+  // retires a connection after a random 30-60 min by default. An aggregate longer
+  // than that (subtree_cost in prod, 66 min on 2026-10-27) got a fresh session for
+  // C, whose merge then failed on `relation "rebuild_..." does not exist` (42P01).
+  const a = postgres(url, { max: 1, connect_timeout: 10, max_lifetime: null, connection: { jit: "off" } });
+  const b = postgres(url, { max: 1, connect_timeout: 10, max_lifetime: null, connection: { jit: "off" } });
   try {
     await a`BEGIN ISOLATION LEVEL READ COMMITTED`;
     const lockedAt = Date.now();
