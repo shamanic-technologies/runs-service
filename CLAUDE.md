@@ -19,7 +19,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 ## Architecture
 
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
-- `src/routes/runs.ts` — CRUD routes for runs and costs (run-tree reads on `readDb`, see "Run creation never queues behind run-tree reads")
+- `src/routes/runs.ts` — CRUD routes for runs and costs (run-tree reads on `readDb`, see "Run creation never queues behind run-tree reads"; a campaign's running runs: "A campaign's running runs")
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
 - `src/routes/incurred-costs.ts` — late declaration of never-charged past spend (preview + apply). See "Incurred, never-charged costs".
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
@@ -1213,6 +1213,15 @@ them. Reproduced from inside the box: 72 concurrent stats reads → a cost POST 
   6.5 s → 2.5 s. Built CONCURRENTLY out-of-band on prod (905 MB).
 - **Autovacuum at 2 %** on `runs` / `runs_costs` (default 20 % let `runs` go six
   days with 540k dead rows; the per-day run count fell back to a 7.4 s seq scan).
+
+## A campaign's running runs — `idx_runs_org_service_task_status` (migration 0085, RUNS-LIST-TIMEOUT-1027)
+
+campaign-service's gate check asks `GET /v1/runs?serviceName=campaign-service&taskName=<campaign id>&status=running&limit=200`
+before every run. On `idx_runs_org_service` it heap-fetched all 175k campaign-service runs of the owner org: 15-64 s for an
+empty answer, 500 past the timeout, campaign 8d3d1ade failed 224 runs in a row (2026-10-22..27). The index keys
+(org, service, task, status), all KEY columns (btree dedup keeps it small; disk at 93 %), never partial (the status is a bound
+parameter: a generic plan cannot use a `WHERE status = 'running'` index). Built CONCURRENTLY out-of-band on prod.
+Guard: `tests/integration/runs-list-running-index.test.ts` (plan names the index, red without it).
 
 ## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
 
