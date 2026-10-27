@@ -27,6 +27,9 @@ export const runs = pgTable(
   },
   (table) => [
     index("idx_runs_org_service").on(table.organizationId, table.serviceName),
+    // GET /v1/runs?serviceName&taskName&status (campaign-service's "is this campaign running?"
+    // gate check, migration 0085): equality on all four, not a heap walk of the org's service runs.
+    index("idx_runs_org_service_task_status").on(table.organizationId, table.serviceName, table.taskName, table.status),
     // Covering index for the de-joined per-UTC-day run counts read by
     // GET /public/stats/runs (migration 0030) — index-only scan, no heap.
     index("idx_runs_started_status").on(table.startedAt, table.status),
