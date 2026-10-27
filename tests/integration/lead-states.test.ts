@@ -100,10 +100,10 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
 
   it("Marie: a send before the yes pays lead_interested, a send after it is abnormal, a non-answer rides the yes, the other family is priced apart", async () => {
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
       // Reached, date unknown: no unit, no reach (counted nowhere).
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
     ]);
     const synced = await syncLeadStates(TEST_STEP_STATES);
     expect(synced.upserted).toBe(3);
@@ -183,12 +183,12 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     // L5 says yes on DAY2 09:00 and books at 15:00; lead-service also DECLARED the booking as an event
     // consuming the positive reply (the pre-v5 shape).
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
       { orgId: ORG, brandId: BRAND, leadId: "L5", states: {
-        lead_interested: { reachedAt: at2("09:00").toISOString(), basis: "positive_reply", impliedBy: null },
-        meeting_booked: { reachedAt: at2("15:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+        lead_interested: { reachedAt: at2("09:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
+        meeting_booked: { reachedAt: at2("15:00").toISOString(), basis: "meeting_booked", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
       } },
     ]);
     await syncLeadStates(TEST_STEP_STATES);
@@ -214,10 +214,10 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     expect(await daysToCompute(new Date(`2024-08-17T12:00:00Z`), DAY)).not.toContain(DAY);
     // L2 turns out to have said yes at 09:30: the 09:00 send to L2 now rides L2.
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
     ]);
     const synced = await syncLeadStates(TEST_STEP_STATES);
     expect(synced.changed).toBe(1); // L2 only (L5 was synced by the previous test)
@@ -232,13 +232,13 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     const DAY3 = "2024-08-16";
     const at3 = (h: string) => new Date(`${DAY3}T${h}:00Z`);
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
       { orgId: ORG, brandId: BRAND, leadId: "L6", states: {
-        lead_interested: { reachedAt: at3("08:00").toISOString(), basis: "positive_reply", impliedBy: null },
-        meeting_booked: { reachedAt: at3("18:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+        lead_interested: { reachedAt: at3("08:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
+        meeting_booked: { reachedAt: at3("18:00").toISOString(), basis: "meeting_booked", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
       } },
     ]);
     await syncLeadStates(TEST_STEP_STATES);
@@ -276,15 +276,15 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     const DAY4 = "2024-08-18";
     const at4 = (h: string) => new Date(`${DAY4}T${h}:00Z`);
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
       { orgId: ORG, brandId: BRAND, leadId: "L7", states: {
-        lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null },
-        meeting_booked: { reachedAt: at4("20:00").toISOString(), basis: "meeting_booked", impliedBy: null },
+        lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
+        meeting_booked: { reachedAt: at4("20:00").toISOString(), basis: "meeting_booked", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" },
       } },
-      { orgId: ORG, brandId: BRAND, leadId: "L8", states: { lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L8", states: { lead_interested: { reachedAt: at4("08:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
     ]);
     await syncLeadStates(TEST_STEP_STATES);
     // The meeting pipe follows up L7 once and L8 twice (each run consumes the lead's reply, pays $3); only L7 books.
@@ -314,11 +314,11 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     const D1 = "2024-08-20";
     const D2 = "2024-08-21";
     setLeadStatesSourceForTests([
-      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null } } },
-      { orgId: ORG, brandId: BRAND, leadId: "L11", states: { lead_interested: { reachedAt: new Date(`${D2}T15:00:00Z`).toISOString(), basis: "positive_reply", impliedBy: null } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L1", states: { lead_interested: { reachedAt: at("12:00").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L2", states: { lead_interested: { reachedAt: at("09:30").toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L4", states: { lead_visited: { reachedAt: at("10:00").toISOString(), basis: "click", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L9", states: { paid_client: { reachedAt: null, basis: "sale", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
+      { orgId: ORG, brandId: BRAND, leadId: "L11", states: { lead_interested: { reachedAt: new Date(`${D2}T15:00:00Z`).toISOString(), basis: "positive_reply", impliedBy: null, causedByOutreach: true, causeReason: "our_outreach" } } },
     ]);
     await syncLeadStates(TEST_STEP_STATES);
     const sendOn = async (day: string, lead: string, task: string) => {
@@ -341,5 +341,60 @@ describe("Allocation v5: the lead's next state (LEAD-STATES-1024-RUNS)", () => {
     expect(money(pipe.unitCost)).toBe("20.0000000000");
     const check = await request(app).get(`/internal/outcome-costs/ledger-check?since=${D1}&until=${D2}`).set(getInternalAuthHeaders());
     expect(money(check.body.totals.pooledLoss)).toBe("10.0000000000");
+  });
+
+  it("OUR-FACTORY-OUTCOMES-1027: another factory's reach is no unit of ours, its lower state enters free, normal loss rides only our units", async () => {
+    const D5 = "2024-08-24";
+    const at5 = (h: string) => new Date(`${D5}T${h}:00Z`);
+    const ours = { causedByOutreach: true, causeReason: "our_outreach" };
+    const theirs = { causedByOutreach: false, causeReason: "before_first_delivery" };
+    setLeadStatesSourceForTests([
+      // O1 says yes to our cold email at 12:00 (ours).
+      { orgId: ORG, brandId: BRAND, leadId: "O1", states: { lead_interested: { reachedAt: at5("12:00").toISOString(), basis: "positive_reply", impliedBy: null, ...ours } } },
+      // F1 filled the client's own form at 08:00 (another factory), then booked at 20:00 after our meeting pipe followed up (ours).
+      { orgId: ORG, brandId: BRAND, leadId: "F1", states: {
+        lead_interested: { reachedAt: at5("08:00").toISOString(), basis: "form_submitted", impliedBy: null, ...theirs },
+        meeting_booked: { reachedAt: at5("20:00").toISOString(), basis: "meeting_booked", impliedBy: null, causedByOutreach: true, causeReason: "after_first_delivery" },
+      } },
+      // F2: a meeting imported from the client's CRM (another factory), its interest implied by it.
+      { orgId: ORG, brandId: BRAND, leadId: "F2", states: {
+        lead_interested: { reachedAt: at5("07:00").toISOString(), basis: "meeting_booked", impliedBy: "meeting_booked", ...theirs },
+        meeting_booked: { reachedAt: at5("07:00").toISOString(), basis: "meeting_booked", impliedBy: null, ...theirs },
+      } },
+      // N1: a signup nobody can tie to us (never emailed): no proof, not ours.
+      { orgId: ORG, brandId: BRAND, leadId: "N1", states: { lead_interested: { reachedAt: at5("13:00").toISOString(), basis: "signup", impliedBy: null, causedByOutreach: null, causeReason: "never_delivered" } } },
+    ]);
+    await syncLeadStates(TEST_STEP_STATES);
+    const sendTo = async (hour: string, lead: string, task: string) => {
+      const r = await insertTestRun({ organizationId: ORG, serviceName: "instantly-service", taskName: task, brandIds: [BRAND], campaignId: "cmp-factory",
+        workflowSlug: COLD, featureSlug: "sales-cold-email-outreach", status: "completed", startedAt: at5(hour) });
+      await insertTestRunCost({ runId: r.id, costName: "tok", quantity: "2", unitCostInUsdCents: "5", totalCostInUsdCents: "10.0000000000", createdAt: new Date(at5(hour).getTime() + 60_000) });
+      return { runId: r.id, occurredAt: "run_started_at", produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: lead }] };
+    };
+    const wf = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "execute-workflow", brandIds: [BRAND], campaignId: "cmp-factory",
+      workflowSlug: MEET, featureSlug: "ai-meeting-booking", status: "completed", startedAt: at5("10:00") });
+    await insertTestRunCost({ runId: wf.id, costName: "tok", quantity: "0.6", unitCostInUsdCents: "5", totalCostInUsdCents: "3.0000000000", createdAt: at5("10:01") });
+    let res = await request(app).post("/v1/platform-runs/outcomes/batch").set(getPlatformAuthHeaders({ serviceName: "instantly-service" }))
+      .send({ runs: [await sendTo("09:00", "O1", "email-send-factory-1"), await sendTo("09:00", "X1", "email-send-factory-2")] });
+    expect(res.status).toBe(201);
+    res = await request(app).post("/v1/platform-runs/outcomes/batch").set(getPlatformAuthHeaders({ serviceName: "workflow" }))
+      .send({ runs: [{ runId: wf.id, occurredAt: "run_started_at", consumed: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: "F1" }] }] });
+    expect(res.status).toBe(201);
+
+    const d = await computeLedgerDay(D5, VERSIONS as any, INPUTS);
+    const o = d.orgs.find((x) => x.organizationId === ORG)!;
+    expect(o.ledger.gross).toBe("23.0000000000");
+    expect(checkLedgerRow(ledgerCheckInputOf(o)).balanced).toBe(true);
+    const of = (kind: string, key: string) => d.outcomeCosts.filter((r) => r.kind === kind && r.outcomeKey === key);
+    const count = (xs: any[]) => xs.reduce((n, r) => n + Number(r.n), 0);
+    const cost = (xs: any[]) => xs.reduce((x, r) => x.plus(r.money.gross), new Decimal(0)).toFixed(10);
+    // Units: only O1's yes and F1's booking are ours (F1's form, F2's CRM meeting and N1's signup are not).
+    expect(count(of("produced_count", "lead_interested"))).toBe(1);
+    expect(count(of("produced_count", "meeting_booked"))).toBe(1);
+    // X1 never answered: its send is normal loss carried by OUR unit (O1), never by another factory's reach.
+    expect(cost(of("produced_cost", "lead_interested"))).toBe("20.0000000000");
+    expect(cost(of("produced_cost", "meeting_booked"))).toBe("3.0000000000");
+    // F1's interest came from the client's form: free-issue, no input priced into our meeting; F2 takes nothing.
+    expect(of("consumed", "meeting_booked")).toHaveLength(0);
   });
 });

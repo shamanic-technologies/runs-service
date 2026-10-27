@@ -969,6 +969,14 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   follow-up after the yes pays meeting_booked, a cold email "not now" after the yes is abnormal. Runs that declare no lead at all
   (ai-meeting-booking execute-workflow "not now" runs, ~$34 of chat-service writes before 2026-10-25) stay unpooled loss until their
   producer declares the lead (workflow-service brief LEAD-STATES-1024-MEETING-WRITES); those declarations stale the days they move.
+- **Only OUR factory's reaches are units (migration 0084, OUR-FACTORY-OUTCOMES-1027; owner 2026-10-27: « as close as possible to
+  industrial cost-accounting best practice », no case per source/brand/channel)**: lead-service serves WHOSE WIN each reach was
+  (`causedByOutreach` true / false = another factory: client CRM, team, site, before our first touch / null = no proof, + `causeReason`),
+  stored on `lead_state_reaches`; a reach served without it fails the tick (never read as "not ours"). Units (`produced_count`), the
+  unit a run's spend reaches, and the ladder input count `caused_by_outreach IS TRUE` only; another factory's lower state taken in by
+  our pipe is FREE-ISSUE material ($0, no input row); "already reached" (abnormal) still reads every reach. A whose-win change stamps
+  `changed_at` and stales the reach's own day. Days stored before (`cost_ledger_computed_days.our_factory`) recompute with the ladder
+  ones; only outcome-costs lists them missing. Prod 2026-10-27 since 2026-02: interested 274 -> 72, booked 79 -> 11, paid 25 -> 5.
 - Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
   `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
   visit priced apart, a moved reach stales the day).
