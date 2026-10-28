@@ -15,18 +15,26 @@ if (!connectionString) {
 // its own health route. 20 connections give the aggregations room without
 // approaching the server's limit.
 //
-// `idle_timeout` is deliberately UNSET: postgres.js defaults it to null (idle
-// connections are never closed), and setting a value buys a fresh TCP+TLS
-// handshake on the next request after any quiet stretch. `connect_timeout`
-// stays bounded so a database that is not accepting connections fails fast
-// instead of hanging the caller.
+// Connections are RECYCLED (`POOL_RECYCLE`, BOX-LOAD-1028-PG-CONNS): a Postgres
+// backend keeps the memory of the biggest query it ever ran until it exits. With
+// postgres.js's default lifetime (30-60 min) idle runs_service backends held
+// 170-490 MB each on the shared box (2026-10-28: 32 backends, ~1.3 GB private
+// memory, ~0.9 GB of it swapped). `max_lifetime` 5 min ends a connection after its
+// current query (postgres.js never cuts a query or a reserved connection), and
+// `idle_timeout` 60 s closes the ones a quiet stretch leaves unused. Reconnecting
+// is a local-network handshake, cheap next to holding that memory for an hour.
+// `connect_timeout` stays bounded so a database that is not accepting
+// connections fails fast instead of hanging the caller.
 //
 // `jit` is OFF for every connection of this pool. The stats reads here are
 // aggregations whose plans Postgres costs high enough to JIT-compile, and the
 // compile itself dominated them: the cross-org per-workflow cost read spent
 // 1.4 s of its 5 s compiling 72 functions, on every call (2026-09-24). None of
 // these queries runs long enough for compiled expressions to repay that.
+const POOL_RECYCLE = { idle_timeout: 60, max_lifetime: 300 } as const;
+
 export const sql = postgres(connectionString, {
+  ...POOL_RECYCLE,
   max: 20,
   connect_timeout: 10,
   connection: { jit: "off" },
@@ -49,6 +57,7 @@ export const db = drizzle(sql, { schema });
 // of holding a connection and a core for a minute while its caller has long given up.
 // Identical reads in flight share one execution (see coalesce.ts).
 export const statsSql = postgres(connectionString, {
+  ...POOL_RECYCLE,
   max: 8,
   connect_timeout: 10,
   connection: { jit: "off", statement_timeout: 30000 },
@@ -70,6 +79,7 @@ export const statsDb = coalesceExecute(drizzle(statsSql, { schema }));
 // whose caller is gone must not keep a connection and a core for minutes. 60 s, not
 // 30, so an unbounded `GET /v1/runs` list that used to answer slowly still answers.
 export const readSql = postgres(connectionString, {
+  ...POOL_RECYCLE,
   max: 10,
   connect_timeout: 10,
   connection: { jit: "off", statement_timeout: 60000 },
