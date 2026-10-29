@@ -9619,6 +9619,23 @@
                   "type": "string",
                   "nullable": true,
                   "description": "The support function the run is marked for, else null."
+                },
+                "parent": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "serviceName": {
+                      "type": "string"
+                    },
+                    "taskName": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "serviceName",
+                    "taskName"
+                  ],
+                  "description": "The run this one is a step of, by service and task; null for a root run."
                 }
               },
               "required": [
@@ -9636,7 +9653,8 @@
                 "costRows",
                 "produced",
                 "consumed",
-                "supportKind"
+                "supportKind",
+                "parent"
               ]
             }
           },
@@ -9647,6 +9665,49 @@
             "type": "string",
             "nullable": true,
             "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "made",
+              "running",
+              "none",
+              null
+            ]
+          },
+          "counts": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "until": {
+                "type": "string"
+              },
+              "all": {
+                "type": "integer"
+              },
+              "made": {
+                "type": "integer"
+              },
+              "running": {
+                "type": "integer"
+              },
+              "none": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "since",
+              "until",
+              "all",
+              "made",
+              "running",
+              "none"
+            ],
+            "description": "First page only: the brand's runs started in this page's 24 h window, per tab. made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing."
           }
         },
         "required": [
@@ -9655,7 +9716,9 @@
           "windowStart",
           "runs",
           "nextBefore",
-          "nextBeforeId"
+          "nextBeforeId",
+          "kind",
+          "counts"
         ]
       }
     },
@@ -15927,6 +15990,21 @@
             "required": false,
             "description": "1..100, default 50.",
             "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "made",
+                "running",
+                "none"
+              ],
+              "description": "Only this tab's runs (default all)."
+            },
+            "required": false,
+            "description": "Only this tab's runs (default all).",
+            "name": "kind",
             "in": "query"
           }
         ],

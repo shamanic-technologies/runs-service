@@ -5,6 +5,7 @@ import { createTestApp, getAuthHeaders, getInternalAuthHeaders } from "../helper
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
+import { clearBrandLedgerCache } from "../../src/services/brand-ledger.js";
 import { ALLOCATION_VERSION, addDays, runLedgerBackfill, utcDay, type LedgerBackfillState } from "../../src/services/outcome-ledger.js";
 
 // FACTORY-P4-PAGES follow-up: the paced backfill computes every past day not current under the
@@ -49,6 +50,7 @@ describe("paced ledger backfill", () => {
     expect(before.body.daysMissing).toEqual([PAST]);
     const state: LedgerBackfillState = { running: true, allocationVersion: ALLOCATION_VERSION, startedAt: "", finishedAt: null, pass: 0, remaining: 0, computed: [], failed: [], pausedForLoad: 0, last: null, error: null };
     await runLedgerBackfill(state, 1000, 1, 0, 0);
+    clearBrandLedgerCache();
     expect(state.failed).toEqual([]);
     expect(state.computed).toContain(PAST);
     for (let i = 0; i < 3; i++) expect(state.computed).not.toContain(addDays(TODAY, -i));

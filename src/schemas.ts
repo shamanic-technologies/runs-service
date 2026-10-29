@@ -3594,10 +3594,16 @@ export const BrandLedgerRunsResponseSchema = z
         produced: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number().int() })),
         consumed: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number().int() })),
         supportKind: z.string().nullable().openapi({ description: "The support function the run is marked for, else null." }),
+        parent: z.object({ serviceName: z.string(), taskName: z.string() }).nullable().openapi({ description: "The run this one is a step of, by service and task; null for a root run." }),
       }),
     ),
     nextBefore: z.string(),
     nextBeforeId: z.string().uuid().nullable(),
+    kind: z.enum(["made", "running", "none"]).nullable(),
+    counts: z
+      .object({ since: z.string(), until: z.string(), all: z.number().int(), made: z.number().int(), running: z.number().int(), none: z.number().int() })
+      .nullable()
+      .openapi({ description: "First page only: the brand's runs started in this page's 24 h window, per tab. made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing." }),
   })
   .openapi("BrandLedgerRunsResponse");
 
@@ -3614,6 +3620,7 @@ registry.registerPath({
       before: z.string().optional().openapi({ description: "Timestamp (default now): runs started strictly before it." }),
       beforeId: z.string().optional().openapi({ description: "With `before`: continue after this run at that instant." }),
       limit: z.string().optional().openapi({ description: "1..100, default 50." }),
+      kind: z.enum(["made", "running", "none"]).optional().openapi({ description: "Only this tab's runs (default all)." }),
     }),
   },
   responses: {
