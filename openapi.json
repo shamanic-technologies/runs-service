@@ -9707,7 +9707,7 @@
               "running",
               "none"
             ],
-            "description": "First page only: the brand's runs started in this page's 24 h window, per tab. made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing."
+            "description": "First page only: the brand's runs started in this page's 24 h window, per tab, counted in the background (null while the first count of a 10-min window runs: read again). made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing."
           }
         },
         "required": [
