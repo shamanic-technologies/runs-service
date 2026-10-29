@@ -20,9 +20,10 @@ const ORG = "0c05acc0-1029-4c0a-8b1e-0000000000d1";
 const LEAD = "lead-stale-narrow-1";
 const app = createTestApp();
 const TODAY = utcDay(new Date());
-const A = addDays(TODAY, -20);
-const B = addDays(TODAY, -15);
-const C = addDays(TODAY, -10);
+// Far back: no other test file's run lands on these days (the CI shard shares one database).
+const A = addDays(TODAY, -300);
+const B = addDays(TODAY, -295);
+const C = addDays(TODAY, -290);
 
 describe("staleness narrowed to the subject's run days", () => {
   beforeAll(async () => {
@@ -47,13 +48,15 @@ describe("staleness narrowed to the subject's run days", () => {
 
   it("a reach changed after the days were computed stales the lead's run days only", async () => {
     const computedAt = new Date(Date.now() - 60_000);
-    const computed = new Map([A, B, C, addDays(TODAY, -5)].map((d) => [d, computedAt]));
-    expect([...(await staleComputedDays(computed, computedAt))].filter((d) => computed.has(d))).toEqual([]);
+    const computed = new Map([A, B, C, addDays(TODAY, -285)].map((d) => [d, computedAt]));
+    const before = new Set(await staleComputedDays(computed, computedAt));
     await db.execute(sql`
       INSERT INTO lead_state_reaches (organization_id, brand_id, lead_id, state, family, rank, reached_at, changed_at)
-      VALUES (${ORG}::uuid, 'b', ${LEAD}, 'lead_interested', 'interest', 1, ${`${addDays(TODAY, -30)}T00:00:00Z`}::timestamptz, now())
+      VALUES (${ORG}::uuid, 'b', ${LEAD}, 'lead_interested', 'interest', 1, ${`${addDays(TODAY, -310)}T00:00:00Z`}::timestamptz, now())
     `);
-    const stale = [...(await staleComputedDays(computed, computedAt))].filter((d) => computed.has(d)).sort();
-    expect(stale).toEqual([A, C]);
+    const after = await staleComputedDays(computed, computedAt);
+    expect([...after].filter((d) => computed.has(d) && !before.has(d)).sort()).toEqual([A, C].filter((d) => !before.has(d)));
+    expect(after.has(A) && after.has(C)).toBe(true);
+    expect(after.has(B)).toBe(before.has(B));
   });
 });
