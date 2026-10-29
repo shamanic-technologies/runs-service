@@ -12,6 +12,7 @@ const BRAND_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 const wire = (m: Money) => ({ grossCents: m.gross, netCents: m.net, vendorCents: m.vendor, unpricedGrossCents: m.unpricedGross });
 const wireBooks = (b: BrandBooks) => ({
+  production: wire(b.production),
   standardCharged: wire(b.standardCharged),
   reuseGain: wire(b.reuseGain),
   producedNone: wire(b.producedNone),
