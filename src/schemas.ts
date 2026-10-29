@@ -3622,3 +3622,35 @@ registry.registerPath({
     401: { description: "Unauthorized" },
   },
 });
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/outcome-costs/backfill",
+  summary: "Compute, once and paced to the box, every past ledger day not current under the allocation version (service-auth)",
+  description:
+    "Walks every day missing, stale or stored with older columns (the three recent days stay the 15-min tick's), one day at a time under the refresher's lock: waits while the database runs more than `maxActive` client queries (default 12), rests `restFactor` x the day's time after it (default 1: at most half the time busy), a waiting tick goes first. Passes repeat until a pass finds nothing (`maxPasses`, default 3). Same compute and store as the tick. 202 with the state, 409 while one runs.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ maxActive: z.number().int().optional(), maxPasses: z.number().int().optional(), restFactor: z.number().optional() }),
+        },
+      },
+    },
+  },
+  responses: {
+    202: { description: "Started: the backfill state" },
+    400: { description: "Invalid option", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "A backfill is already running" },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/outcome-costs/backfill",
+  summary: "The ledger backfill's state: pass, days computed, failed, left, load pauses (service-auth)",
+  security: [{ apiKey: [] }],
+  responses: { 200: { description: "{ state } (null before any backfill since boot)" }, 401: { description: "Unauthorized" } },
+});
