@@ -27,6 +27,8 @@
 //                                       run's whole-subtree cost, every run).
 //   no_campaign_day  (migration 0055) — GET /internal/stats/costs/no-campaign/monthly
 //                                       (staff no-campaign spend per org per month).
+//   consumption_day  (migration 0090) — GET /internal/stats/costs/consumption
+//                                       (costs-service's real-cost refresh).
 //   campaign_entry   (migration 0040) — run_campaign_entries, for
 //                                       GET /v1/stats/run-outcomes (scope=entry).
 //                                       A lock-free windowed backfill, not the
@@ -35,7 +37,7 @@
 // Run manually AFTER the deploy that ships the migration (never on boot: it
 // aggregates the whole ledger). Safe to re-run at any time.
 //
-//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|task_units|campaign_cost_items|audience_day|cost_name_day|root_cost|subtree_cost|run_day|no_campaign_day|campaign_entry]
+//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|task_units|campaign_cost_items|audience_day|cost_name_day|root_cost|subtree_cost|run_day|no_campaign_day|consumption_day|campaign_entry]
 //
 // Writes QUEUE (never fail) for well under a second while it clears the rollup
 // and exports a snapshot under a SHARE ROW EXCLUSIVE lock; the aggregate then
@@ -54,6 +56,7 @@ import { rebuildRootCostRollup } from "../src/services/stats-rollup-root-cost.js
 import { rebuildSubtreeCostRollup } from "../src/services/stats-rollup-subtree-cost.js";
 import { rebuildRunDayRollup } from "../src/services/stats-rollup-run-day.js";
 import { rebuildNoCampaignDayRollup } from "../src/services/stats-rollup-no-campaign-day.js";
+import { rebuildConsumptionDayRollup } from "../src/services/stats-rollup-consumption-day.js";
 import { backfillRunCampaignEntries } from "../src/services/run-campaign-entries.js";
 
 const url = process.env.RUNS_SERVICE_DATABASE_URL;
@@ -68,8 +71,8 @@ if (which === "campaign_entry") {
   process.exit(0);
 }
 
-const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup, task_units: rebuildTaskUnitsRollup, campaign_cost_items: rebuildCampaignCostItemsRollup, audience_day: rebuildAudienceDayRollup, cost_name_day: rebuildCostNameDayRollup, root_cost: rebuildRootCostRollup, subtree_cost: rebuildSubtreeCostRollup, run_day: rebuildRunDayRollup, no_campaign_day: rebuildNoCampaignDayRollup }[which];
-if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task, task_units, campaign_cost_items, audience_day, cost_name_day, root_cost, subtree_cost, run_day, no_campaign_day or campaign_entry.`);
+const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup, task_units: rebuildTaskUnitsRollup, campaign_cost_items: rebuildCampaignCostItemsRollup, audience_day: rebuildAudienceDayRollup, cost_name_day: rebuildCostNameDayRollup, root_cost: rebuildRootCostRollup, subtree_cost: rebuildSubtreeCostRollup, run_day: rebuildRunDayRollup, no_campaign_day: rebuildNoCampaignDayRollup, consumption_day: rebuildConsumptionDayRollup }[which];
+if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task, task_units, campaign_cost_items, audience_day, cost_name_day, root_cost, subtree_cost, run_day, no_campaign_day, consumption_day or campaign_entry.`);
 
 const t0 = Date.now();
 const result = await rebuild(url);
