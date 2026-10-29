@@ -162,7 +162,12 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     const child = await insertTestRun({ organizationId: ORG, serviceName: "google", taskName: "request", status: "running", brandIds: [B1], parentRunId: runIds.n, startedAt: new Date(`${TODAY}T00:40:00Z`) });
     clearBrandLedgerCache();
     const get = (q: string) => request(app).get(`/internal/brands/${B1}/ledger/runs?before=${TODAY}T23:59:59Z${q}`).set(getInternalAuthHeaders());
-    const all = await get("");
+    expect((await get("")).body.counts).toBeNull(); // counted in the background
+    let all = await get("");
+    for (let i = 0; i < 50 && all.body.counts === null; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      all = await get("");
+    }
     expect(all.body.counts).toMatchObject({ all: 4, made: 2, running: 1, none: 1 });
     expect(all.body.runs[0]).toMatchObject({ id: child.id, status: "running", parent: { serviceName: "svc", taskName: "task" } });
     expect((await get("&kind=made")).body.runs.map((x: any) => x.id)).toEqual([runIds.r, runIds.b]);

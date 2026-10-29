@@ -3603,7 +3603,7 @@ export const BrandLedgerRunsResponseSchema = z
     counts: z
       .object({ since: z.string(), until: z.string(), all: z.number().int(), made: z.number().int(), running: z.number().int(), none: z.number().int() })
       .nullable()
-      .openapi({ description: "First page only: the brand's runs started in this page's 24 h window, per tab. made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing." }),
+      .openapi({ description: "First page only: the brand's runs started in this page's 24 h window, per tab, counted in the background (null while the first count of a 10-min window runs: read again). made = declared >= 1 produced outcome; running = open, made nothing yet; none = closed, made nothing." }),
   })
   .openapi("BrandLedgerRunsResponse");
 
