@@ -3549,7 +3549,7 @@ export const BrandLedgerResponseSchema = z
     complete: z.boolean(),
     daysMissing: z.array(z.string()).openapi({ description: "Days not stored under the current allocation, or stale: out of every figure." }),
     books: z.object(BrandBooksFields),
-    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...BrandBooksFields })).openapi({ description: "The same books per UTC day (stored days only, days with no row of the brand omitted)." }),
+    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...BrandBooksFields })).openapi({ description: "The same books per UTC day: every stored day of the range (a day with no row of the brand at zero); a day in daysMissing is absent." }),
     outcomes: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number(), cost: LedgerMoneySchema })).openapi({ description: "Occurrences the brand's runs declared produced over the range, and their production cost." }),
   })
   .openapi("BrandLedgerResponse");

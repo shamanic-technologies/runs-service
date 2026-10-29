@@ -9449,7 +9449,7 @@
                 "balanced"
               ]
             },
-            "description": "The same books per UTC day (stored days only, days with no row of the brand omitted)."
+            "description": "The same books per UTC day: every stored day of the range (a day with no row of the brand at zero); a day in daysMissing is absent."
           },
           "outcomes": {
             "type": "array",

@@ -121,6 +121,9 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
         expect(sum.toFixed(10), `${f}.${base}`).toBe(mine.body.books[f][base]);
       }
     }
+    expect(mine.body.days.map((d: any) => d.day)).toEqual([YESTERDAY, TODAY]);
+    const quiet = await request(app).get(`/internal/brands/${B2}/ledger?since=${YESTERDAY}&until=${TODAY}`).set(getInternalAuthHeaders());
+    expect(quiet.body.days.map((d: any) => [d.day, d.spend.grossCents])).toEqual([[YESTERDAY, "0.0000000000"], [TODAY, quiet.body.books.spend.grossCents]]);
     const produced = Object.fromEntries(mine.body.outcomes.map((o: any) => [o.outcomeKey, o.occurrences]));
     expect(produced).toEqual({ email_found: 2, email_checked: 2 });
   });
