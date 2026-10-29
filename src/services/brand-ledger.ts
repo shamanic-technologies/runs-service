@@ -366,25 +366,45 @@ export async function readBrandLedgerRuns(
   };
 }
 
-/** Per-tab counts of one window, cached 5 min per (brand, window minute; ~10 s for the busiest brand on the loaded box): the page polls, the window barely moves. */
-const countsCache = new Map<string, { at: number; value: NonNullable<BrandLedgerRunsPage["counts"]> }>();
+/**
+ * Per-tab counts of one window, NEVER on the page's path: the count walks every run of the window (10 s for
+ * the busiest brand on the loaded box, past the 30 s timeout while the ledger backfill runs, 2026-10-29), so
+ * a page answers with the last counts of its 10-min bucket, or null while ONE count runs in the background
+ * (its own 120 s timeout); the page re-reads and gets them.
+ */
+const countsCache = new Map<string, { at: number; value: NonNullable<BrandLedgerRunsPage["counts"]> | null; pending: boolean }>();
 
-async function windowCounts(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]>> {
+async function windowCounts(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]> | null> {
   const key = `${brandId}|${since.slice(0, 15)}`; // 10-min buckets: a window sliding with "now" reuses its count
   const hit = countsCache.get(key);
-  if (hit && Date.now() - hit.at < 5 * 60_000) return hit.value;
-  const [c] = (await statsDb.execute(sql`
-    SELECT count(*)::int AS all,
-           count(*) FILTER (WHERE x.made)::int AS made,
-           count(*) FILTER (WHERE NOT x.made AND r.status = 'running')::int AS running,
-           count(*) FILTER (WHERE NOT x.made AND r.status <> 'running')::int AS none
-    FROM runs r
-    CROSS JOIN LATERAL (SELECT ${MADE} AS made) x
-    WHERE r.started_at < ${until}::timestamptz AND r.started_at >= ${since}::timestamptz
-      AND r.brand_ids @> ARRAY[${brandId}]::text[]
-  `)) as any[];
-  const value = { since, until, all: Number(c.all), made: Number(c.made), running: Number(c.running), none: Number(c.none) };
-  countsCache.set(key, { at: Date.now(), value });
-  if (countsCache.size > 500) countsCache.delete(countsCache.keys().next().value!);
-  return value;
+  if (hit?.value && Date.now() - hit.at < 10 * 60_000) return hit.value;
+  if (!hit?.pending) {
+    const entry = { at: hit?.at ?? 0, value: hit?.value ?? null, pending: true };
+    countsCache.set(key, entry);
+    countWindow(brandId, since, until)
+      .then((value) => countsCache.set(key, { at: Date.now(), value, pending: false }))
+      .catch((err) => {
+        entry.pending = false;
+        console.error("[Runs Service] brand runs counts failed (retried on the next read):", err);
+      });
+    if (countsCache.size > 500) countsCache.delete(countsCache.keys().next().value!);
+  }
+  return hit?.value ?? null;
+}
+
+async function countWindow(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]>> {
+  const [c] = await statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+    return (await tx.execute(sql`
+      SELECT count(*)::int AS all,
+             count(*) FILTER (WHERE x.made)::int AS made,
+             count(*) FILTER (WHERE NOT x.made AND r.status = 'running')::int AS running,
+             count(*) FILTER (WHERE NOT x.made AND r.status <> 'running')::int AS none
+      FROM runs r
+      CROSS JOIN LATERAL (SELECT ${MADE} AS made) x
+      WHERE r.started_at < ${until}::timestamptz AND r.started_at >= ${since}::timestamptz
+        AND r.brand_ids @> ARRAY[${brandId}]::text[]
+    `)) as any[];
+  });
+  return { since, until, all: Number(c.all), made: Number(c.made), running: Number(c.running), none: Number(c.none) };
 }
