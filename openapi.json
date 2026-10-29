@@ -8942,6 +8942,671 @@
           "reason",
           "statedBy"
         ]
+      },
+      "BrandLedgerResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "daysMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Days not stored under the current allocation, or stale: out of every figure."
+          },
+          "books": {
+            "type": "object",
+            "properties": {
+              "standardCharged": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Standard cost charged on the brand's occurrences: production spread + standard charges of its reuses."
+              },
+              "reuseGain": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Standard charges of reuses: charged at the price paid to produce the occurrence, never spent again."
+              },
+              "producedNone": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend of runs that declared no produced occurrence (support + undeclared)."
+              },
+              "support": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Part of producedNone that is named support."
+              },
+              "undeclared": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "producedNone - support."
+              },
+              "abnormal": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+              },
+              "spend": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "The runs ledger at brand grain: every actual/refunded cost row of the brand's runs, summed apart."
+              },
+              "difference": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "standardCharged - reuseGain + producedNone + abnormal - spend, per basis (0 when balanced)."
+              },
+              "balanced": {
+                "type": "boolean",
+                "description": "difference is exactly 0 on every basis (no tolerance)."
+              }
+            },
+            "required": [
+              "standardCharged",
+              "reuseGain",
+              "producedNone",
+              "support",
+              "undeclared",
+              "abnormal",
+              "spend",
+              "difference",
+              "balanced"
+            ]
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string"
+                },
+                "occurrences": {
+                  "type": "number"
+                },
+                "standardCharged": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Standard cost charged on the brand's occurrences: production spread + standard charges of its reuses."
+                },
+                "reuseGain": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Standard charges of reuses: charged at the price paid to produce the occurrence, never spent again."
+                },
+                "producedNone": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend of runs that declared no produced occurrence (support + undeclared)."
+                },
+                "support": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Part of producedNone that is named support."
+                },
+                "undeclared": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "producedNone - support."
+                },
+                "abnormal": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "ABNORMAL loss (allocation v5): spend in no unit cost, a line apart beside support. ledger = allocated + producedNone + abnormal."
+                },
+                "spend": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "The runs ledger at brand grain: every actual/refunded cost row of the brand's runs, summed apart."
+                },
+                "difference": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "standardCharged - reuseGain + producedNone + abnormal - spend, per basis (0 when balanced)."
+                },
+                "balanced": {
+                  "type": "boolean",
+                  "description": "difference is exactly 0 on every basis (no tolerance)."
+                }
+              },
+              "required": [
+                "day",
+                "occurrences",
+                "standardCharged",
+                "reuseGain",
+                "producedNone",
+                "support",
+                "undeclared",
+                "abnormal",
+                "spend",
+                "difference",
+                "balanced"
+              ]
+            },
+            "description": "The same books per UTC day (stored days only, days with no row of the brand omitted)."
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcomeKey": {
+                  "type": "string"
+                },
+                "occurrences": {
+                  "type": "number"
+                },
+                "cost": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ]
+                }
+              },
+              "required": [
+                "outcomeKey",
+                "occurrences",
+                "cost"
+              ]
+            },
+            "description": "Occurrences the brand's runs declared produced over the range, and their production cost."
+          }
+        },
+        "required": [
+          "brandId",
+          "since",
+          "until",
+          "complete",
+          "daysMissing",
+          "books",
+          "days",
+          "outcomes"
+        ]
+      },
+      "BrandLedgerRunsResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "windowStart": {
+            "type": "string"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "parentRunId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "startedAt": {
+                  "type": "string"
+                },
+                "completedAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string"
+                },
+                "serviceName": {
+                  "type": "string"
+                },
+                "taskName": {
+                  "type": "string"
+                },
+                "workflowSlug": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "featureSlug": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "campaignId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "cost": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ],
+                  "description": "The run's own cost rows that happened (actual + refunded)."
+                },
+                "costRows": {
+                  "type": "integer"
+                },
+                "produced": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "outcomeKey": {
+                        "type": "string"
+                      },
+                      "occurrences": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "outcomeKey",
+                      "occurrences"
+                    ]
+                  }
+                },
+                "consumed": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "outcomeKey": {
+                        "type": "string"
+                      },
+                      "occurrences": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "outcomeKey",
+                      "occurrences"
+                    ]
+                  }
+                },
+                "supportKind": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The support function the run is marked for, else null."
+                }
+              },
+              "required": [
+                "id",
+                "parentRunId",
+                "startedAt",
+                "completedAt",
+                "status",
+                "serviceName",
+                "taskName",
+                "workflowSlug",
+                "featureSlug",
+                "campaignId",
+                "cost",
+                "costRows",
+                "produced",
+                "consumed",
+                "supportKind"
+              ]
+            }
+          },
+          "nextBefore": {
+            "type": "string"
+          },
+          "nextBeforeId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "brandId",
+          "before",
+          "windowStart",
+          "runs",
+          "nextBefore",
+          "nextBeforeId"
+        ]
       }
     },
     "parameters": {}
@@ -15100,6 +15765,144 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/ledger": {
+      "get": {
+        "summary": "The books of one brand, reconciled to the cent, over a range and per UTC day (service-auth)",
+        "description": "standardCharged - reuseGain + producedNone + abnormal = spend, each side summed apart from the stored days (outcome_cost_days), exact decimals on gross, net, vendor and unpriced gross. A co-branded run counts under each of its brands. Default range: since inception to today (400 days max).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "until",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Books",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandLedgerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range or unknown parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/ledger/runs": {
+      "get": {
+        "summary": "One brand's production orders, newest first (service-auth)",
+        "description": "Each run of the brand with its own cost, the outcomes it declared produced and consumed, and its support mark. A page reads at most the 24 hours before `before`; pass `nextBefore` (+ `nextBeforeId`) back for the next, older page.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Timestamp (default now): runs started strictly before it."
+            },
+            "required": false,
+            "description": "Timestamp (default now): runs started strictly before it.",
+            "name": "before",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "With `before`: continue after this run at that instant."
+            },
+            "required": false,
+            "description": "With `before`: continue after this run at that instant.",
+            "name": "beforeId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "1..100, default 50."
+            },
+            "required": false,
+            "description": "1..100, default 50.",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Runs page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandLedgerRunsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

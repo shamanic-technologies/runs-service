@@ -3525,3 +3525,99 @@ registry.registerPath({
 });
 
 export { UUID_STRING_RE as OUTCOME_UUID_RE };
+
+// ── The books of one brand (FACTORY-P4-PAGES, the dashboard's staff Ledger page) ──
+
+const BrandBooksFields = {
+  standardCharged: LedgerMoneySchema.openapi({ description: "Standard cost charged on the brand's occurrences: production spread + standard charges of its reuses." }),
+  reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges of reuses: charged at the price paid to produce the occurrence, never spent again." }),
+  producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs that declared no produced occurrence (support + undeclared)." }),
+  support: LedgerMoneySchema.openapi({ description: "Part of producedNone that is named support." }),
+  undeclared: LedgerMoneySchema.openapi({ description: "producedNone - support." }),
+  abnormal: LedgerMoneySchema.openapi({ description: ABNORMAL_DESCRIPTION }),
+  spend: LedgerMoneySchema.openapi({ description: "The runs ledger at brand grain: every actual/refunded cost row of the brand's runs, summed apart." }),
+  difference: LedgerMoneySchema.openapi({ description: "standardCharged - reuseGain + producedNone + abnormal - spend, per basis (0 when balanced)." }),
+  balanced: z.boolean().openapi({ description: "difference is exactly 0 on every basis (no tolerance)." }),
+};
+
+export const BrandLedgerResponseSchema = z
+  .object({
+    brandId: z.string(),
+    since: z.string(),
+    until: z.string(),
+    complete: z.boolean(),
+    daysMissing: z.array(z.string()).openapi({ description: "Days not stored under the current allocation, or stale: out of every figure." }),
+    books: z.object(BrandBooksFields),
+    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...BrandBooksFields })).openapi({ description: "The same books per UTC day (stored days only, days with no row of the brand omitted)." }),
+    outcomes: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number(), cost: LedgerMoneySchema })).openapi({ description: "Occurrences the brand's runs declared produced over the range, and their production cost." }),
+  })
+  .openapi("BrandLedgerResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/ledger",
+  summary: "The books of one brand, reconciled to the cent, over a range and per UTC day (service-auth)",
+  description:
+    "standardCharged - reuseGain + producedNone + abnormal = spend, each side summed apart from the stored days (outcome_cost_days), exact decimals on gross, net, vendor and unpriced gross. A co-branded run counts under each of its brands. Default range: since inception to today (400 days max).",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({ since: z.string().optional(), until: z.string().optional() }),
+  },
+  responses: {
+    200: { description: "Books", content: { "application/json": { schema: BrandLedgerResponseSchema } } },
+    400: { description: "Invalid range or unknown parameter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const BrandLedgerRunsResponseSchema = z
+  .object({
+    brandId: z.string(),
+    before: z.string(),
+    windowStart: z.string(),
+    runs: z.array(
+      z.object({
+        id: z.string().uuid(),
+        parentRunId: z.string().uuid().nullable(),
+        startedAt: z.string(),
+        completedAt: z.string().nullable(),
+        status: z.string(),
+        serviceName: z.string(),
+        taskName: z.string(),
+        workflowSlug: z.string().nullable(),
+        featureSlug: z.string().nullable(),
+        campaignId: z.string().nullable(),
+        cost: z.object({ grossCents: z.string(), netCents: z.string() }).openapi({ description: "The run's own cost rows that happened (actual + refunded)." }),
+        costRows: z.number().int(),
+        produced: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number().int() })),
+        consumed: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number().int() })),
+        supportKind: z.string().nullable().openapi({ description: "The support function the run is marked for, else null." }),
+      }),
+    ),
+    nextBefore: z.string(),
+    nextBeforeId: z.string().uuid().nullable(),
+  })
+  .openapi("BrandLedgerRunsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/ledger/runs",
+  summary: "One brand's production orders, newest first (service-auth)",
+  description:
+    "Each run of the brand with its own cost, the outcomes it declared produced and consumed, and its support mark. A page reads at most the 24 hours before `before`; pass `nextBefore` (+ `nextBeforeId`) back for the next, older page.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      before: z.string().optional().openapi({ description: "Timestamp (default now): runs started strictly before it." }),
+      beforeId: z.string().optional().openapi({ description: "With `before`: continue after this run at that instant." }),
+      limit: z.string().optional().openapi({ description: "1..100, default 50." }),
+    }),
+  },
+  responses: {
+    200: { description: "Runs page", content: { "application/json": { schema: BrandLedgerRunsResponseSchema } } },
+    400: { description: "Invalid parameter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
