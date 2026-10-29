@@ -2364,11 +2364,19 @@ export async function refreshLedgerDays(
 }
 
 let refreshing = false;
+/** A tick waiting for the backfill's current day to finish: the backfill takes no new day meanwhile. */
+let tickWaiting = false;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Started after app.listen(): first tick ~60 s after boot, then every 15 min, one at a time. */
 export function startCostLedgerRefresh(): NodeJS.Timeout {
   const tick = async () => {
-    if (refreshing) return;
+    if (refreshing && !backfillState?.running) return;
+    // The paced backfill holds the lock one day at a time: the tick waits for that day, never skips.
+    tickWaiting = true;
+    while (refreshing) await sleep(5_000);
+    tickWaiting = false;
     refreshing = true;
     try {
       await refreshLedgerDays();
@@ -2382,6 +2390,134 @@ export function startCostLedgerRefresh(): NodeJS.Timeout {
   const timer = setInterval(() => void tick(), REFRESH_INTERVAL_MS);
   timer.unref();
   return timer;
+}
+
+// ---------------------------------------------------------------------------
+// Paced backfill: every day not current under ALLOCATION_VERSION, once
+// ---------------------------------------------------------------------------
+//
+// The 15-min tick recomputes the three recent days first; on a loaded box they take
+// ~4 min each (2026-10-29: 67 s + 246 s + 234 s), so the 10-min budget left nothing for
+// the history and 141 of 270 days stayed stale under v6. The backfill walks every
+// day that is missing, stale or stored with an older column set (daysToCompute), the
+// recent days left to the tick, one day at a time under the same lock as the tick:
+//  - it never takes a day while the database runs more than BACKFILL_MAX_ACTIVE
+//    client queries (it waits, counted in pausedForLoad);
+//  - after each day it rests as long as the day took (at most half the time busy);
+//  - a tick waiting for the lock goes first.
+// Passes repeat (a fact recorded meanwhile stales a day again) until a pass finds
+// nothing or BACKFILL_MAX_PASSES is reached. Same compute and store as the tick:
+// a day recomputes byte for byte.
+
+export const BACKFILL_MAX_ACTIVE = 12;
+export const BACKFILL_MAX_PASSES = 3;
+const BACKFILL_MIN_REST_MS = 5_000;
+const BACKFILL_LOAD_WAIT_MS = 30_000;
+
+export interface LedgerBackfillState {
+  running: boolean;
+  allocationVersion: number;
+  startedAt: string;
+  finishedAt: string | null;
+  pass: number;
+  /** Days left in the current pass. */
+  remaining: number;
+  computed: string[];
+  failed: string[];
+  /** Times a day waited for the database to calm down. */
+  pausedForLoad: number;
+  last: { day: string; ms: number; unbalancedOrgs: number } | null;
+  error: string | null;
+}
+
+let backfillState: LedgerBackfillState | null = null;
+
+export function ledgerBackfillState(): LedgerBackfillState | null {
+  return backfillState;
+}
+
+/** Client queries running right now on the database (this one excluded). */
+async function activeQueries(): Promise<number> {
+  const [r] = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM pg_stat_activity
+    WHERE state = 'active' AND backend_type = 'client backend' AND pid <> pg_backend_pid()
+  `)) as any[];
+  return Number(r?.n ?? 0);
+}
+
+/** Starts the backfill in the background; null when one is already running. */
+export function startLedgerBackfill(opts: { maxActive?: number; maxPasses?: number; restFactor?: number } = {}): LedgerBackfillState | null {
+  if (backfillState?.running) return null;
+  const state: LedgerBackfillState = {
+    running: true,
+    allocationVersion: ALLOCATION_VERSION,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    pass: 0,
+    remaining: 0,
+    computed: [],
+    failed: [],
+    pausedForLoad: 0,
+    last: null,
+    error: null,
+  };
+  backfillState = state;
+  void runLedgerBackfill(state, opts.maxActive ?? BACKFILL_MAX_ACTIVE, opts.maxPasses ?? BACKFILL_MAX_PASSES, opts.restFactor ?? 1)
+    .catch((err) => {
+      state.error = err instanceof Error ? err.message : String(err);
+      console.error("[Runs Service] cost ledger backfill stopped:", err);
+    })
+    .finally(() => {
+      state.running = false;
+      state.finishedAt = new Date().toISOString();
+      console.log(`[Runs Service] cost ledger backfill done: ${state.computed.length} days computed, ${state.failed.length} failed, ${state.pausedForLoad} load pauses`);
+    });
+  return state;
+}
+
+export async function runLedgerBackfill(state: LedgerBackfillState, maxActive: number, maxPasses: number, restFactor: number, minRestMs = BACKFILL_MIN_REST_MS): Promise<void> {
+  await ensurePoolLines();
+  for (let pass = 1; pass <= maxPasses; pass++) {
+    state.pass = pass;
+    const now = new Date();
+    const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(utcDay(now), -i)));
+    const days = (await daysToCompute(now, undefined, true)).filter((d) => !recent.has(d));
+    state.remaining = days.length;
+    console.log(`[Runs Service] cost ledger backfill pass ${pass}: ${days.length} days to compute under v${ALLOCATION_VERSION}`);
+    if (days.length === 0) return;
+    const versions = await fetchVendorCostCatalog();
+    const inputs = await fetchAllocationInputs();
+    for (const day of days) {
+      while (tickWaiting || refreshing) await sleep(BACKFILL_MIN_REST_MS);
+      while ((await activeQueries()) > maxActive) {
+        state.pausedForLoad++;
+        await sleep(BACKFILL_LOAD_WAIT_MS);
+      }
+      if (tickWaiting || refreshing) {
+        while (tickWaiting || refreshing) await sleep(BACKFILL_MIN_REST_MS);
+      }
+      refreshing = true;
+      const t0 = Date.now();
+      try {
+        const d = await computeLedgerDay(day, versions, inputs);
+        await storeLedgerDay(d);
+        const unbalancedOrgs = d.orgs.filter((o) => !checkLedgerRow(ledgerCheckInputOf(o)).balanced).length;
+        state.computed.push(day);
+        state.last = { day, ms: Date.now() - t0, unbalancedOrgs };
+        const line = `[Runs Service] cost ledger backfill day ${day}: orgs=${d.orgs.length} unbalanced=${unbalancedOrgs} in ${Date.now() - t0}ms`;
+        if (unbalancedOrgs > 0) console.error(`${line} — LEDGER CHECK FAILED`);
+        else console.log(line);
+      } catch (err) {
+        state.failed.push(day);
+        console.error(`[Runs Service] cost ledger backfill day ${day} failed after ${Date.now() - t0}ms:`, err);
+      } finally {
+        refreshing = false;
+      }
+      state.remaining--;
+      // At most half the time busy: rest as long as the day took.
+      await sleep(Math.max(minRestMs, (Date.now() - t0) * restFactor));
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
