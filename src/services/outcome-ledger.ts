@@ -2120,42 +2120,40 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
     const at = new Date(v.occurred_at);
     for (const [day, computedAt] of computed) if (day >= v.from_day && computedAt < at) out.add(day);
   }
-  // An equivalence stated after a day was computed re-resolves every consumption
-  // of its two subjects: from the first day either subject was declared.
-  const equated = (await db.execute(sql`
-    WITH e AS MATERIALIZED (SELECT * FROM subject_equivalences WHERE stated_at > ${oldest}::timestamptz)
-    SELECT to_char(MIN(o.declared_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(e.stated_at) AS last_recorded
-    FROM e
-    CROSS JOIN LATERAL (
-      SELECT o.declared_at FROM run_outcomes o WHERE o.subject_service = e.subject_service AND o.subject_id = e.subject_id
+  // An equivalence stated, or a lead state reached / re-dated / removed, after a day was computed moves
+  // only the days its SUBJECTS' production orders spent or declared on: the routing of every run that
+  // acted on that lead (v5), the resolution of every consumption of the equated subjects, and the
+  // standard cost those consumptions charge. Per occurrence of the subject (either direction): every UTC
+  // day from its run's start (or the declaration, if earlier) to the later of its declaration and the
+  // run's end (today while it runs). It used to stale EVERY day from the subject's first one onward:
+  // lead-service re-dates a few reaches each tick, so one lead first declared on 2026-06-08 re-staled
+  // 141 of 270 days every 15 min and the history never converged (FACTORY-P4-PAGES, 2026-10-29).
+  const subjectDays = (await db.execute(sql`
+    WITH s AS MATERIALIZED (
+      SELECT subject_service AS svc, subject_id AS sid, stated_at AS at FROM subject_equivalences WHERE stated_at > ${oldest}::timestamptz
       UNION ALL
-      SELECT o.declared_at FROM run_outcomes o WHERE o.subject_service = e.target_service AND o.subject_id = e.target_id
-    ) o
-    GROUP BY e.subject_service, e.subject_id
-  `)) as any[];
-  for (const [day, at] of computed) {
-    if (equated.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
-  }
-  // v5: a lead state reached, re-dated or removed after a day was computed moves the
-  // routing of every run that acted on that lead: from the first day anything was
-  // declared on the lead (its earliest occurrence or its anchor run's start).
-  const reaches = (await db.execute(sql`
-    WITH l AS MATERIALIZED (
-      SELECT lead_id, MAX(changed_at) AS changed_at FROM lead_state_reaches
-      WHERE changed_at > ${oldest}::timestamptz GROUP BY lead_id
+      SELECT target_service, target_id, stated_at FROM subject_equivalences WHERE stated_at > ${oldest}::timestamptz
+      UNION ALL
+      SELECT 'lead-service', lead_id, MAX(changed_at) FROM lead_state_reaches WHERE changed_at > ${oldest}::timestamptz GROUP BY lead_id
+    ),
+    o AS MATERIALIZED (
+      SELECT s.at, o.run_id, o.declared_at FROM s
+      CROSS JOIN LATERAL (SELECT declared_at, run_id FROM run_outcomes o WHERE o.subject_service = s.svc AND o.subject_id = s.sid OFFSET 0) o
     )
-    SELECT to_char(MIN(LEAST(o.declared_at, r.started_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(l.changed_at) AS last_recorded
-    FROM l
-    CROSS JOIN LATERAL (
-      SELECT o.declared_at, o.run_id FROM run_outcomes o
-      WHERE o.subject_service = 'lead-service' AND o.subject_id = l.lead_id AND o.direction = 'produced'
-      OFFSET 0
-    ) o
-    CROSS JOIN LATERAL (SELECT started_at FROM runs WHERE id = o.run_id OFFSET 0) r
-    GROUP BY l.lead_id
+    SELECT to_char(d, 'YYYY-MM-DD') AS day, MAX(o.at) AS last_recorded
+    FROM o
+    CROSS JOIN LATERAL (SELECT started_at, completed_at FROM runs WHERE id = o.run_id OFFSET 0) r
+    CROSS JOIN LATERAL generate_series(
+      date_trunc('day', LEAST(o.declared_at, r.started_at) AT TIME ZONE 'UTC'),
+      date_trunc('day', GREATEST(o.declared_at, COALESCE(r.completed_at, now())) AT TIME ZONE 'UTC'),
+      interval '1 day'
+    ) d
+    GROUP BY 1
   `)) as any[];
+  const subjectDayAt = new Map(subjectDays.map((l) => [l.day as string, new Date(l.last_recorded)]));
   for (const [day, at] of computed) {
-    if (reaches.some((l) => l.day && l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
+    const changed = subjectDayAt.get(day);
+    if (changed && changed > at) out.add(day);
   }
   // A reach's own day holds its unit (and its ladder input): a reach of a lead nobody declared on (another
   // factory's, OUR-FACTORY-OUTCOMES-1027) moves that day too when it changes.
