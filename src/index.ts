@@ -17,6 +17,7 @@ import eventsRoutes from "./routes/events.js";
 import noCampaignSpendRoutes from "./routes/no-campaign-spend.js";
 import taskUnitsRoutes from "./routes/task-units.js";
 import outcomeOccurrenceRoutes from "./routes/outcome-occurrences.js";
+import brandLedgerRoutes from "./routes/brand-ledger.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
 import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
@@ -57,6 +58,7 @@ app.use(eventsRoutes);
 app.use(noCampaignSpendRoutes);
 app.use(taskUnitsRoutes);
 app.use(outcomeOccurrenceRoutes);
+app.use(brandLedgerRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
