@@ -3,7 +3,7 @@ import { requireInternalAuth } from "../middleware/auth.js";
 import { addDays, utcDay, type Money } from "../services/outcome-ledger.js";
 import { firstOutcomeCostDay, MAX_RANGE_DAYS } from "../services/outcome-cost-totals.js";
 import { ledgerBackfillState, startLedgerBackfill } from "../services/outcome-ledger.js";
-import { BRAND_RUNS_MAX_LIMIT, readBrandLedger, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
+import { BRAND_RUN_KINDS, type BrandRunKind, BRAND_RUNS_MAX_LIMIT, readBrandLedgerCached, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
 import { OUTCOME_UUID_RE } from "../schemas.js";
 
 const router = Router();
@@ -59,7 +59,7 @@ router.get("/internal/brands/:brandId/ledger", requireInternalAuth, async (req, 
       res.status(400).json({ error: `range must be <= ${MAX_RANGE_DAYS} days` });
       return;
     }
-    const l = await readBrandLedger(brandId, since, until);
+    const l = await readBrandLedgerCached(brandId, since, until);
     res.json({
       brandId: l.brandId,
       since: l.since,
@@ -83,9 +83,9 @@ router.get("/internal/brands/:brandId/ledger", requireInternalAuth, async (req, 
  */
 router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, async (req, res) => {
   try {
-    const unknown = Object.keys(req.query).filter((k) => k !== "before" && k !== "beforeId" && k !== "limit");
+    const unknown = Object.keys(req.query).filter((k) => !["before", "beforeId", "limit", "kind"].includes(k));
     if (unknown.length > 0) {
-      res.status(400).json({ error: `unknown query parameter(s): ${unknown.join(", ")}; accepted: before, beforeId, limit` });
+      res.status(400).json({ error: `unknown query parameter(s): ${unknown.join(", ")}; accepted: before, beforeId, limit, kind` });
       return;
     }
     const { brandId } = req.params;
@@ -108,7 +108,11 @@ router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, async (
       res.status(400).json({ error: `limit must be an integer 1..${BRAND_RUNS_MAX_LIMIT}` });
       return;
     }
-    res.json(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit));
+    if (q.kind !== undefined && !(BRAND_RUN_KINDS as readonly string[]).includes(q.kind)) {
+      res.status(400).json({ error: `kind must be one of ${BRAND_RUN_KINDS.join(", ")}` });
+      return;
+    }
+    res.json(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit, (q.kind as BrandRunKind | undefined) ?? null));
   } catch (err) {
     console.error("[Runs Service] brand ledger runs read failed:", err);
     res.status(500).json({ error: "Internal server error" });

@@ -3,6 +3,7 @@ import request from "supertest";
 import { Decimal } from "decimal.js";
 import { createTestApp, getAuthHeaders, getInternalAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
+import { clearBrandLedgerCache } from "../../src/services/brand-ledger.js";
 import { addDays, computeLedgerDay, storeLedgerDay, utcDay } from "../../src/services/outcome-ledger.js";
 
 // FACTORY-P4-PAGES: the books of one brand. The line must reconcile to the cent, agree with the
@@ -155,5 +156,23 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     expect(older.body.runs.map((x: any) => x.id)).toEqual([runIds.a]);
     expect((await request(app).get(`/internal/brands/${B2}/ledger/runs?before=${TODAY}T23:59:59Z`).set(getInternalAuthHeaders())).body.runs.map((x: any) => x.id)).toEqual([runIds.b]);
     expect((await request(app).get(`/internal/brands/${B1}/ledger/runs?limit=500`).set(getInternalAuthHeaders())).status).toBe(400);
+  });
+
+  it("splits the orders into tabs (made, running, none) with the first page's counts, and names a step's parent", async () => {
+    const child = await insertTestRun({ organizationId: ORG, serviceName: "google", taskName: "request", status: "running", brandIds: [B1], parentRunId: runIds.n, startedAt: new Date(`${TODAY}T00:40:00Z`) });
+    clearBrandLedgerCache();
+    const get = (q: string) => request(app).get(`/internal/brands/${B1}/ledger/runs?before=${TODAY}T23:59:59Z${q}`).set(getInternalAuthHeaders());
+    const all = await get("");
+    expect(all.body.counts).toMatchObject({ all: 4, made: 2, running: 1, none: 1 });
+    expect(all.body.runs[0]).toMatchObject({ id: child.id, status: "running", parent: { serviceName: "svc", taskName: "task" } });
+    expect((await get("&kind=made")).body.runs.map((x: any) => x.id)).toEqual([runIds.r, runIds.b]);
+    expect((await get("&kind=running")).body.runs.map((x: any) => x.id)).toEqual([child.id]);
+    expect((await get("&kind=none")).body.runs.map((x: any) => x.id)).toEqual([runIds.n]);
+    expect((await get("&kind=nope")).status).toBe(400);
+    const p1 = await get("&limit=1");
+    const p2 = await request(app)
+      .get(`/internal/brands/${B1}/ledger/runs?before=${encodeURIComponent(p1.body.nextBefore)}&beforeId=${p1.body.nextBeforeId}&limit=1`)
+      .set(getInternalAuthHeaders());
+    expect(p2.body.counts).toBeNull();
   });
 });

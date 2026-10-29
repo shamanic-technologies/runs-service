@@ -127,13 +127,18 @@ export async function readBrandLedger(brandId: string, since: string, until: str
   if (usable.length === 0) return empty;
   // ONE scan of the brand's stored rows (~6 s for the busiest brand on the loaded box): per day, and per
   // produced outcome. The range total is the exact sum of the days (decimal.js, no float).
-  const rows = (await statsDb.execute(sql`
+  // The busiest brand's scan takes 17-38 s on the loaded box (2026-10-29): past the stats pool's 30 s
+  // timeout, so this one read gets 120 s in its own transaction; readBrandLedgerCached keeps callers off it.
+  const rows = await statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+    return (await tx.execute(sql`
     SELECT to_char(d.day, 'YYYY-MM-DD') AS day, d.outcome_key AS ok, GROUPING(d.day) AS by_outcome, ${BOOKS_SELECT}
     FROM outcome_cost_days d
     WHERE d.allocation_version = ${ALLOCATION_VERSION} AND d.day BETWEEN ${since}::date AND ${until}::date
-      AND ${brandId} = ANY(d.brand_ids)
+      AND d.brand_ids @> ARRAY[${brandId}]::text[]
     GROUP BY GROUPING SETS ((d.day), (d.outcome_key))
   `)) as any[];
+  });
   const keep = new Set(usable);
   const dayRows = rows.filter((r) => Number(r.by_outcome) === 0 && keep.has(r.day)).sort((a, b) => (a.day < b.day ? -1 : 1));
   if (dayRows.length !== rows.filter((r) => Number(r.by_outcome) === 0).length) {
@@ -142,7 +147,7 @@ export async function readBrandLedger(brandId: string, since: string, until: str
       SELECT d.outcome_key AS ok, ${BOOKS_SELECT}
       FROM outcome_cost_days d
       WHERE d.allocation_version = ${ALLOCATION_VERSION} AND d.day = ANY(ARRAY[${sql.join(usable.map((d) => sql`${d}`), sql`, `)}]::date[])
-        AND ${brandId} = ANY(d.brand_ids)
+        AND d.brand_ids @> ARRAY[${brandId}]::text[]
       GROUP BY d.outcome_key
     `)) as any[];
     return assemble(empty, usable, dayRows, outcomes);
@@ -172,6 +177,51 @@ function assemble(empty: BrandLedger, usable: string[], dayRows: any[], outcomeR
   };
 }
 
+/**
+ * The books behind a cache (FACTORY-P4-PAGES): the stored days move on the refresher's 15-min
+ * cadence, so a reader gets the last answer up to FRESH_MS old at once, and an older one up to
+ * STALE_MS old at once too while ONE recompute runs behind it (stale-while-revalidate). Only a
+ * brand nobody read for an hour waits for the scan.
+ */
+const FRESH_MS = 5 * 60_000;
+const STALE_MS = 60 * 60_000;
+const CACHE_MAX = 200;
+const ledgerCache = new Map<string, { at: number; value: BrandLedger | null; pending: Promise<BrandLedger> | null }>();
+
+export async function readBrandLedgerCached(brandId: string, since: string, until: string): Promise<BrandLedger> {
+  const key = `${brandId}|${since}|${until}`;
+  const hit = ledgerCache.get(key);
+  const age = hit?.value ? Date.now() - hit.at : Infinity;
+  const refresh = () => {
+    const entry = ledgerCache.get(key) ?? { at: 0, value: null, pending: null };
+    if (entry.pending) return entry.pending;
+    entry.pending = readBrandLedger(brandId, since, until)
+      .then((value) => {
+        ledgerCache.set(key, { at: Date.now(), value, pending: null });
+        if (ledgerCache.size > CACHE_MAX) ledgerCache.delete(ledgerCache.keys().next().value!);
+        return value;
+      })
+      .catch((err) => {
+        entry.pending = null;
+        throw err;
+      });
+    ledgerCache.set(key, entry);
+    return entry.pending;
+  };
+  if (hit?.value && age < FRESH_MS) return hit.value;
+  if (hit?.value && age < STALE_MS) {
+    refresh().catch((err) => console.error("[Runs Service] brand ledger background refresh failed:", err));
+    return hit.value;
+  }
+  return refresh();
+}
+
+/** Test seam. */
+export function clearBrandLedgerCache(): void {
+  ledgerCache.clear();
+  countsCache.clear();
+}
+
 // ---------------------------------------------------------------------------
 // The brand's production orders, newest first
 // ---------------------------------------------------------------------------
@@ -198,7 +248,13 @@ export interface BrandLedgerRun {
   consumed: Array<{ outcomeKey: string; occurrences: number }>;
   /** The support function the run is marked for, else null. */
   supportKind: string | null;
+  /** The run this one is a step of (its caller), by service and task; null for a root run. */
+  parent: { serviceName: string; taskName: string } | null;
 }
+
+/** The tabs of the production orders: a partition of the brand's runs. */
+export const BRAND_RUN_KINDS = ["made", "running", "none"] as const;
+export type BrandRunKind = (typeof BRAND_RUN_KINDS)[number];
 
 export interface BrandLedgerRunsPage {
   brandId: string;
@@ -209,10 +265,30 @@ export interface BrandLedgerRunsPage {
   /** Pass as `before` (and `beforeId`) for the next, older page: a full page continues after its oldest run, a short one before its window. */
   nextBefore: string;
   nextBeforeId: string | null;
+  /** The partition asked (null = all). */
+  kind: BrandRunKind | null;
+  /**
+   * First page only (no beforeId): the brand's runs started in the 24 h window of this page, per tab:
+   * made = declared >= 1 produced outcome; running = still open and made nothing yet; none = closed and made nothing.
+   */
+  counts: { since: string; until: string; all: number; made: number; running: number; none: number } | null;
 }
 
 /** `before` = a timestamp as this read serves it (microseconds kept); `beforeId` = the run at that instant to continue after. */
-export async function readBrandLedgerRuns(brandId: string, before: string, beforeId: string | null, limit: number): Promise<BrandLedgerRunsPage> {
+const MADE = sql`EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = r.id AND o.direction = 'produced')`;
+const KIND_SQL: Record<BrandRunKind, ReturnType<typeof sql>> = {
+  made: MADE,
+  running: sql`r.status = 'running' AND NOT ${MADE}`,
+  none: sql`r.status <> 'running' AND NOT ${MADE}`,
+};
+
+export async function readBrandLedgerRuns(
+  brandId: string,
+  before: string,
+  beforeId: string | null,
+  limit: number,
+  kind: BrandRunKind | null = null,
+): Promise<BrandLedgerRunsPage> {
   const windowStart = (
     (await statsDb.execute(sql`SELECT (${before}::timestamptz - make_interval(hours => ${BRAND_RUNS_WINDOW_HOURS}))::text AS w`)) as any[]
   )[0].w as string;
@@ -223,11 +299,13 @@ export async function readBrandLedgerRuns(brandId: string, before: string, befor
   // (a GIN bitmap over a brand's millions of runs then a sort is the slow plan).
   const rows = (await statsDb.execute(sql`
     SELECT r.id, r.parent_run_id, r.started_at, r.started_at::text AS started_at_raw, r.completed_at, r.status, r.service_name, r.task_name,
-           r.workflow_slug, r.feature_slug, r.campaign_id, m.kind AS support_kind
+           r.workflow_slug, r.feature_slug, r.campaign_id, m.kind AS support_kind, p.service_name AS parent_service, p.task_name AS parent_task
     FROM runs r
     LEFT JOIN run_support_marks m ON m.run_id = r.id
+    LEFT JOIN LATERAL (SELECT service_name, task_name FROM runs WHERE id = r.parent_run_id OFFSET 0) p ON true
     WHERE ${cut} AND r.started_at >= ${windowStart}::timestamptz
       AND r.brand_ids @> ARRAY[${brandId}]::text[]
+      ${kind ? sql`AND ${KIND_SQL[kind]}` : sql``}
     ORDER BY r.started_at DESC, r.id DESC
     LIMIT ${limit}
   `)) as any[];
@@ -270,11 +348,15 @@ export async function readBrandLedgerRuns(brandId: string, before: string, befor
       produced: o?.produced ?? [],
       consumed: o?.consumed ?? [],
       supportKind: r.support_kind ?? null,
+      parent: r.parent_service ? { serviceName: r.parent_service, taskName: r.parent_task } : null,
     };
   });
   // A full page continues just before its oldest run; a short one continues before the window.
   const full = rows.length === limit;
+  const counts = beforeId ? null : await windowCounts(brandId, windowStart, before);
   return {
+    kind,
+    counts,
     brandId,
     before,
     windowStart,
@@ -282,4 +364,27 @@ export async function readBrandLedgerRuns(brandId: string, before: string, befor
     nextBefore: full ? (rows[rows.length - 1].started_at_raw as string) : windowStart,
     nextBeforeId: full ? (rows[rows.length - 1].id as string) : null,
   };
+}
+
+/** Per-tab counts of one window, cached 5 min per (brand, window minute; ~10 s for the busiest brand on the loaded box): the page polls, the window barely moves. */
+const countsCache = new Map<string, { at: number; value: NonNullable<BrandLedgerRunsPage["counts"]> }>();
+
+async function windowCounts(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]>> {
+  const key = `${brandId}|${since.slice(0, 15)}`; // 10-min buckets: a window sliding with "now" reuses its count
+  const hit = countsCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60_000) return hit.value;
+  const [c] = (await statsDb.execute(sql`
+    SELECT count(*)::int AS all,
+           count(*) FILTER (WHERE x.made)::int AS made,
+           count(*) FILTER (WHERE NOT x.made AND r.status = 'running')::int AS running,
+           count(*) FILTER (WHERE NOT x.made AND r.status <> 'running')::int AS none
+    FROM runs r
+    CROSS JOIN LATERAL (SELECT ${MADE} AS made) x
+    WHERE r.started_at < ${until}::timestamptz AND r.started_at >= ${since}::timestamptz
+      AND r.brand_ids @> ARRAY[${brandId}]::text[]
+  `)) as any[];
+  const value = { since, until, all: Number(c.all), made: Number(c.made), running: Number(c.running), none: Number(c.none) };
+  countsCache.set(key, { at: Date.now(), value });
+  if (countsCache.size > 500) countsCache.delete(countsCache.keys().next().value!);
+  return value;
 }
