@@ -2,6 +2,7 @@ import { Router } from "express";
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { statsDb as db } from "../db/index.js";
+import { readConsumptionFromRollup } from "../services/stats-rollup-consumption-day.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import {
   buildSlugToDynastyMap,
@@ -1527,6 +1528,11 @@ router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req,
     const byOrg = groupBy.includes("orgId");
     const byBrand = groupBy.includes("brandId");
 
+    // Served from the write-maintained rollup (migration 0090) once stamped: live,
+    // since inception, it scanned 1.82M cost rows (+ the 8.8 GB runs table grouped
+    // by brand) and passed the 30 s stats timeout under load, 500 on every
+    // costs-service refresh from 2026-10-16 to 2026-10-29.
+    const rolled = await readConsumptionFromRollup({ names, since, orgId, brandId, byOrg, byBrand });
     const filters: SQL[] = [sql`rc.status IN ('actual','refunded')`];
     if (names) filters.push(sql`rc.cost_name IN (SELECT jsonb_array_elements_text(${JSON.stringify(names)}::jsonb))`);
     if (since) filters.push(sql`rc.created_at >= ${`${since}T00:00:00Z`}::timestamptz`);
@@ -1552,7 +1558,7 @@ router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req,
     const orgCol = byOrg ? sql`rc.organization_id::text` : sql`NULL::text`;
     const brandCol = unnestBrands ? sql`b.brand_id` : byBrand ? sql`${brandId}::text` : sql`NULL::text`;
 
-    const rows = (await db.execute(sql`
+    const rows = rolled ?? ((await db.execute(sql`
       SELECT
         ${orgCol} AS org_id,
         ${brandCol} AS brand_id,
@@ -1569,7 +1575,7 @@ router.get("/internal/stats/costs/consumption", requireInternalAuth, async (req,
       WHERE ${sql.join(filters, sql` AND `)}
       GROUP BY 1, 2, 3, 4, 5
       ORDER BY 3, 1 NULLS LAST, 2 NULLS LAST, 4, 5
-    `)) as any[];
+    `)) as any[]);
 
     const groupKeys = (r: { org_id: string | null; brand_id: string | null }) => ({
       ...(byOrg && { orgId: r.org_id ?? null }),

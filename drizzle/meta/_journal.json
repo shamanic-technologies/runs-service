@@ -631,6 +631,13 @@
       "when": 1783410300000,
       "tag": "0089_outcome_cost_days_brand_ids",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1783410400000,
+      "tag": "0090_consumption_day",
+      "breakpoints": true
     }
   ]
 }
