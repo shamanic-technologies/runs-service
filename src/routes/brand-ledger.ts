@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireInternalAuth } from "../middleware/auth.js";
 import { addDays, utcDay, type Money } from "../services/outcome-ledger.js";
 import { firstOutcomeCostDay, MAX_RANGE_DAYS } from "../services/outcome-cost-totals.js";
+import { ledgerBackfillState, startLedgerBackfill } from "../services/outcome-ledger.js";
 import { BRAND_RUNS_MAX_LIMIT, readBrandLedger, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
 import { OUTCOME_UUID_RE } from "../schemas.js";
 
@@ -112,6 +113,34 @@ router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, async (
     console.error("[Runs Service] brand ledger runs read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
+});
+
+/**
+ * POST /internal/outcome-costs/backfill — computes, once, every past day not current under the
+ * allocation version (missing, stale, older columns), paced to the box: one day at a time under
+ * the refresher's lock, waiting while the database is busy, resting as long as each day took.
+ * 202 with its state; 409 while one runs. GET returns the state (null before any).
+ */
+router.post("/internal/outcome-costs/backfill", requireInternalAuth, (req, res) => {
+  const b = (req.body ?? {}) as { maxActive?: unknown; maxPasses?: unknown; restFactor?: unknown };
+  const int = (v: unknown, lo: number, hi: number) => (v === undefined ? undefined : Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi ? (v as number) : NaN);
+  const maxActive = int(b.maxActive, 1, 200);
+  const maxPasses = int(b.maxPasses, 1, 10);
+  const restFactor = b.restFactor === undefined ? undefined : typeof b.restFactor === "number" && b.restFactor >= 0 && b.restFactor <= 10 ? b.restFactor : NaN;
+  if ([maxActive, maxPasses, restFactor].some((v) => v !== undefined && Number.isNaN(v))) {
+    res.status(400).json({ error: "maxActive 1..200, maxPasses 1..10 (integers), restFactor 0..10" });
+    return;
+  }
+  const state = startLedgerBackfill({ maxActive, maxPasses, restFactor });
+  if (!state) {
+    res.status(409).json({ error: "a backfill is already running", state: ledgerBackfillState() });
+    return;
+  }
+  res.status(202).json(state);
+});
+
+router.get("/internal/outcome-costs/backfill", requireInternalAuth, (_req, res) => {
+  res.json({ state: ledgerBackfillState() });
 });
 
 export default router;
