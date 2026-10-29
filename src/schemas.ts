@@ -3529,6 +3529,7 @@ export { UUID_STRING_RE as OUTCOME_UUID_RE };
 // ── The books of one brand (FACTORY-P4-PAGES, the dashboard's staff Ledger page) ──
 
 const BrandBooksFields = {
+  production: LedgerMoneySchema.openapi({ description: "Spend spread on the occurrences the brand's runs produced (normal loss included) = standardCharged - reuseGain." }),
   standardCharged: LedgerMoneySchema.openapi({ description: "Standard cost charged on the brand's occurrences: production spread + standard charges of its reuses." }),
   reuseGain: LedgerMoneySchema.openapi({ description: "Standard charges of reuses: charged at the price paid to produce the occurrence, never spent again." }),
   producedNone: LedgerMoneySchema.openapi({ description: "Spend of runs that declared no produced occurrence (support + undeclared)." }),

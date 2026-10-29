@@ -34,6 +34,8 @@ const sums = (p: string, filter: string, col = "") =>
     .join(", ");
 
 export interface BrandBooks {
+  /** Spend spread on the occurrences the brand's runs produced (normal loss included): standardCharged - reuseGain. */
+  production: Money;
   /** Production spread on the brand's occurrences + standard charges of its reuses. */
   standardCharged: Money;
   /** Standard charges of reuses: charged, never spent again. */
@@ -87,7 +89,7 @@ function books(r: any): BrandBooks {
     difference[k] = d.toFixed(10);
   }
   const undeclared = Object.fromEntries(BASES.map((k) => [k, new Decimal(producedNone[k]).minus(support[k]).toFixed(10)])) as unknown as Money;
-  return { standardCharged, reuseGain, producedNone, support, undeclared, abnormal, spend, difference, balanced };
+  return { production: produced, standardCharged, reuseGain, producedNone, support, undeclared, abnormal, spend, difference, balanced };
 }
 
 /** The money columns every books row needs, from one scan of the brand's stored days. */

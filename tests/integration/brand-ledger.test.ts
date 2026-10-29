@@ -93,6 +93,7 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
       expect(k.difference[base]).toBe("0.0000000000");
       const line = new Decimal(k.standardCharged[base]).minus(k.reuseGain[base]).plus(k.producedNone[base]).plus(k.abnormal[base]);
       expect(line.toFixed(10)).toBe(new Decimal(k.spend[base]).toFixed(10));
+      expect(new Decimal(k.standardCharged[base]).minus(k.reuseGain[base]).toFixed(10)).toBe(k.production[base]);
     }
     // Every cost row of the brand's runs happened: 10 + 5 + 2 + 3 cents gross.
     expect(k.spend.grossCents).toBe("20.0000000000");
@@ -115,7 +116,7 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     const gain = totals.body.consumed.reduce((a: Decimal, g: any) => a.plus(g.reuseGain.grossCents), new Decimal(0));
     expect(mine.body.books.reuseGain.grossCents).toBe(gain.toFixed(10));
     for (const base of BASES) {
-      for (const f of ["spend", "standardCharged", "reuseGain", "producedNone", "abnormal"]) {
+      for (const f of ["spend", "production", "standardCharged", "reuseGain", "producedNone", "abnormal"]) {
         const sum = mine.body.days.reduce((a: Decimal, d: any) => a.plus(d[f][base]), new Decimal(0));
         expect(sum.toFixed(10), `${f}.${base}`).toBe(mine.body.books[f][base]);
       }

@@ -8968,6 +8968,30 @@
           "books": {
             "type": "object",
             "properties": {
+              "production": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string"
+                  },
+                  "netCents": {
+                    "type": "string"
+                  },
+                  "vendorCents": {
+                    "type": "string"
+                  },
+                  "unpricedGrossCents": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents",
+                  "vendorCents",
+                  "unpricedGrossCents"
+                ],
+                "description": "Spend spread on the occurrences the brand's runs produced (normal loss included) = standardCharged - reuseGain."
+              },
               "standardCharged": {
                 "type": "object",
                 "properties": {
@@ -9166,6 +9190,7 @@
               }
             },
             "required": [
+              "production",
               "standardCharged",
               "reuseGain",
               "producedNone",
@@ -9187,6 +9212,30 @@
                 },
                 "occurrences": {
                   "type": "number"
+                },
+                "production": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string"
+                    },
+                    "netCents": {
+                      "type": "string"
+                    },
+                    "vendorCents": {
+                      "type": "string"
+                    },
+                    "unpricedGrossCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents",
+                    "vendorCents",
+                    "unpricedGrossCents"
+                  ],
+                  "description": "Spend spread on the occurrences the brand's runs produced (normal loss included) = standardCharged - reuseGain."
                 },
                 "standardCharged": {
                   "type": "object",
@@ -9388,6 +9437,7 @@
               "required": [
                 "day",
                 "occurrences",
+                "production",
                 "standardCharged",
                 "reuseGain",
                 "producedNone",
