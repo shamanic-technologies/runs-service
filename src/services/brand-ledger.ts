@@ -34,6 +34,8 @@ const sums = (p: string, filter: string, col = "") =>
     .join(", ");
 
 export interface BrandBooks {
+  /** Spend spread on the occurrences the brand's runs produced (normal loss included): standardCharged - reuseGain. */
+  production: Money;
   /** Production spread on the brand's occurrences + standard charges of its reuses. */
   standardCharged: Money;
   /** Standard charges of reuses: charged, never spent again. */
@@ -87,7 +89,7 @@ function books(r: any): BrandBooks {
     difference[k] = d.toFixed(10);
   }
   const undeclared = Object.fromEntries(BASES.map((k) => [k, new Decimal(producedNone[k]).minus(support[k]).toFixed(10)])) as unknown as Money;
-  return { standardCharged, reuseGain, producedNone, support, undeclared, abnormal, spend, difference, balanced };
+  return { production: produced, standardCharged, reuseGain, producedNone, support, undeclared, abnormal, spend, difference, balanced };
 }
 
 /** The money columns every books row needs, from one scan of the brand's stored days. */
@@ -143,20 +145,25 @@ export async function readBrandLedger(brandId: string, since: string, until: str
         AND ${brandId} = ANY(d.brand_ids)
       GROUP BY d.outcome_key
     `)) as any[];
-    return assemble(empty, dayRows, outcomes);
+    return assemble(empty, usable, dayRows, outcomes);
   }
-  return assemble(empty, dayRows, rows.filter((r) => Number(r.by_outcome) === 1));
+  return assemble(empty, usable, dayRows, rows.filter((r) => Number(r.by_outcome) === 1));
 }
 
 const SUM_COLS = ["p", "r", "z", "sup", "a", "s"].flatMap((p) => ["g", "n", "v", "u"].map((b) => `${p}_${b}`));
 
-function assemble(empty: BrandLedger, dayRows: any[], outcomeRows: any[]): BrandLedger {
+function assemble(empty: BrandLedger, usable: string[], dayRows: any[], outcomeRows: any[]): BrandLedger {
+  const byDay = new Map(dayRows.map((r) => [r.day as string, r]));
   const total: Record<string, Decimal> = Object.fromEntries(SUM_COLS.map((c) => [c, new Decimal(0)]));
   for (const r of dayRows) for (const c of SUM_COLS) total[c] = total[c].plus(r[c] ?? 0);
   return {
     ...empty,
     books: books(Object.fromEntries(SUM_COLS.map((c) => [c, total[c].toFixed(10)]))),
-    days: dayRows.map((r) => ({ day: r.day as string, occurrences: new Decimal(r.occ ?? 0).toNumber(), ...books(r) })),
+    // Every usable day, a day with no row of the brand at zero: a chart reads a quiet day as 0, never skips it.
+    days: usable.map((day) => {
+      const r = byDay.get(day) ?? {};
+      return { day, occurrences: new Decimal(r.occ ?? 0).toNumber(), ...books(r) };
+    }),
     outcomes: outcomeRows
       .filter((r) => r.ok != null)
       .map((r) => ({ outcomeKey: r.ok as string, occurrences: new Decimal(r.occ ?? 0).toNumber(), cost: money(r, "p") }))

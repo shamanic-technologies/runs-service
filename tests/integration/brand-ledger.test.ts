@@ -93,6 +93,7 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
       expect(k.difference[base]).toBe("0.0000000000");
       const line = new Decimal(k.standardCharged[base]).minus(k.reuseGain[base]).plus(k.producedNone[base]).plus(k.abnormal[base]);
       expect(line.toFixed(10)).toBe(new Decimal(k.spend[base]).toFixed(10));
+      expect(new Decimal(k.standardCharged[base]).minus(k.reuseGain[base]).toFixed(10)).toBe(k.production[base]);
     }
     // Every cost row of the brand's runs happened: 10 + 5 + 2 + 3 cents gross.
     expect(k.spend.grossCents).toBe("20.0000000000");
@@ -115,11 +116,14 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     const gain = totals.body.consumed.reduce((a: Decimal, g: any) => a.plus(g.reuseGain.grossCents), new Decimal(0));
     expect(mine.body.books.reuseGain.grossCents).toBe(gain.toFixed(10));
     for (const base of BASES) {
-      for (const f of ["spend", "standardCharged", "reuseGain", "producedNone", "abnormal"]) {
+      for (const f of ["spend", "production", "standardCharged", "reuseGain", "producedNone", "abnormal"]) {
         const sum = mine.body.days.reduce((a: Decimal, d: any) => a.plus(d[f][base]), new Decimal(0));
         expect(sum.toFixed(10), `${f}.${base}`).toBe(mine.body.books[f][base]);
       }
     }
+    expect(mine.body.days.map((d: any) => d.day)).toEqual([YESTERDAY, TODAY]);
+    const quiet = await request(app).get(`/internal/brands/${B2}/ledger?since=${YESTERDAY}&until=${TODAY}`).set(getInternalAuthHeaders());
+    expect(quiet.body.days.map((d: any) => [d.day, d.spend.grossCents])).toEqual([[YESTERDAY, "0.0000000000"], [TODAY, quiet.body.books.spend.grossCents]]);
     const produced = Object.fromEntries(mine.body.outcomes.map((o: any) => [o.outcomeKey, o.occurrences]));
     expect(produced).toEqual({ email_found: 2, email_checked: 2 });
   });
