@@ -404,6 +404,22 @@ Live it INNER JOINed the brand's history to the ledger: Doc Dinners (brand 75d7e
   inside the container against `dist/`). TRUNCATE in global-setup. Parity guard (red if the "other row" check is
   dropped): `tests/integration/stats-rollup-cost-name.test.ts`.
 
+## Consumption read — (org, brand set, UTC day, cost name, source) rollup (migration 0090, CONSUMPTION-500-1029)
+
+costs-service's real-cost refresh reads `GET /internal/stats/costs/consumption?groupBy=orgId` and `orgId,brandId`
+since inception, in parallel. Live: 1.82M counted cost rows, and by brand a hash join to the 7M-row runs table
+(6 s / 28 s at load 15, 89 s at load 30): past the stats 30 s timeout, every refresh 500'd 2026-10-16 → 10-29 and
+the billed catalogue froze.
+
+- **`stats_rollup_consumption_day`**: counted rows (actual/refunded) keyed on the COST ROW's org + created_at UTC day,
+  cost name, source, and the RUN's `brand_ids` kept as an array (unnested at read, so co-branded rows count under each
+  brand). `n` = matched rows; a group at n = 0 serves nothing. Triggers: cost write (OLD out / NEW in, run resolved by
+  pk; run gone = cascade, skipped), run `brand_ids` update (move its rows), run BEFORE DELETE (take its rows out).
+- **Served** for every filter/groupBy of the route (`services/stats-rollup-consumption-day.ts`), stamp + rows in ONE
+  statement; unstamped = the live query. Figures are Decimal-formatted by the route, so the body is identical.
+- **Readiness** stamp `consumption_day`; run `scripts/rebuild-stats-rollup.ts consumption_day` after the deploy (prod:
+  inside the container against `dist/`). TRUNCATE in global-setup. Guard: `tests/integration/stats-rollup-consumption.test.ts`.
+
 ## Org usage read — (org, service, task, campaign, UTC day) rollup (migration 0043)
 
 features-service `GET /orgs/usage` (Billing, Today, copilot `get_org_usage`) asks
