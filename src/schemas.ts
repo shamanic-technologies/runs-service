@@ -2039,6 +2039,18 @@ registry.registerPath({
   },
 });
 
+export const VendorCostsTimeseriesQuerySchema = PublicCostsTimeseriesQuerySchema.extend({
+  groupBy: z
+    .enum(["campaignId", "workflowSlug"])
+    .optional()
+    .openapi({
+      description:
+        "Split every bucket per campaign (`campaignId`) or per workflow VERSION (`workflowSlug`): one bucket per (period, key), each carrying the key, ordered by period then key. Omit for one bucket per period.",
+    }),
+  workflowSlug: z.string().optional().openapi({ description: "Only runs of this workflow version." }),
+  workflowSlugs: z.string().optional().openapi({ description: "Comma-separated workflow versions; wins over workflowSlug. workflowDynastySlug wins over both." }),
+}).openapi("VendorCostsTimeseriesQuery");
+
 export const VendorCostsTimeseriesResponseSchema = z
   .object({
     interval: z.enum(["day", "week", "month"]),
@@ -2047,6 +2059,7 @@ export const VendorCostsTimeseriesResponseSchema = z
       z.object({
         period: z.string().openapi({ description: "Bucket start date in YYYY-MM-DD, exactly as on GET /v1/stats/public/costs/timeseries.", example: "2026-09-21" }),
         campaignId: z.string().nullable().optional().openapi({ description: "Present only with groupBy=campaignId." }),
+        workflowSlug: z.string().nullable().optional().openapi({ description: "Present only with groupBy=workflowSlug (null for runs with no workflow)." }),
         totalCostInUsdCents: z.string().openapi({ description: "BILLED gross, status IN ('actual','provisioned') — byte-equal to the public twin's field for the same query." }),
         actualCostInUsdCents: z.string(),
         provisionedCostInUsdCents: z.string(),
@@ -2073,7 +2086,7 @@ registry.registerPath({
   description:
     "The dated spend of GET /v1/stats/public/costs/timeseries — same query parameters, same row set, same buckets — on the vendor-cost basis: what the same cost rows cost us from the vendor before our markup. Each row is priced by the costs-service price version of its cost name whose billed unit price equals the one the row froze and which was in force when the row was written; that version's vendor unit cost x quantity. Rows whose vendor cost is unknown are reported as unpriced billed spend, never folded in. Service-auth only: the vendor cost reveals the margin and is never served on a public route. 502 when the costs-service vendor catalogue cannot be read.",
   security: [{ apiKey: [] }],
-  request: { query: PublicCostsTimeseriesQuerySchema },
+  request: { query: VendorCostsTimeseriesQuerySchema },
   responses: {
     200: { description: "Dated vendor-basis cost buckets", content: { "application/json": { schema: VendorCostsTimeseriesResponseSchema } } },
     400: { description: "Invalid query parameters", content: { "application/json": { schema: ErrorSchema } } },

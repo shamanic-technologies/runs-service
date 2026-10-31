@@ -534,6 +534,11 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   match and only rows within 1 s of a bound are decided by a PK probe of their run. Any NULL
   `run_started_at` → the joined path. Prod: 15-47 s (timeouts) → ~2.4 s, byte-equal; guard
   `vendor-cost-timeseries-ledger.test.ts` (red if the band check is dropped).
+- **Per workflow version** (PUBLIC-VENDOR-COST-1031 follow-up): `workflowSlug` / `workflowSlugs` filters and
+  `groupBy=workflowSlug` (one bucket per (period, version), carrying `workflowSlug`) — features-service rebuilds the
+  public index history per version per run-start UTC day in ONE read per org x campaign set; per bucket billed
+  `totalCostInUsdCents` + `runCount` == `GET /v1/stats/costs/timeseries?workflowSlug=` (guard in
+  `vendor-cost-timeseries.test.ts`).
 - **Never on a public route** — the vendor cost reveals the margin. The public timeseries is
   untouched; the route is `/internal/*` behind `requireInternalAuth`.
 - **Per run: `GET /internal/runs/vendor?orgId=…`** — `GET /v1/runs`' exact list (shared

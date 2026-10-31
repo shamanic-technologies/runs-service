@@ -2800,6 +2800,11 @@
                   "nullable": true,
                   "description": "Present only with groupBy=campaignId."
                 },
+                "workflowSlug": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Present only with groupBy=workflowSlug (null for runs with no workflow)."
+                },
                 "totalCostInUsdCents": {
                   "type": "string",
                   "description": "BILLED gross, status IN ('actual','provisioned') — byte-equal to the public twin's field for the same query."
@@ -12477,12 +12482,13 @@
             "schema": {
               "type": "string",
               "enum": [
-                "campaignId"
+                "campaignId",
+                "workflowSlug"
               ],
-              "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged)."
+              "description": "Split every bucket per campaign (`campaignId`) or per workflow VERSION (`workflowSlug`): one bucket per (period, key), each carrying the key, ordered by period then key. Omit for one bucket per period."
             },
             "required": false,
-            "description": "Split every bucket per campaign: one bucket per (period, campaignId), each carrying `campaignId`, ordered by period then campaignId. With `campaignIds` this is a campaign family's dated spend broken down per stored row, in one request. Omit for one bucket per period (the default, unchanged).",
+            "description": "Split every bucket per campaign (`campaignId`) or per workflow VERSION (`workflowSlug`): one bucket per (period, key), each carrying the key, ordered by period then key. Omit for one bucket per period.",
             "name": "groupBy",
             "in": "query"
           },
@@ -12556,6 +12562,26 @@
             "required": false,
             "description": "Filter by WHO PAID the provider. platform = the platform paid, i.e. spend an org can be billed for — this is the figure to divide by the window length for a per-day burn rate. org = BYOK, paid by the org directly to its own provider key and never billed. Omit to count both, which is what this endpoint has always done (an unfiltered request is byte-identical to before this filter existed). run_count and the bucket set are unaffected by the filter: it narrows only the summed cost rows. An unrecognised value is a 400 — never a silently unfiltered answer.",
             "name": "costSource",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Only runs of this workflow version."
+            },
+            "required": false,
+            "description": "Only runs of this workflow version.",
+            "name": "workflowSlug",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated workflow versions; wins over workflowSlug. workflowDynastySlug wins over both."
+            },
+            "required": false,
+            "description": "Comma-separated workflow versions; wins over workflowSlug. workflowDynastySlug wins over both.",
+            "name": "workflowSlugs",
             "in": "query"
           }
         ],
