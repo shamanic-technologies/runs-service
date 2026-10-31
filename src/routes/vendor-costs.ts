@@ -164,18 +164,20 @@ export function vendorTimeseriesSql(
     filterSql: SQL | null;
     interval: string;
     timezone: string;
-    groupByCampaign: boolean;
+    /** Split every bucket per campaign or per workflow version (null = one bucket per period). */
+    groupColumn: "campaign_id" | "workflow_slug" | null;
     costSource: string | undefined;
     ledgerOnly?: LedgerOnlyWindow;
   },
   versions: VendorCostVersion[],
 ): SQL {
-  const { filterSql, interval, timezone, groupByCampaign, costSource, ledgerOnly } = opts;
-  if (ledgerOnly && groupByCampaign) throw new Error("ledgerOnly cannot group by campaign");
+  const { filterSql, interval, timezone, groupColumn, costSource, ledgerOnly } = opts;
+  if (ledgerOnly && groupColumn) throw new Error("ledgerOnly cannot group");
+  const g = groupColumn ? sql.raw(groupColumn) : null;
   const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
   const bucketOf = (col: SQL) => sql`DATE_TRUNC(${interval}, ${col} AT TIME ZONE ${timezone})`;
-  const groupCols = groupByCampaign ? sql`1, 2` : sql`1`;
-  const campaignCol = groupByCampaign ? sql`r.campaign_id,` : sql``;
+  const groupCols = g ? sql`1, 2` : sql`1`;
+  const campaignCol = g ? sql`r.${g},` : sql``;
 
   let baseFrom: SQL;
   if (ledgerOnly) {
@@ -236,7 +238,7 @@ export function vendorTimeseriesSql(
     costed AS (
       SELECT
         b.bucket,
-        ${groupByCampaign ? sql`b.campaign_id,` : sql``}
+        ${g ? sql`b.${g},` : sql``}
         b.status,
         b.cost_name,
         b.total_cost_in_usd_cents AS billed_total,
@@ -252,7 +254,7 @@ export function vendorTimeseriesSql(
     money AS MATERIALIZED (
       SELECT
         bucket,
-        ${groupByCampaign ? sql`campaign_id,` : sql``}
+        ${g ? sql`${g},` : sql``}
         ${sumsSql()},
         COALESCE(
           array_agg(DISTINCT cost_name ORDER BY cost_name)
@@ -266,7 +268,7 @@ export function vendorTimeseriesSql(
     -- its counts group; a run window with no cost row reads 0 everywhere.
     SELECT
       to_char(c.bucket, 'YYYY-MM-DD') AS period,
-      ${groupByCampaign ? sql`c.campaign_id,` : sql``}
+      ${g ? sql`c.${g},` : sql``}
       ${sql.join(
         MONEY_COLUMNS.map((col) => sql`COALESCE(m.${sql.raw(col)}, '0') AS ${sql.raw(col)}`),
         sql`, `,
@@ -276,8 +278,8 @@ export function vendorTimeseriesSql(
     FROM counts c
     LEFT JOIN money m
       ON m.bucket = c.bucket
-      ${groupByCampaign ? sql`AND m.campaign_id IS NOT DISTINCT FROM c.campaign_id` : sql``}
-    ORDER BY ${groupByCampaign ? sql`1, c.campaign_id` : sql`1`}
+      ${g ? sql`AND m.${g} IS NOT DISTINCT FROM c.${g}` : sql``}
+    ORDER BY ${g ? sql`1, c.${g}` : sql`1`}
   `;
 }
 
@@ -302,6 +304,8 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
       groupBy,
       featureSlug,
       featureSlugs: featureSlugsParam,
+      workflowSlug,
+      workflowSlugs: workflowSlugsParam,
       workflowDynastySlug,
       taskName,
       startedAfter,
@@ -318,11 +322,11 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
       res.status(400).json({ error: `Invalid costSource value. Allowed: ${PUBLIC_COST_SOURCES.join(", ")}` });
       return;
     }
-    if (groupBy !== undefined && groupBy !== "campaignId") {
-      res.status(400).json({ error: "Invalid groupBy value. Allowed: campaignId" });
+    if (groupBy !== undefined && groupBy !== "campaignId" && groupBy !== "workflowSlug") {
+      res.status(400).json({ error: "Invalid groupBy value. Allowed: campaignId, workflowSlug" });
       return;
     }
-    const groupByCampaign = groupBy === "campaignId";
+    const groupColumn = groupBy === "campaignId" ? "campaign_id" : groupBy === "workflowSlug" ? "workflow_slug" : null;
     const parsedCampaignIds = parseCampaignIds(campaignIdsParam);
     if (parsedCampaignIds.error) {
       res.status(400).json({ error: parsedCampaignIds.error });
@@ -343,6 +347,10 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
         return;
       }
       workflowSlugs = resolved;
+    } else if (workflowSlugsParam) {
+      workflowSlugs = parseCsv(workflowSlugsParam);
+    } else if (workflowSlug) {
+      workflowSlugs = [workflowSlug];
     }
 
     const filterSql = buildPublicFilterSql({
@@ -360,7 +368,7 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
     // Bounds are the only run-side filter → the money can come from the cost
     // ledger alone (see LedgerOnlyWindow), unless a cost row cannot be placed.
     const boundsOnly =
-      !groupByCampaign &&
+      !groupColumn &&
       !orgId &&
       !brandId &&
       !campaignId &&
@@ -374,12 +382,13 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
     const versions = await fetchVendorCostCatalog();
 
     const rows = (await db.execute(
-      vendorTimeseriesSql({ filterSql, interval, timezone, groupByCampaign, costSource, ledgerOnly }, versions),
+      vendorTimeseriesSql({ filterSql, interval, timezone, groupColumn, costSource, ledgerOnly }, versions),
     )) as any[];
 
     const buckets = rows.map((row) => ({
       period: row.period as string,
-      ...(groupByCampaign ? { campaignId: (row.campaign_id as string | null) ?? null } : {}),
+      ...(groupColumn === "campaign_id" ? { campaignId: (row.campaign_id as string | null) ?? null } : {}),
+      ...(groupColumn === "workflow_slug" ? { workflowSlug: (row.workflow_slug as string | null) ?? null } : {}),
       totalCostInUsdCents: fixed(row.billed_total),
       actualCostInUsdCents: fixed(row.billed_actual),
       provisionedCostInUsdCents: fixed(row.billed_provisioned),

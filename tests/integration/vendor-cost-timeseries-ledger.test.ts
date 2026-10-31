@@ -56,7 +56,7 @@ async function joinedRows(q: { startedAfter?: string; startedBefore?: string; in
   const filterSql = buildPublicFilterSql({ startedAfter: q.startedAfter, startedBefore: q.startedBefore });
   return (await statsDb.execute(
     vendorTimeseriesSql(
-      { filterSql, interval: q.interval, timezone: q.tz, groupByCampaign: false, costSource: q.costSource },
+      { filterSql, interval: q.interval, timezone: q.tz, groupColumn: null, costSource: q.costSource },
       VERSIONS as any,
     ),
   )) as any[];
