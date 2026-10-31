@@ -650,7 +650,12 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       descendants AS (
         SELECT id, id AS root_run_id FROM roots
         UNION ALL
-        SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        -- Per-run LATERAL fenced by OFFSET 0 on idx_runs_parent: a plain JOIN
+        -- trusts the recursive CTE's estimate (4M rows for 686 roots) and
+        -- hash-joins a seq scan of all of runs (7.3M rows): 145 s, statement
+        -- timeout, for one 686-run campaign (2026-10-31). Fenced: 3.8 s.
+        SELECT r.id, d.root_run_id FROM descendants d
+        CROSS JOIN LATERAL (SELECT x.id FROM runs x WHERE x.parent_run_id = d.id OFFSET 0) r
       ),
       v AS MATERIALIZED (${versionWindowsSql(versions)}),
       costed AS (
