@@ -29,6 +29,16 @@ const INTERVALS = new Set(["day", "week", "month"]);
  * (name, billed price) — a price re-used by a later version (a markup change that
  * lands on the same billed figure with a different vendor cost) opens a new
  * window, so each row matches at most ONE version and no cost is counted twice.
+ *
+ * The FIRST window of each (name, billed price) opens at -infinity: a row dated
+ * before every version carrying its billed price was priced LATER than its date
+ * (a late declaration, `POST /internal/incurred-costs/apply`, dates the row at
+ * `incurredAt` but prices it with the version served when it is recorded: the
+ * 102,362 comped Instantly sends of 2026-08-24..10-17, recorded 2026-10-18 at
+ * 2.8403, matched nothing and read as unpriced). A live write freezes the price
+ * served at its own instant, so it never lands before its version: the opening
+ * changes nothing for it. Exact when the version that priced the row is the
+ * first one carrying that price (true for every late row in prod, 2026-10-31).
  */
 export function versionWindowsSql(versions: VendorCostVersion[]) {
   const rows = versions
@@ -41,10 +51,17 @@ export function versionWindowsSql(versions: VendorCostVersion[]) {
       provider: v.provider,
     }));
   return sql`
-    SELECT x.cost_name, x.billed, x.vendor, x.provider, x.served_from AS valid_from,
-           LEAD(x.served_from) OVER (PARTITION BY x.cost_name, x.billed ORDER BY x.served_from) AS valid_to
+    -- Ties on served_from: the earlier tied rows keep their empty window, so
+    -- only the LAST of the first instant's ties opens at -infinity.
+    SELECT x.cost_name, x.billed, x.vendor, x.provider,
+           CASE WHEN x.served_from = MIN(x.served_from) OVER p
+                 AND LEAD(x.served_from) OVER w IS DISTINCT FROM x.served_from
+                THEN '-infinity'::timestamptz ELSE x.served_from END AS valid_from,
+           LEAD(x.served_from) OVER w AS valid_to
     FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
       AS x(cost_name text, billed numeric, vendor numeric, served_from timestamptz, provider text)
+    WINDOW p AS (PARTITION BY x.cost_name, x.billed),
+           w AS (p ORDER BY x.served_from)
   `;
 }
 
