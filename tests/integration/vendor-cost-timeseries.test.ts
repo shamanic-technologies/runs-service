@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import { Decimal } from "decimal.js";
-import { createTestApp } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 
 // GET /internal/stats/costs/timeseries/vendor — the dated spend of the public
@@ -355,6 +355,62 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
       });
     } finally {
       await cleanTestData([LATE_ORG]);
+    }
+  });
+
+  it("groups by workflow version, each bucket billed-equal to GET /v1/stats/costs/timeseries?workflowSlug=", async () => {
+    const WF_ORG = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c98";
+    const CAMPAIGN = "c0ffee00-0000-4000-8000-000000000001";
+    await cleanTestData([WF_ORG]);
+    try {
+      const mk = async (wf: string | undefined, startedAt: string, campaignId = CAMPAIGN) =>
+        (await insertTestRun({
+          organizationId: WF_ORG, serviceName: "svc", taskName: "task", brandIds: [BRAND_ID], featureSlug: FEATURE,
+          campaignId, workflowSlug: wf, status: "completed", startedAt: new Date(startedAt),
+        })).id;
+      const a1 = await mk("wf-v1", "2026-09-10T10:00:00Z");
+      await cost(a1, "tok", "10", "6", "2026-09-10T10:00:01Z"); // vendor 10
+      const a2 = await mk("wf-v2", "2026-09-10T11:00:00Z");
+      await cost(a2, "tok", "2", "6", "2026-09-10T11:00:01Z"); // vendor 2
+      await cost(a2, "unknown", "1", "2", "2026-09-10T11:00:01Z"); // unpriced 2
+      const a3 = await mk("wf-v2", "2026-09-21T10:00:00Z");
+      await cost(a3, "tok", "1", "6", "2026-09-21T10:00:01Z", "refunded"); // vendor refunded 1.2
+      await mk("wf-v1", "2026-09-21T10:00:00Z"); // a run with no cost
+      const other = await mk("wf-v1", "2026-09-10T10:00:00Z", "c0ffee00-0000-4000-8000-000000000002"); // other campaign
+      await cost(other, "tok", "5", "6", "2026-09-10T10:00:01Z");
+
+      const res = await request(app)
+        .get("/internal/stats/costs/timeseries/vendor")
+        .query({ interval: "day", tz: "UTC", orgId: WF_ORG, featureSlugs: FEATURE, campaignIds: CAMPAIGN, groupBy: "workflowSlug" })
+        .set(API_KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.buckets.map((b: any) => [b.period, b.workflowSlug, b.vendorTotalCostInUsdCents, b.unpricedTotalCostInUsdCents, b.vendorRefundedCostInUsdCents, b.runCount])).toEqual([
+        ["2026-09-10", "wf-v1", "10.0000000000", "0.0000000000", "0.0000000000", 1],
+        ["2026-09-10", "wf-v2", "2.0000000000", "2.0000000000", "0.0000000000", 1],
+        ["2026-09-21", "wf-v1", "0.0000000000", "0.0000000000", "0.0000000000", 1],
+        ["2026-09-21", "wf-v2", "0.0000000000", "0.0000000000", "1.2000000000", 1],
+      ]);
+
+      // Same row set as the billed per-version read features-service makes today.
+      for (const wf of ["wf-v1", "wf-v2"]) {
+        const billed = await request(app)
+          .get("/v1/stats/costs/timeseries")
+          .query({ interval: "day", tz: "UTC", workflowSlug: wf, featureSlugs: FEATURE, campaignIds: CAMPAIGN })
+          .set(getAuthHeaders({ orgId: WF_ORG }));
+        expect(billed.status).toBe(200);
+        const filtered = await request(app)
+          .get("/internal/stats/costs/timeseries/vendor")
+          .query({ interval: "day", tz: "UTC", orgId: WF_ORG, featureSlugs: FEATURE, campaignIds: CAMPAIGN, workflowSlug: wf })
+          .set(API_KEY);
+        const mine = res.body.buckets.filter((b: any) => b.workflowSlug === wf);
+        for (const list of [mine, filtered.body.buckets]) {
+          expect(list.map((b: any) => [b.period, b.totalCostInUsdCents, b.runCount])).toEqual(
+            billed.body.buckets.map((b: any) => [b.period, b.totalCostInUsdCents, b.runCount]),
+          );
+        }
+      }
+    } finally {
+      await cleanTestData([WF_ORG]);
     }
   });
 
