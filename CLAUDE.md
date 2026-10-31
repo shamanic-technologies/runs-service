@@ -589,6 +589,13 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   current month (`complete: false`). Each provider's months sum to its margin row FIELD BY FIELD: vendor
   is unrounded per row, so a month's vendor = round(running sum) − round(previous running sum) (telescopes
   to the margin read's rounded total; per-month rounding would drift). Pinned in `cost-margin-timeseries.test.ts`.
+- **Public twin: `vendorMonthly` on `GET /public/stats/runs`** (PUBLIC-VENDOR-COST-1031, the landing's monthly spend bars at
+  vendor cost): the margin monthly read summed over providers (`readPublicVendorMonthly` in `routes/vendor-costs.ts`), CHARGED
+  (`actual`) platform rows only, per UTC month of the cost row's `created_at` (not the run start `monthly` uses). Per month:
+  charged, vendor, unpriced + share; above 1 % unpriced the month serves vendor null + `unavailableReason`, never a mix.
+  Refunded rows are out (mostly unpriced Instantly sends). 5-min in-process cache, failure not cached; a catalogue failure
+  serves `vendorMonthly: null` + `vendorUnavailableReason` and the billed fields unchanged (investors page). Only the fleet
+  monthly TOTAL is public, never per provider. Guard `tests/integration/public-vendor-monthly.test.ts`.
 - **Units `GET /internal/stats/costs/consumption[?costNames=a,b&since=YYYY-MM-DD]`** (costs-service's real cost
   per credit of each vendor subscription = bank spend / these units): fleet-wide SUM(quantity) per UTC day of
   `created_at` × cost name × `cost_source` (platform key vs org key, never merged), SPARSE days + `totals[]`.

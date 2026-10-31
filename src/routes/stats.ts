@@ -27,6 +27,8 @@ import {
   readPublicCostsFromRollup,
 } from "../services/stats-rollup.js";
 import { RUN_DAY_ROLLUP_NAME } from "../services/stats-rollup-run-day.js";
+import { readPublicVendorMonthly, type PublicVendorMonth } from "./vendor-costs.js";
+import { VendorCostCatalogError } from "../services/vendor-costs.js";
 import {
   CAMPAIGN_DAY_ROLLUP_NAME,
   CAMPAIGN_ROLLUP_GROUP_BY_COLUMNS,
@@ -1867,7 +1869,27 @@ router.get("/public/stats/runs", async (_req, res) => {
       total = total.plus(bucket.totalCostInUsdCents);
     }
 
-    res.json({ byStatus, monthly, weekly, totalCostInUsdCents: total.toFixed(10) });
+    // Monthly spend at VENDOR cost (before our markup), additive: the billed
+    // figures above are unchanged. Its own failure never takes the billed
+    // figures down; it is stated as unavailable with its reason instead.
+    let vendorMonthly: PublicVendorMonth[] | null = null;
+    let vendorUnavailableReason: string | null = null;
+    try {
+      vendorMonthly = await readPublicVendorMonthly();
+    } catch (err) {
+      console.error("[Runs Service] GET /public/stats/runs: vendor monthly unavailable:", err);
+      vendorUnavailableReason =
+        err instanceof VendorCostCatalogError ? "vendor cost catalogue unreadable" : "vendor cost read failed";
+    }
+
+    res.json({
+      byStatus,
+      monthly,
+      weekly,
+      totalCostInUsdCents: total.toFixed(10),
+      vendorMonthly,
+      vendorUnavailableReason,
+    });
   } catch (err) {
     console.error("[Runs Service] Error in GET /public/stats/runs:", err);
     res.status(500).json({ error: "Internal server error" });
