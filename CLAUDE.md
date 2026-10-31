@@ -517,6 +517,12 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   version whose served-from (`max(effectiveFrom, createdAt)`, costs-service's "would have
   served" rule) is `<=` the row's `created_at`. Windows are per (name, billed price), so each
   row matches at most one version. Vendor total = `quantity × vendor unit`, in `numeric`.
+  The FIRST window of each (name, billed price) opens at -infinity (PUBLIC-VENDOR-COST-1031):
+  a late declaration (`/internal/incurred-costs`) is dated at `incurredAt` but priced when
+  recorded, so it sits before every version carrying its price (102,354 comped Instantly sends
+  of 2026-08-24..10-14, recorded 10-18 at 2.8403: $2,907 read unpriced, 11.8% of fleet spend);
+  a live write never does, so no other row moved (prod check 2026-10-31). Stored ledger days
+  follow on their next recompute, like any catalogue correction.
 - **Unknown is stated, never folded in**: vendor `null`, or no version matching at write time
   → the row's BILLED amount goes to `unpriced*`, its name to `unpricedCostNames`. Catalogue
   unreadable → 502, never an all-unpriced 200.
