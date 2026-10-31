@@ -595,9 +595,9 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
 - **Every run at once: `GET /internal/runs/subtree-costs?orgId=…&brandId|campaignId=…[&serviceName&taskName]`** — no page,
   one statement: each matching run's committed (`actual`) SUBTREE cost on billed, frozen net, vendor and unpriced, equal run for
   run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). Read by features-service
-  (sourcing investment; Threads template ranking). brandId or campaignId required (400). Each run also serves `supportFunction`
+  (sourcing; Threads templates). brandId or campaignId required (400). Each run also serves `supportFunction`
   = kind of the nearest support mark among itself + ancestors (a mark covers its subtree; null = none): a consumer leaves
-  those runs out of an outcome. Upward walk = PK probes per matched run, stops at the first mark (2026-10-31).
+  those runs out of an outcome. Up walk: PK probes, stops at a mark. Down walk: per-run LATERAL OFFSET 0 (a JOIN seq-scanned runs, 145 s).
 - Prod check 2026-09-27 (brand 75d7e3e8): billed/vendor per day = 5.000 since 09-15, 4.000 Jul–Aug.
   Unpriced = older Instantly lines costs-service states as unknown + rows before 2026-05-03.
 - **Grouped twin `GET /internal/stats/costs/vendor`** — the UNDATED grouped aggregation
