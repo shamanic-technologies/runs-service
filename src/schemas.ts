@@ -1420,6 +1420,17 @@ export const PublicRunsStatsWeeklyEntrySchema = z
   })
   .openapi("PublicRunsStatsWeeklyEntry");
 
+export const PublicRunsStatsVendorMonthSchema = z
+  .object({
+    month: z.string().openapi({ example: "2026-09" }),
+    chargedCostInUsdCents: z.string().openapi({ description: "What clients were charged for the month's rows (the rows the vendor figure prices). 10-decimal string.", example: "403000.0000000000" }),
+    vendorCostInUsdCents: z.string().nullable().openapi({ description: "What the vendors charged us for those rows. null when the month is withheld (see unavailableReason). 10-decimal string.", example: "73700.0000000000" }),
+    unpricedChargedCostInUsdCents: z.string().openapi({ description: "Charged spend whose vendor cost costs-service does not state; not in vendorCostInUsdCents.", example: "0.0000000000" }),
+    unpricedShare: z.string().openapi({ description: "unpricedCharged / charged, 6 decimals.", example: "0.000000" }),
+    unavailableReason: z.string().nullable().openapi({ description: "null when served; set (and vendorCostInUsdCents null) when unpriced spend is above 1% of the month's charged spend." }),
+  })
+  .openapi("PublicRunsStatsVendorMonth");
+
 export const PublicRunsStatsResponseSchema = z
   .object({
     byStatus: PublicRunsStatsStatusBreakdownSchema,
@@ -1432,6 +1443,17 @@ export const PublicRunsStatsResponseSchema = z
           "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status IN ('actual','provisioned') (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
         example: "1234.5678901234",
       }),
+    vendorMonthly: z
+      .array(PublicRunsStatsVendorMonthSchema)
+      .nullable()
+      .openapi({
+        description:
+          "Fleet spend per UTC month at VENDOR cost (what the vendors charged us, before our markup), since the first charged row. Month = UTC month of the cost row's created_at (when the spend was charged), not the run start used by `monthly`. Rows = platform rows charged to a client (status 'actual'); holds and refunded rows are in no figure. null when the vendor read is unavailable (see vendorUnavailableReason); the billed figures above are served regardless.",
+      }),
+    vendorUnavailableReason: z
+      .string()
+      .nullable()
+      .openapi({ description: "null when vendorMonthly is served; else why it is not." }),
   })
   .openapi("PublicRunsStatsResponse");
 
