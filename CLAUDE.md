@@ -564,13 +564,12 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   descendants: the walk is a per-run LATERAL on idx_runs_costs_run_agg (~15 ms join; a plain JOIN hash-joined a seq scan of the ledger, 1.2 s). An unknown `include` value is a 400.
 - **Every run at once: `GET /internal/runs/subtree-costs?orgId=…&brandId|campaignId=…[&serviceName&taskName]`** — no page,
   one statement: each matching run's committed (`actual`) SUBTREE cost on billed, frozen net, vendor and unpriced, equal run for
-  run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). features-service's
-  sourcing investment reads it instead of walking both lists in OFFSET pages of 500 (owner brand: 244 calls, each page
-  re-scanning the ones before). brandId or campaignId required (400): unbounded, it is an org's whole history.
-- Prod check 2026-09-27 (brand 75d7e3e8, ballad dynasty): billed/vendor per day = 5.000 since
-  09-15, 4.000 in Jul–Aug; Gemini 3.1 Pro input on 09-24 = 3,270,919 tokens × $2/MTok to the
-  cent. Unpriced there = older Instantly lines costs-service states as unknown, and every
-  row written before 2026-05-03 (prices costs-service no longer holds).
+  run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). Read by features-service
+  (sourcing investment; Threads template ranking). brandId or campaignId required (400). Each run also serves `supportFunction`
+  = kind of the nearest support mark among itself + ancestors (a mark covers its subtree; null = none): a consumer leaves
+  those runs out of an outcome. Upward walk = PK probes per matched run, stops at the first mark (2026-10-31).
+- Prod check 2026-09-27 (brand 75d7e3e8): billed/vendor per day = 5.000 since 09-15, 4.000 Jul–Aug.
+  Unpriced = older Instantly lines costs-service states as unknown + rows before 2026-05-03.
 - **Grouped twin `GET /internal/stats/costs/vendor`** — the UNDATED grouped aggregation
   (`/v1/stats/costs` org-scoped, `/v1/stats/public/costs` fleet) on the same basis, same
   pricing, same field vocabulary (`totalCostInUsdCents` billed gross, `vendor*`, `unpriced*`,

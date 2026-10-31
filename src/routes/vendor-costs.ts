@@ -626,8 +626,26 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
     const versions = await fetchVendorCostCatalog();
     const rows = (await db.execute(sql`
       WITH RECURSIVE roots AS MATERIALIZED (
-        SELECT id, audience_id, campaign_id, started_at FROM runs
+        SELECT id, parent_run_id, audience_id, campaign_id, started_at FROM runs
         WHERE ${sql.join(conditions, sql` AND `)}
+      ),
+      -- Support function covering each matched run: the nearest run_support_marks
+      -- row among the run itself and its ancestors (a mark covers its subtree).
+      -- Walks UP from the matched runs only (PK probes) and stops at the first mark.
+      chain AS (
+        SELECT ro.id AS root_run_id, ro.parent_run_id, 0 AS depth, m.kind
+        FROM roots ro LEFT JOIN run_support_marks m ON m.run_id = ro.id
+        UNION ALL
+        SELECT c.root_run_id, p.parent_run_id, c.depth + 1, m.kind
+        FROM chain c
+        INNER JOIN runs p ON p.id = c.parent_run_id
+        LEFT JOIN run_support_marks m ON m.run_id = p.id
+        WHERE c.kind IS NULL
+      ),
+      support AS (
+        SELECT DISTINCT ON (root_run_id) root_run_id, kind
+        FROM chain WHERE kind IS NOT NULL
+        ORDER BY root_run_id, depth
       ),
       descendants AS (
         SELECT id, id AS root_run_id FROM roots
@@ -667,9 +685,11 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         FROM costed
         GROUP BY root_run_id
       )
-      SELECT ro.id, ro.audience_id, ro.campaign_id, s.billed_actual, s.net_actual, s.vendor_actual, s.unpriced_actual
+      SELECT ro.id, ro.audience_id, ro.campaign_id, s.billed_actual, s.net_actual, s.vendor_actual, s.unpriced_actual,
+             sp.kind AS support_function
       FROM roots ro
       LEFT JOIN sums s ON s.root_run_id = ro.id
+      LEFT JOIN support sp ON sp.root_run_id = ro.id
       ORDER BY ro.started_at DESC, ro.id DESC
     `)) as any[];
 
@@ -684,6 +704,7 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         netActualCostInUsdCents: fixed(r.net_actual ?? zero),
         vendorActualCostInUsdCents: fixed(r.vendor_actual ?? zero),
         unpricedActualCostInUsdCents: fixed(r.unpriced_actual ?? zero),
+        supportFunction: (r.support_function as string | null) ?? null,
       })),
     });
   } catch (err) {
