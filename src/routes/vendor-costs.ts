@@ -29,6 +29,16 @@ const INTERVALS = new Set(["day", "week", "month"]);
  * (name, billed price) — a price re-used by a later version (a markup change that
  * lands on the same billed figure with a different vendor cost) opens a new
  * window, so each row matches at most ONE version and no cost is counted twice.
+ *
+ * The FIRST window of each (name, billed price) opens at -infinity: a row dated
+ * before every version carrying its billed price was priced LATER than its date
+ * (a late declaration, `POST /internal/incurred-costs/apply`, dates the row at
+ * `incurredAt` but prices it with the version served when it is recorded: the
+ * 102,362 comped Instantly sends of 2026-08-24..10-17, recorded 2026-10-18 at
+ * 2.8403, matched nothing and read as unpriced). A live write freezes the price
+ * served at its own instant, so it never lands before its version: the opening
+ * changes nothing for it. Exact when the version that priced the row is the
+ * first one carrying that price (true for every late row in prod, 2026-10-31).
  */
 export function versionWindowsSql(versions: VendorCostVersion[]) {
   const rows = versions
@@ -41,10 +51,17 @@ export function versionWindowsSql(versions: VendorCostVersion[]) {
       provider: v.provider,
     }));
   return sql`
-    SELECT x.cost_name, x.billed, x.vendor, x.provider, x.served_from AS valid_from,
-           LEAD(x.served_from) OVER (PARTITION BY x.cost_name, x.billed ORDER BY x.served_from) AS valid_to
+    -- Ties on served_from: the earlier tied rows keep their empty window, so
+    -- only the LAST of the first instant's ties opens at -infinity.
+    SELECT x.cost_name, x.billed, x.vendor, x.provider,
+           CASE WHEN x.served_from = MIN(x.served_from) OVER p
+                 AND LEAD(x.served_from) OVER w IS DISTINCT FROM x.served_from
+                THEN '-infinity'::timestamptz ELSE x.served_from END AS valid_from,
+           LEAD(x.served_from) OVER w AS valid_to
     FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
       AS x(cost_name text, billed numeric, vendor numeric, served_from timestamptz, provider text)
+    WINDOW p AS (PARTITION BY x.cost_name, x.billed),
+           w AS (p ORDER BY x.served_from)
   `;
 }
 
@@ -1441,6 +1458,106 @@ router.get("/internal/stats/costs/margin/timeseries", requireInternalAuth, async
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// --- Public: fleet monthly spend at vendor cost (PUBLIC-VENDOR-COST-1031) ---
+
+/** Above this share of a month's charged spend left unpriced, the month's vendor figure is not served. */
+export const PUBLIC_VENDOR_MAX_UNPRICED_SHARE = new Decimal("0.01");
+const PUBLIC_VENDOR_CACHE_TTL_MS = 5 * 60_000;
+
+export interface PublicVendorMonth {
+  month: string;
+  /** What clients were charged ('actual' platform rows), the rows the vendor figure prices. */
+  chargedCostInUsdCents: string;
+  /** What the vendors charged us for them; null when the month is not served. */
+  vendorCostInUsdCents: string | null;
+  /** Charged spend with no vendor cost stated by costs-service. */
+  unpricedChargedCostInUsdCents: string;
+  /** unpriced / charged, 6 decimals ("0.000000" when nothing was charged). */
+  unpricedShare: string;
+  /** null when served; else why the vendor figure is withheld. */
+  unavailableReason: string | null;
+}
+
+let publicVendorCache: { at: number; value: Promise<PublicVendorMonth[]> } | null = null;
+
+export function resetPublicVendorMonthlyCache(): void {
+  publicVendorCache = null;
+}
+
+/**
+ * The fleet's monthly spend at VENDOR cost (before our markup), per UTC month of
+ * the cost row's created_at, for the public run stats (the landing's "what our
+ * agents spent" bars). Same rows and pricing as the staff margin read: PLATFORM
+ * rows charged to a client ('actual'), each priced at the vendor cost of the
+ * catalogue version it froze. Refunded rows are left out: they are not in the
+ * billed figure either, and most of them (Instantly sends declared late) have no
+ * vendor cost stated.
+ *
+ * Never a silent mix: a month whose unpriced charged spend exceeds 1 % of its
+ * charged spend serves vendor null + a reason. Below that the unpriced part is
+ * stated beside the figure. Vendor sums telescope (running round) like the margin
+ * timeseries, so the months add up to the margin read's total vendor.
+ *
+ * Cached 5 min in-process (a landing visit must not cost a ~2 s read); a failed
+ * read is not cached.
+ */
+export function readPublicVendorMonthly(): Promise<PublicVendorMonth[]> {
+  const now = Date.now();
+  if (publicVendorCache && now - publicVendorCache.at < PUBLIC_VENDOR_CACHE_TTL_MS) return publicVendorCache.value;
+  const value = computePublicVendorMonthly();
+  publicVendorCache = { at: now, value };
+  value.catch(() => {
+    if (publicVendorCache?.value === value) publicVendorCache = null;
+  });
+  return value;
+}
+
+async function computePublicVendorMonthly(): Promise<PublicVendorMonth[]> {
+  const versions = await fetchVendorCostCatalog();
+  const fromRollup = await isStatsRollupReady(COST_DAY_ROLLUP_NAME);
+  const rows = (await db.execute(sql`
+      ${marginCostedCtesSql(versions, undefined, fromRollup)},
+      monthly AS (
+        SELECT
+          date_trunc('month', created_at AT TIME ZONE 'UTC')::date AS month,
+          COALESCE(SUM(gross), 0) AS charged,
+          COALESCE(SUM(vendor) FILTER (WHERE priced), 0) AS vendor_raw,
+          COALESCE(SUM(gross) FILTER (WHERE NOT priced), 0) AS unpriced
+        FROM costed
+        WHERE status = 'actual'
+        GROUP BY 1
+      ),
+      running AS (
+        SELECT m.*, round(SUM(vendor_raw) OVER (ORDER BY month), 10) AS vendor_cum
+        FROM monthly m
+      )
+      SELECT
+        to_char(month, 'YYYY-MM') AS month,
+        round(charged, 10)::text AS charged,
+        (vendor_cum - COALESCE(LAG(vendor_cum) OVER (ORDER BY month), 0))::text AS vendor,
+        round(unpriced, 10)::text AS unpriced
+      FROM running
+      ORDER BY month
+    `)) as any[];
+
+  return rows.map((r) => {
+    const charged = new Decimal(r.charged as string);
+    const unpriced = new Decimal(r.unpriced as string);
+    const share = charged.isZero() ? new Decimal(0) : unpriced.div(charged);
+    const withheld = share.greaterThan(PUBLIC_VENDOR_MAX_UNPRICED_SHARE);
+    return {
+      month: r.month as string,
+      chargedCostInUsdCents: charged.toFixed(10),
+      vendorCostInUsdCents: withheld ? null : new Decimal(r.vendor as string).toFixed(10),
+      unpricedChargedCostInUsdCents: unpriced.toFixed(10),
+      unpricedShare: share.toFixed(6),
+      unavailableReason: withheld
+        ? `vendor cost unknown for ${share.times(100).toFixed(1)}% of this month's charged spend (above 1%)`
+        : null,
+    };
+  });
+}
 
 // --- Units consumed (and billed) per day, fleet-wide or per org / brand ---
 

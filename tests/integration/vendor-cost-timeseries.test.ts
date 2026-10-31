@@ -323,6 +323,41 @@ describe("GET /internal/stats/costs/timeseries/vendor", () => {
     });
   });
 
+  it("prices a late-declared row dated before every version of its billed price at the first one (PUBLIC-VENDOR-COST-1031)", async () => {
+    // A comped send declared through /internal/incurred-costs is dated at incurredAt but priced
+    // when recorded: billed 6 on 2026-08-20, before v1 (09-01). It rides v1 (vendor 1), never
+    // v3 (same billed price, later) and never the unpriced bucket. A price no version carries
+    // (7) stays unpriced.
+    const LATE_ORG = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c99";
+    await cleanTestData([LATE_ORG]);
+    try {
+      const r = await insertTestRun({
+        organizationId: LATE_ORG,
+        serviceName: "svc",
+        taskName: "task",
+        brandIds: [BRAND_ID],
+        featureSlug: FEATURE,
+        status: "completed",
+        startedAt: new Date("2026-08-20T10:00:00Z"),
+      });
+      await cost(r.id, "tok", "3", "6", "2026-08-20T10:00:01Z", "refunded"); // vendor 3 (v1)
+      await cost(r.id, "tok", "1", "7", "2026-08-20T10:00:01Z", "refunded"); // unpriced 7
+      const res = await request(app)
+        .get("/internal/stats/costs/timeseries/vendor")
+        .query({ ...QUERY, orgId: LATE_ORG })
+        .set(API_KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.buckets).toHaveLength(1);
+      expect(res.body.buckets[0]).toMatchObject({
+        period: "2026-08-20",
+        vendorRefundedCostInUsdCents: "3.0000000000",
+        unpricedRefundedCostInUsdCents: "7.0000000000",
+      });
+    } finally {
+      await cleanTestData([LATE_ORG]);
+    }
+  });
+
   it("fails loud (502) when the vendor catalogue cannot be read — never serves it all as unpriced", async () => {
     const { VendorCostCatalogError } = await import("../../src/services/vendor-costs.js");
     catalog.fn.mockRejectedValueOnce(new VendorCostCatalogError("costs-service vendor catalogue returned 503: down"));

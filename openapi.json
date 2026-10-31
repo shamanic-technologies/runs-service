@@ -3706,13 +3706,28 @@
             "type": "string",
             "description": "All-time cumulative cost across all runs and all organizations, restricted to cost_source='platform' AND status IN ('actual','provisioned') (excludes BYOK rows and cancelled rows). 10-decimal string to preserve numeric(16,10) precision.",
             "example": "1234.5678901234"
+          },
+          "vendorMonthly": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/PublicRunsStatsVendorMonth"
+            },
+            "description": "Fleet spend per UTC month at VENDOR cost (what the vendors charged us, before our markup), since the first charged row. Month = UTC month of the cost row's created_at (when the spend was charged), not the run start used by `monthly`. Rows = platform rows charged to a client (status 'actual'); holds and refunded rows are in no figure. null when the vendor read is unavailable (see vendorUnavailableReason); the billed figures above are served regardless."
+          },
+          "vendorUnavailableReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "null when vendorMonthly is served; else why it is not."
           }
         },
         "required": [
           "byStatus",
           "monthly",
           "weekly",
-          "totalCostInUsdCents"
+          "totalCostInUsdCents",
+          "vendorMonthly",
+          "vendorUnavailableReason"
         ]
       },
       "PublicRunsStatsStatusBreakdown": {
@@ -3794,6 +3809,49 @@
           "failed",
           "running",
           "totalCostInUsdCents"
+        ]
+      },
+      "PublicRunsStatsVendorMonth": {
+        "type": "object",
+        "properties": {
+          "month": {
+            "type": "string",
+            "example": "2026-09"
+          },
+          "chargedCostInUsdCents": {
+            "type": "string",
+            "description": "What clients were charged for the month's rows (the rows the vendor figure prices). 10-decimal string.",
+            "example": "403000.0000000000"
+          },
+          "vendorCostInUsdCents": {
+            "type": "string",
+            "nullable": true,
+            "description": "What the vendors charged us for those rows. null when the month is withheld (see unavailableReason). 10-decimal string.",
+            "example": "73700.0000000000"
+          },
+          "unpricedChargedCostInUsdCents": {
+            "type": "string",
+            "description": "Charged spend whose vendor cost costs-service does not state; not in vendorCostInUsdCents.",
+            "example": "0.0000000000"
+          },
+          "unpricedShare": {
+            "type": "string",
+            "description": "unpricedCharged / charged, 6 decimals.",
+            "example": "0.000000"
+          },
+          "unavailableReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "null when served; set (and vendorCostInUsdCents null) when unpriced spend is above 1% of the month's charged spend."
+          }
+        },
+        "required": [
+          "month",
+          "chargedCostInUsdCents",
+          "vendorCostInUsdCents",
+          "unpricedChargedCostInUsdCents",
+          "unpricedShare",
+          "unavailableReason"
         ]
       },
       "CreatePlatformRunRequest": {
