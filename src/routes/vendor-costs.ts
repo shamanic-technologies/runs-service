@@ -168,10 +168,16 @@ export function vendorTimeseriesSql(
     groupColumn: "campaign_id" | "workflow_slug" | null;
     costSource: string | undefined;
     ledgerOnly?: LedgerOnlyWindow;
+    /**
+     * The money rows from the 0050/0051 rollup (tz UTC only: its day is the run's UTC start day):
+     * vendorGroupedRollupBaseSql's CTE list, whose `base` already carries `bucket` (+ the group column).
+     */
+    rollupBase?: SQL;
   },
   versions: VendorCostVersion[],
 ): SQL {
-  const { filterSql, interval, timezone, groupColumn, costSource, ledgerOnly } = opts;
+  const { filterSql, interval, timezone, groupColumn, costSource, ledgerOnly, rollupBase } = opts;
+  if (ledgerOnly && rollupBase) throw new Error("ledgerOnly and rollupBase are exclusive");
   if (ledgerOnly && groupColumn) throw new Error("ledgerOnly cannot group");
   const g = groupColumn ? sql.raw(groupColumn) : null;
   const whereSql = filterSql ? sql`WHERE ${filterSql}` : sql``;
@@ -234,7 +240,7 @@ export function vendorTimeseriesSql(
       ${whereSql}
       GROUP BY ${groupCols}
     ),
-    base AS MATERIALIZED (${baseFrom}),
+    ${rollupBase ?? sql`base AS MATERIALIZED (${baseFrom})`},
     costed AS (
       SELECT
         b.bucket,
@@ -381,8 +387,35 @@ router.get("/internal/stats/costs/timeseries/vendor", requireInternalAuth, async
 
     const versions = await fetchVendorCostCatalog();
 
+    // Money from the (campaign, run-start UTC day, …, cost hour) rollup when it can answer: a UTC
+    // bucket is whole run-start UTC days, and every filter but taskName is a rollup key. Run counts
+    // stay live (index-only). Live, a 20k-run campaign read 25 s at box load 33 (2026-10-31): a
+    // bigger one died on the 30 s stats timeout.
+    const rollupBase =
+      !ledgerOnly && timezone === "UTC" && !taskName && (await isStatsRollupReady(CAMPAIGN_COST_ITEMS_ROLLUP_NAME))
+        ? vendorGroupedRollupBaseSql(versions, {
+            dimSelect: sql`DATE_TRUNC(${interval}, i.run_day::timestamp) AS bucket${
+              groupColumn ? sql.raw(`, i.${groupColumn}`) : sql``
+            }`,
+            filters: {
+              orgId,
+              brandId,
+              campaignId,
+              campaignIds: parsedCampaignIds.ids,
+              featureSlugs: rollupFeatureSlugs(parseCsv(featureSlugsParam), featureSlug),
+              workflowSlugs,
+            },
+            costSource,
+            startedAfter,
+            startedBefore,
+            liveWhereSql: filterSql
+              ? sql`rc.status IN ('actual','provisioned','refunded') AND ${filterSql}`
+              : sql`rc.status IN ('actual','provisioned','refunded')`,
+          })
+        : undefined;
+
     const rows = (await db.execute(
-      vendorTimeseriesSql({ filterSql, interval, timezone, groupColumn, costSource, ledgerOnly }, versions),
+      vendorTimeseriesSql({ filterSql, interval, timezone, groupColumn, costSource, ledgerOnly, rollupBase }, versions),
     )) as any[];
 
     const buckets = rows.map((row) => ({
@@ -762,13 +795,14 @@ function vendorGroupedRollupBaseSql(
     partial.push(dayRange(utcDay(opts.startedBefore)));
   }
 
-  const itemCols = sql`campaign_id, organization_id, brand_ids, feature_slug, workflow_slug, status, cost_name,
+  const itemCols = sql`campaign_id, organization_id, brand_ids, feature_slug, workflow_slug, run_day, status, cost_name,
     unit_cost_in_usd_cents, created_at, quantity, total_cost_in_usd_cents`;
   const liveDays =
     partial.length > 0
       ? sql`
         UNION ALL
-        SELECT r.campaign_id, r.organization_id, r.brand_ids, r.feature_slug, r.workflow_slug, rc.status, rc.cost_name,
+        SELECT r.campaign_id, r.organization_id, r.brand_ids, r.feature_slug, r.workflow_slug,
+               (r.started_at AT TIME ZONE 'UTC')::date, rc.status, rc.cost_name,
                rc.unit_cost_in_usd_cents, rc.created_at, rc.quantity, rc.total_cost_in_usd_cents
         FROM runs r
         INNER JOIN runs_costs rc ON rc.run_id = r.id ${costSourceJoinSql(opts.costSource)}
@@ -821,12 +855,12 @@ function vendorGroupedRollupBaseSql(
         ) r
       ),
       items (${itemCols}) AS MATERIALIZED (
-        SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, g.status, g.cost_name,
+        SELECT g.campaign_id, g.organization_id, g.brand_ids, g.feature_slug, g.workflow_slug, g.day, g.status, g.cost_name,
                g.unit_cost_in_usd_cents, g.min_created_at, g.quantity, g.gross
         FROM g
         WHERE NOT g.split
         UNION ALL
-        SELECT s.campaign_id, s.organization_id, s.brand_ids, s.feature_slug, s.workflow_slug, x.status, x.cost_name,
+        SELECT s.campaign_id, s.organization_id, s.brand_ids, s.feature_slug, s.workflow_slug, s.day, x.status, x.cost_name,
                x.unit_cost_in_usd_cents, x.created_at, x.quantity, x.total_cost_in_usd_cents
         -- A straddling group's own ledger rows (see srows).
         FROM srows x

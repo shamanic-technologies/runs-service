@@ -568,7 +568,9 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   `groupBy=workflowSlug` (one bucket per (period, version), carrying `workflowSlug`) — features-service rebuilds the
   public index history per version per run-start UTC day in ONE read per org x campaign set; per bucket billed
   `totalCostInUsdCents` + `runCount` == `GET /v1/stats/costs/timeseries?workflowSlug=` (guard in
-  `vendor-cost-timeseries.test.ts`).
+  `vendor-cost-timeseries.test.ts`). With tz UTC and no taskName its MONEY comes from the 0050/0051 rollup
+  (`vendorGroupedRollupBaseSql`, items carry `run_day`), run counts stay live (index-only): live, a 20k-run
+  campaign read 25 s at load 33. Parity (raw bodies, rollup vs live): `stats-rollup-campaign-cost-items.test.ts`.
 - **Never on a public route** — the vendor cost reveals the margin. The public timeseries is
   untouched; the route is `/internal/*` behind `requireInternalAuth`.
 - **Per run: `GET /internal/runs/vendor?orgId=…`** — `GET /v1/runs`' exact list (shared

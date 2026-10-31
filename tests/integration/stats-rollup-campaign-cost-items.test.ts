@@ -161,15 +161,42 @@ const QUERIES: Record<string, string>[] = [
   { groupBy: "workflowSlug", featureSlugs: FEATURE, startedAfter: "2026-09-12T00:00:00Z", startedBefore: "2026-09-20T03:00:00Z" },
 ];
 
+// GET /internal/stats/costs/timeseries/vendor reads its money from the same rollup when tz is UTC
+// (PUBLIC-VENDOR-COST-1031: the per-version index history); raw bodies must equal the live read.
+const TS_PATH = "/internal/stats/costs/timeseries/vendor";
+const TS_QUERIES: Record<string, string>[] = [
+  { interval: "day", tz: "UTC", featureSlugs: FEATURES.join(","), groupBy: "workflowSlug" },
+  { interval: "day", featureSlugs: FEATURE, campaignIds: `${CAMP_1},${CAMP_2}`, groupBy: "workflowSlug" },
+  { interval: "day", featureSlugs: FEATURE, campaignId: CAMP_1, workflowSlug: "alpha" },
+  { interval: "week", featureSlugs: FEATURE, groupBy: "campaignId" },
+  { interval: "month", featureSlugs: FEATURES.join(","), orgId: ORG_A, brandId: BRAND_A },
+  { interval: "day", featureSlugs: FEATURE, costSource: "platform", groupBy: "workflowSlug" },
+  { interval: "day", featureSlugs: FEATURE, startedAfter: "2026-09-15T09:00:00Z", groupBy: "workflowSlug" },
+  { interval: "day", featureSlugs: FEATURE, startedAfter: "2026-09-12T00:00:00Z", startedBefore: "2026-09-20T03:00:00Z" },
+];
+
+async function vendorTs(query: Record<string, string>) {
+  const res = await request(app).get(TS_PATH).query(query).set(API_KEY);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return res.text;
+}
+
 async function expectRollupReadEqualsLive() {
   await setReady(true);
   const fromRollup = [];
   for (const q of QUERIES) fromRollup.push(await vendor(q));
+  const tsFromRollup = [];
+  for (const q of TS_QUERIES) tsFromRollup.push(await vendorTs(q));
   await setReady(false);
   const live = [];
   for (const q of QUERIES) live.push(await vendor(q));
+  const tsLive = [];
+  for (const q of TS_QUERIES) tsLive.push(await vendorTs(q));
   await setReady(true);
   QUERIES.forEach((q, i) => expect({ q, groups: fromRollup[i] }).toEqual({ q, groups: live[i] }));
+  TS_QUERIES.forEach((q, i) => expect({ q, body: tsFromRollup[i] }).toEqual({ q, body: tsLive[i] }));
+  // Not vacuous: the read buckets real spend.
+  expect(JSON.parse(tsLive[0]).buckets.length).toBeGreaterThan(0);
 }
 
 describe("campaign_cost_items rollup (migration 0050) and the grouped vendor read", () => {
