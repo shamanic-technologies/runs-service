@@ -3671,6 +3671,11 @@
                 "unpricedActualCostInUsdCents": {
                   "type": "string",
                   "description": "BILLED amount of the same rows with no known vendor cost. Equals GET /internal/runs/vendor's unpricedActualCostInUsdCents."
+                },
+                "supportFunction": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Support function (run_support_marks kind, e.g. 'staff_experiment') of the nearest support-marked run among this run and its ancestors (a mark covers its whole subtree); null when none. A support run's cost never rides an outcome: a consumer ranking outcomes on this cost leaves such runs out."
                 }
               },
               "required": [
@@ -3680,7 +3685,8 @@
                 "actualCostInUsdCents",
                 "netActualCostInUsdCents",
                 "vendorActualCostInUsdCents",
-                "unpricedActualCostInUsdCents"
+                "unpricedActualCostInUsdCents",
+                "supportFunction"
               ]
             }
           }

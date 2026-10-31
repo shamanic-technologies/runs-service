@@ -2315,6 +2315,7 @@ export const RunSubtreeCostsResponseSchema = z
         netActualCostInUsdCents: z.string().openapi({ description: "Same rows on the frozen NET basis (COALESCE(net, gross) per row). Equals GET /v1/runs?include=subtreeCost's netActualCostInUsdCents." }),
         vendorActualCostInUsdCents: z.string().openapi({ description: "Same rows on the VENDOR basis, rows whose vendor cost is known only. Equals GET /internal/runs/vendor's vendorActualCostInUsdCents." }),
         unpricedActualCostInUsdCents: z.string().openapi({ description: "BILLED amount of the same rows with no known vendor cost. Equals GET /internal/runs/vendor's unpricedActualCostInUsdCents." }),
+        supportFunction: z.string().nullable().openapi({ description: "Support function (run_support_marks kind, e.g. 'staff_experiment') of the nearest support-marked run among this run and its ancestors (a mark covers its whole subtree); null when none. A support run's cost never rides an outcome: a consumer ranking outcomes on this cost leaves such runs out." }),
       }),
     ),
   })

@@ -3,6 +3,8 @@ import request from "supertest";
 import { Decimal } from "decimal.js";
 import { createTestApp } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
+import { db } from "../../src/db/index.js";
+import { sql } from "drizzle-orm";
 
 // GET /internal/runs/subtree-costs — every matching run with its subtree's
 // committed cost on the billed, net and vendor bases, in one read. Per run it
@@ -110,7 +112,6 @@ describe("GET /internal/runs/subtree-costs", () => {
 
   afterAll(async () => {
     await cleanTestData([ORG_ID, OTHER_ORG]);
-    await closeDb();
   });
 
   it("states every matching run's committed subtree cost on the billed, net and vendor bases", async () => {
@@ -125,6 +126,7 @@ describe("GET /internal/runs/subtree-costs", () => {
       netActualCostInUsdCents: "85.4000000000", // 48 + 21 + 2 + 14.4
       vendorActualCostInUsdCents: "17.9333333331", // 12 + 2.3333333331 + 3.6
       unpricedActualCostInUsdCents: "2.0000000000",
+      supportFunction: null,
     });
     const last = res.body.runs[3];
     expect(last).toEqual({
@@ -135,6 +137,7 @@ describe("GET /internal/runs/subtree-costs", () => {
       netActualCostInUsdCents: "0.0000000000",
       vendorActualCostInUsdCents: "0.0000000000",
       unpricedActualCostInUsdCents: "0.0000000000",
+      supportFunction: null,
     });
   });
 
@@ -155,6 +158,7 @@ describe("GET /internal/runs/subtree-costs", () => {
       netActualCostInUsdCents: netById.get(r.id),
       vendorActualCostInUsdCents: r.vendorActualCostInUsdCents,
       unpricedActualCostInUsdCents: r.unpricedActualCostInUsdCents,
+      supportFunction: null,
     }));
     expect(one.body.runs).toEqual(expected);
   });
@@ -191,5 +195,67 @@ describe("GET /internal/runs/subtree-costs", () => {
   it("requires the service key", async () => {
     const res = await request(app).get("/internal/runs/subtree-costs").query({ orgId: ORG_ID, ...FILTER });
     expect(res.status).toBe(401);
+  });
+});
+
+// A support-marked run's cost never rides an outcome (runs CLAUDE.md "Support
+// spend"), and a mark covers its subtree: each run states the support function
+// of the nearest marked run among itself and its ancestors, so a consumer
+// ranking outcomes on this cost can leave it out.
+describe("GET /internal/runs/subtree-costs supportFunction", () => {
+  const app = createTestApp();
+  const MARK_ORG = "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b";
+  const MARK_CAMPAIGN = "camp-support-marks";
+  let marked: string;
+  let underMarked: string;
+  let nearestWins: string;
+  let unmarked: string;
+
+  async function mark(runId: string, kind: string) {
+    await db.execute(sql`INSERT INTO run_support_marks (run_id, kind, marked_at) VALUES (${runId}::uuid, ${kind}, now())`);
+  }
+  async function run(startedAt: string, parentRunId?: string) {
+    const r = await insertTestRun({
+      organizationId: MARK_ORG,
+      serviceName: parentRunId ? "content-generation-service" : "campaign-service",
+      taskName: parentRunId ? "threads-post" : "campaign-trigger",
+      parentRunId,
+      campaignId: MARK_CAMPAIGN,
+      status: "completed",
+      startedAt: new Date(startedAt),
+    });
+    return r.id;
+  }
+
+  beforeAll(async () => {
+    await cleanTestData([MARK_ORG]);
+    catalog.fn.mockResolvedValue(VERSIONS);
+    // Top-level runs (no parent) and a two-level chain under a marked root.
+    marked = await run("2026-10-30T10:00:00Z");
+    await mark(marked, "staff_experiment");
+    const markedRoot = await run("2026-10-30T09:00:00Z");
+    await mark(markedRoot, "product_feature");
+    const mid = await run("2026-10-30T09:00:01Z", markedRoot);
+    underMarked = await run("2026-10-30T09:00:02Z", mid);
+    nearestWins = await run("2026-10-30T09:00:03Z", mid);
+    await mark(nearestWins, "copilot");
+    unmarked = await run("2026-10-30T08:00:00Z");
+    await cost(underMarked, "tok", "1", "6", "2026-10-30T09:00:02Z");
+  });
+
+  afterAll(async () => {
+    await cleanTestData([MARK_ORG]);
+  });
+
+  it("states the nearest support mark among the run and its ancestors, null when none", async () => {
+    const res = await request(app).get("/internal/runs/subtree-costs").query({ orgId: MARK_ORG, campaignId: MARK_CAMPAIGN }).set(API_KEY);
+    expect(res.status).toBe(200);
+    const byId = new Map(res.body.runs.map((r: any) => [r.id, r]));
+    expect((byId.get(marked) as any).supportFunction).toBe("staff_experiment");
+    expect((byId.get(underMarked) as any).supportFunction).toBe("product_feature"); // grandchild of a marked run
+    expect((byId.get(underMarked) as any).actualCostInUsdCents).toBe("6.0000000000"); // cost still stated
+    expect((byId.get(nearestWins) as any).supportFunction).toBe("copilot");
+    expect((byId.get(unmarked) as any).supportFunction).toBeNull();
+    expect(res.body.runs).toHaveLength(6);
   });
 });
