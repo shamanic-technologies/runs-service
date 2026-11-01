@@ -5,6 +5,10 @@
 // it with one PK probe instead of walking up the tree (GET /internal/runs/subtree-costs).
 //
 // - A run inserted under a covered parent inherits at insert (0091's trigger).
+// - A run that declares an outcome (produced or consumed: a lead served, an email sent) is
+//   PRODUCTION, never covered: the cover stops above it, unless it carries its own mark
+//   (cost-accounting doctrine, 2026-11-01: a Copilot-launched campaign's leads are production).
+//   Declaring after the fact queues the run (0093).
 // - A mark written / changed / removed queues its run. The worker below recomputes the run's
 //   kind (own mark, else the parent's) and rewrites its subtree down to the first descendant
 //   carrying its own mark. Each queued run is processed twice (~60 s apart): the second pass
@@ -29,32 +33,39 @@ const TICK_INTERVAL_MS = 15_000;
  */
 async function propagate(tx: typeof rawSql, runId: string): Promise<{ walked: number }> {
   const [row] = await tx`
+    -- Per node: its own mark, else NOTHING when it declares an outcome (a lead served, an email
+    -- sent: production, whatever root launched it), else its parent's kind. Descends below a node
+    -- with no kind only where a row exists (a stale cover to clear), never through own marks.
     WITH RECURSIVE target AS (
-      SELECT r.id, COALESCE(m.kind, pe.kind) AS kind
+      SELECT r.id,
+        COALESCE(m.kind, CASE WHEN EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = r.id) THEN NULL ELSE pe.kind END) AS kind
       FROM runs r
       LEFT JOIN run_support_marks m ON m.run_id = r.id
       LEFT JOIN run_support_effective pe ON pe.run_id = r.parent_run_id
       WHERE r.id = ${runId}::uuid
     ),
     sub AS (
-      SELECT id FROM target
+      SELECT id, kind FROM target
       UNION ALL
-      SELECT ch.id FROM sub CROSS JOIN LATERAL (
-        SELECT c.id FROM runs c
+      SELECT ch.id, ch.kind FROM sub CROSS JOIN LATERAL (
+        SELECT c.id,
+          CASE WHEN EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = c.id) THEN NULL ELSE sub.kind END AS kind
+        FROM runs c
         WHERE c.parent_run_id = sub.id
           AND NOT EXISTS (SELECT 1 FROM run_support_marks x WHERE x.run_id = c.id)
+          AND (sub.kind IS NOT NULL OR EXISTS (SELECT 1 FROM run_support_effective e WHERE e.run_id = c.id))
         OFFSET 0
       ) ch
     ),
     del AS (
       DELETE FROM run_support_effective e
       USING sub
-      WHERE e.run_id = sub.id AND (SELECT kind FROM target) IS NULL
+      WHERE e.run_id = sub.id AND sub.kind IS NULL
       RETURNING 1
     ),
     ins AS (
       INSERT INTO run_support_effective (run_id, kind)
-      SELECT sub.id, t.kind FROM sub CROSS JOIN target t WHERE t.kind IS NOT NULL
+      SELECT sub.id, sub.kind FROM sub WHERE sub.kind IS NOT NULL
       ON CONFLICT (run_id) DO UPDATE SET kind = EXCLUDED.kind
         WHERE run_support_effective.kind IS DISTINCT FROM EXCLUDED.kind
       RETURNING 1
@@ -144,6 +155,8 @@ export async function backfillSupportEffective(
           SELECT c.id FROM runs c
           WHERE c.parent_run_id = eff.id
             AND NOT EXISTS (SELECT 1 FROM run_support_marks x WHERE x.run_id = c.id)
+            -- A run declaring an outcome is production: the cover stops above it.
+            AND NOT EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = c.id)
           OFFSET 0
         ) ch
       ),

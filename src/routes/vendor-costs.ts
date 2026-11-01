@@ -702,20 +702,24 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       ),
       -- Support function before the 0091 backfill stamp: walk UP from each matched run to the
       -- nearest mark. Stamped: run_support_effective (kept at write time) answers, no walk.
+      -- The walk stops at the first marked run (its kind) or the first run declaring an outcome
+      -- (production: no kind), whichever is nearer; a mark wins on a run that does both.
       chain AS (
-        SELECT ro.id AS root_run_id, ro.parent_run_id, 0 AS depth, m.kind
+        SELECT ro.id AS root_run_id, ro.parent_run_id, 0 AS depth, m.kind,
+               EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = ro.id) AS declares
         FROM roots ro CROSS JOIN ready LEFT JOIN run_support_marks m ON m.run_id = ro.id
         WHERE NOT ready.support_ok
         UNION ALL
-        SELECT c.root_run_id, p.parent_run_id, c.depth + 1, m.kind
+        SELECT c.root_run_id, p.parent_run_id, c.depth + 1, m.kind,
+               EXISTS (SELECT 1 FROM run_outcomes o WHERE o.run_id = p.id)
         FROM chain c
         INNER JOIN runs p ON p.id = c.parent_run_id
         LEFT JOIN run_support_marks m ON m.run_id = p.id
-        WHERE c.kind IS NULL
+        WHERE c.kind IS NULL AND NOT c.declares
       ),
       support_walk AS (
         SELECT DISTINCT ON (root_run_id) root_run_id, kind
-        FROM chain WHERE kind IS NOT NULL
+        FROM chain WHERE kind IS NOT NULL OR declares
         ORDER BY root_run_id, depth
       ),
       descendants AS (

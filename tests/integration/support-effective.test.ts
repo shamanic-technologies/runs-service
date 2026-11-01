@@ -39,6 +39,12 @@ async function run(parentRunId?: string) {
 async function mark(runId: string, kind: string) {
   await rawSql`INSERT INTO run_support_marks (run_id, kind, marked_at) VALUES (${runId}::uuid, ${kind}, now())`;
 }
+async function declare(runId: string, direction: "produced" | "consumed") {
+  await rawSql`
+    INSERT INTO run_outcomes (id, run_id, direction, outcome_key, subject_service, subject_id)
+    VALUES (gen_random_uuid(), ${runId}::uuid, ${direction}, 'lead_served', 'lead-service', gen_random_uuid()::text)
+  `;
+}
 async function unmark(runId: string) {
   await rawSql`DELETE FROM run_support_marks WHERE run_id = ${runId}::uuid`;
 }
@@ -117,6 +123,38 @@ describe("run_support_effective (migration 0091)", () => {
     expect(await effective(ids)).toEqual(before);
     const [{ ok }] = await rawSql`SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUPPORT_EFFECTIVE_STAMP}) AS ok`;
     expect(ok).toBe(true);
+  });
+
+  it("a run declaring an outcome is production: the cover stops above it, at once or when it declares later", async () => {
+    // copilotRoot (copilot) > serve (declares a produced lead) > enrich ; copilotRoot > sender (consumes) ; copilotRoot > chat
+    const copilotRoot = await run();
+    const serve = await run(copilotRoot);
+    const enrich = await run(serve);
+    const sender = await run(copilotRoot);
+    const chat = await run(copilotRoot);
+    await declare(serve, "produced");
+    await mark(copilotRoot, "copilot");
+    await drainAll();
+    expect(await effective([copilotRoot, serve, enrich, sender, chat])).toEqual(["copilot", null, null, "copilot", "copilot"]);
+    // The sender was covered at insert and declares only now (consumed): queued, recomputed.
+    const late = await run(sender);
+    expect(await effective([late])).toEqual(["copilot"]);
+    await declare(sender, "consumed");
+    await drainAll();
+    expect(await effective([copilotRoot, sender, late, chat])).toEqual(["copilot", null, null, "copilot"]);
+    // Its own mark still wins on a declaring run.
+    await mark(serve, "staff_experiment");
+    await drainAll();
+    expect(await effective([serve, enrich])).toEqual(["staff_experiment", "staff_experiment"]);
+    await unmark(serve);
+    await drainAll();
+    expect(await effective([serve, enrich])).toEqual([null, null]);
+    // The backfill applies the same rule.
+    const ids = [copilotRoot, serve, enrich, sender, late, chat];
+    const before = await effective(ids);
+    await rawSql`DELETE FROM run_support_effective WHERE run_id = ANY(${ids}::uuid[])`;
+    await backfillSupportEffective({ chunk: 1 });
+    expect(await effective(ids)).toEqual(before);
   });
 
   it("GET /internal/runs/subtree-costs answers the same body from the stores and from the walks", async () => {
