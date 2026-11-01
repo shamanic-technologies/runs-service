@@ -15,7 +15,7 @@ import { VendorCostCatalogError, fetchVendorCostCatalog, type VendorCostVersion 
 import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv } from "./stats.js";
 import { listRunsPage } from "./runs.js";
 import { isStatsRollupReady } from "../services/stats-rollup.js";
-import { SUBTREE_COST_ROLLUP_NAME } from "../services/stats-rollup-subtree-cost.js";
+import { SUBTREE_COST_ITEMS_ROLLUP_NAME, SUBTREE_COST_ROLLUP_NAME } from "../services/stats-rollup-subtree-cost.js";
 import { SUPPORT_EFFECTIVE_STAMP } from "../services/support-effective.js";
 import { COST_DAY_ROLLUP_NAME } from "../services/stats-rollup-cost-day.js";
 import { CAMPAIGN_COST_ITEMS_ROLLUP_NAME } from "../services/stats-rollup-campaign-cost-items.js";
@@ -643,8 +643,10 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       -- the check and the read. Stamped = the write-time stores answer; else the walks.
       WITH RECURSIVE ready AS MATERIALIZED (
         SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUBTREE_COST_ROLLUP_NAME}) AS cost_ok,
-               EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUPPORT_EFFECTIVE_STAMP}) AS support_ok
+               EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUPPORT_EFFECTIVE_STAMP}) AS support_ok,
+               EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUBTREE_COST_ITEMS_ROLLUP_NAME}) AS items_ok
       ),
+      v AS MATERIALIZED (${versionWindowsSql(versions)}),
       roots AS MATERIALIZED (
         SELECT id, parent_run_id, audience_id, campaign_id, started_at FROM runs
         WHERE ${sql.join(conditions, sql` AND `)}
@@ -654,13 +656,42 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         SELECT s.run_id, s.n_rows, s.gross_actual, s.net_actual
         FROM roots ro JOIN run_subtree_costs s ON s.run_id = ro.id
       ),
-      -- The vendor basis needs each cost row (its price version), so the subtree is still
-      -- walked, but ONLY where the rollup says a cost row exists (owner brand: a few hundred
-      -- of 83,584 serves). Unstamped rollup: every matched run, as before.
+      -- Vendor basis from run_subtree_cost_items (0092): each subtree's actual rows per (cost
+      -- name, billed unit, cost-row UTC hour), priced by the version in force for that hour.
+      items AS MATERIALIZED (
+        SELECT i.run_id, i.cost_name, i.unit, i.cost_hour, i.qty, i.gross
+        FROM stored st CROSS JOIN ready
+        JOIN run_subtree_cost_items i ON i.run_id = st.run_id
+        WHERE ready.cost_ok AND ready.items_ok AND st.n_rows > 0
+      ),
+      -- An hour holding a version's served-from instant cannot be priced by the hour: that
+      -- run is re-priced from the ledger below (0051's straddle rule).
+      straddled AS MATERIALIZED (
+        SELECT DISTINCT i.run_id FROM items i
+        JOIN v ON v.cost_name = i.cost_name AND v.billed = i.unit
+         AND v.valid_from > i.cost_hour AND v.valid_from < i.cost_hour + interval '1 hour'
+      ),
+      item_sums AS (
+        SELECT i.run_id,
+          COALESCE(SUM(i.qty * v.vendor) FILTER (WHERE v.vendor IS NOT NULL), 0)::text AS vendor_actual,
+          COALESCE(SUM(i.gross) FILTER (WHERE v.vendor IS NULL), 0)::text AS unpriced_actual
+        FROM items i
+        LEFT JOIN v
+          ON v.cost_name = i.cost_name
+         AND v.billed = i.unit
+         AND i.cost_hour >= v.valid_from
+         AND (v.valid_to IS NULL OR i.cost_hour < v.valid_to)
+        WHERE NOT EXISTS (SELECT 1 FROM straddled sd WHERE sd.run_id = i.run_id)
+        GROUP BY i.run_id
+      ),
+      -- Ledger walk only where no store answers: every run unstamped; with billed/net stored but
+      -- no items, the runs the rollup says hold cost; with items, the straddled runs only.
       walk_roots AS MATERIALIZED (
         SELECT ro.id FROM roots ro CROSS JOIN ready WHERE NOT ready.cost_ok
         UNION ALL
-        SELECT st.run_id FROM stored st CROSS JOIN ready WHERE ready.cost_ok AND st.n_rows > 0
+        SELECT st.run_id FROM stored st CROSS JOIN ready WHERE ready.cost_ok AND NOT ready.items_ok AND st.n_rows > 0
+        UNION ALL
+        SELECT sd.run_id FROM straddled sd
       ),
       -- Support function before the 0091 backfill stamp: walk UP from each matched run to the
       -- nearest mark. Stamped: run_support_effective (kept at write time) answers, no walk.
@@ -690,7 +721,6 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         SELECT r.id, d.root_run_id FROM descendants d
         CROSS JOIN LATERAL (SELECT x.id FROM runs x WHERE x.parent_run_id = d.id OFFSET 0) r
       ),
-      v AS MATERIALIZED (${versionWindowsSql(versions)}),
       costed AS (
         SELECT
           d.root_run_id,
@@ -726,12 +756,14 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       SELECT ro.id, ro.audience_id, ro.campaign_id,
              CASE WHEN ready.cost_ok THEN COALESCE(st.gross_actual, 0)::text ELSE s.billed_actual END AS billed_actual,
              CASE WHEN ready.cost_ok THEN COALESCE(st.net_actual, 0)::text ELSE s.net_actual END AS net_actual,
-             s.vendor_actual, s.unpriced_actual,
+             COALESCE(isum.vendor_actual, s.vendor_actual) AS vendor_actual,
+             COALESCE(isum.unpriced_actual, s.unpriced_actual) AS unpriced_actual,
              CASE WHEN ready.support_ok THEN e.kind ELSE sw.kind END AS support_function
       FROM roots ro
       CROSS JOIN ready
       LEFT JOIN stored st ON st.run_id = ro.id
       LEFT JOIN sums s ON s.root_run_id = ro.id
+      LEFT JOIN item_sums isum ON isum.run_id = ro.id
       LEFT JOIN support_walk sw ON sw.root_run_id = ro.id
       LEFT JOIN run_support_effective e ON e.run_id = ro.id
       ORDER BY ro.started_at DESC, ro.id DESC

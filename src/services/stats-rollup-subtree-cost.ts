@@ -74,3 +74,67 @@ export async function rebuildSubtreeCostRollup(url: string): Promise<{ runGroups
     },
   });
 }
+
+export const SUBTREE_COST_ITEMS_ROLLUP_NAME = "subtree_cost_items";
+
+/**
+ * Rebuild side of run_subtree_cost_items (migration 0092): per run, the ACTUAL cost rows of its
+ * whole subtree grouped by (cost name, billed unit, cost-row UTC hour). Same bottom-up, grouped
+ * per level carry as rebuildSubtreeCostRollup, the item key riding along.
+ */
+export async function rebuildSubtreeCostItemsRollup(url: string): Promise<{ runGroups: number; costGroups: number; lockedMs: number }> {
+  return rebuildRollup(url, {
+    name: SUBTREE_COST_ITEMS_ROLLUP_NAME,
+    tables: ["run_subtree_cost_items"],
+    aggregate: async (b) => {
+      await b`
+        CREATE TEMP TABLE rebuild_items_out (
+          id uuid NOT NULL, cost_name text NOT NULL, unit numeric NOT NULL, cost_hour timestamptz NOT NULL,
+          n bigint NOT NULL, qty numeric NOT NULL, gross numeric NOT NULL
+        ) ON COMMIT PRESERVE ROWS
+      `;
+      await b`
+        CREATE TEMP TABLE rebuild_items_lvl ON COMMIT PRESERVE ROWS AS
+        SELECT run_id AS id, cost_name, unit_cost_in_usd_cents AS unit, date_trunc('hour', created_at, 'UTC') AS cost_hour,
+          count(*) AS n, SUM(quantity) AS qty, SUM(total_cost_in_usd_cents) AS gross
+        FROM runs_costs WHERE status = 'actual' GROUP BY 1, 2, 3, 4
+      `;
+      await b`
+        CREATE TEMP TABLE rebuild_items_next (
+          parent uuid NOT NULL, cost_name text NOT NULL, unit numeric NOT NULL, cost_hour timestamptz NOT NULL,
+          n bigint NOT NULL, qty numeric NOT NULL, gross numeric NOT NULL
+        ) ON COMMIT PRESERVE ROWS
+      `;
+      await b.unsafe(`
+        DO $$
+        BEGIN
+          LOOP
+            EXIT WHEN NOT EXISTS (SELECT 1 FROM rebuild_items_lvl);
+            EXECUTE 'ANALYZE rebuild_items_lvl';
+            EXECUTE 'INSERT INTO rebuild_items_out SELECT id, cost_name, unit, cost_hour, n, qty, gross FROM rebuild_items_lvl';
+            EXECUTE 'INSERT INTO rebuild_items_next (parent, cost_name, unit, cost_hour, n, qty, gross)
+                     SELECT r.parent_run_id, l.cost_name, l.unit, l.cost_hour, l.n, l.qty, l.gross
+                     FROM rebuild_items_lvl l JOIN runs r ON r.id = l.id WHERE r.parent_run_id IS NOT NULL';
+            EXECUTE 'TRUNCATE rebuild_items_lvl';
+            EXECUTE 'INSERT INTO rebuild_items_lvl (id, cost_name, unit, cost_hour, n, qty, gross)
+                     SELECT parent, cost_name, unit, cost_hour, SUM(n), SUM(qty), SUM(gross)
+                     FROM rebuild_items_next GROUP BY 1, 2, 3, 4';
+            EXECUTE 'TRUNCATE rebuild_items_next';
+          END LOOP;
+        END $$;
+      `);
+    },
+    merge: async (tx) => {
+      const res = await tx`
+        INSERT INTO run_subtree_cost_items (run_id, cost_name, unit, cost_hour, n, qty, gross)
+        SELECT id, cost_name, unit, cost_hour, SUM(n), SUM(qty), SUM(gross) FROM rebuild_items_out GROUP BY 1, 2, 3, 4
+        ON CONFLICT (run_id, cost_name, unit, cost_hour) DO UPDATE SET
+          n     = run_subtree_cost_items.n     + EXCLUDED.n,
+          qty   = run_subtree_cost_items.qty   + EXCLUDED.qty,
+          gross = run_subtree_cost_items.gross + EXCLUDED.gross
+      `;
+      await tx`DROP TABLE rebuild_items_out, rebuild_items_lvl, rebuild_items_next`;
+      return { runGroups: res.count, costGroups: res.count };
+    },
+  });
+}
