@@ -88,7 +88,10 @@ async function liveSubtreeCosts(runIds: string[]): Promise<any[]> {
       SELECT id, id AS root_run_id FROM runs
       WHERE id = ANY(string_to_array(${runIds.join(",")}, ',')::uuid[])
       UNION ALL
-      SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+      -- Child fetch fenced per run (LATERAL ... OFFSET 0 on idx_runs_parent): a plain JOIN
+      -- can hash-join a seq scan of all of runs (subtree-costs: 145 s, 2026-10-31).
+      SELECT r.id, d.root_run_id FROM descendants d
+      CROSS JOIN LATERAL (SELECT x.id FROM runs x WHERE x.parent_run_id = d.id OFFSET 0) r
     )
     -- Per-run LATERAL aggregate, then summed per root. A plain JOIN to runs_costs
     -- makes the planner trust the recursive CTE's estimate (~270k rows for 50

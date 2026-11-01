@@ -1065,8 +1065,13 @@ router.get("/v1/runs/:id/children-summary", requireApiKey, async (req, res) => {
         SELECT id, id as root_child_id, service_name, task_name, status, started_at, completed_at
         FROM runs WHERE parent_run_id = ${id}
         UNION ALL
+        -- Child fetch fenced per run (LATERAL ... OFFSET 0 on idx_runs_parent): a plain JOIN
+        -- can hash-join a seq scan of all of runs (subtree-costs: 145 s, 2026-10-31).
         SELECT r.id, d.root_child_id, r.service_name, r.task_name, r.status, r.started_at, r.completed_at
-        FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+        FROM descendants d CROSS JOIN LATERAL (
+          SELECT x.id, x.service_name, x.task_name, x.status, x.started_at, x.completed_at
+          FROM runs x WHERE x.parent_run_id = d.id OFFSET 0
+        ) r
       )
       SELECT * FROM descendants
     `);

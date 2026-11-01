@@ -1,3 +1,4 @@
+import { startSupportPropagation } from "./services/support-effective.js";
 import express from "express";
 import cors from "cors";
 import { readFile } from "node:fs/promises";
@@ -80,6 +81,9 @@ if (process.env.NODE_ENV !== "test") {
         // The stored per-day production-cost ledger check + coverage series
         // (services/outcome-ledger.ts): first tick ~60 s after boot, then every 15 min.
         startCostLedgerRefresh();
+        // Support marks propagated to their subtrees (services/support-effective.ts, 0091):
+        // first tick ~60 s after boot, then every 15 s.
+        startSupportPropagation();
       });
     })
     .catch((err) => {
