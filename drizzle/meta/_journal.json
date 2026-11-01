@@ -652,6 +652,13 @@
       "when": 1783583200000,
       "tag": "0092_run_subtree_cost_items",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1783669600000,
+      "tag": "0093_support_effective_stops_at_outcome",
+      "breakpoints": true
     }
   ]
 }
