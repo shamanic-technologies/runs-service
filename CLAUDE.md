@@ -565,11 +565,14 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
 - **Every run at once: `GET /internal/runs/subtree-costs?orgId=…&brandId|campaignId=…[&serviceName&taskName]`** — no page,
   one statement: each matching run's committed (`actual`) SUBTREE cost on billed, frozen net, vendor and unpriced, equal run for
   run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). Read by features-service
-  (sourcing; Threads templates). brandId or campaignId required (400). Each run also serves `supportFunction`
-  = kind of the nearest support mark among itself + ancestors (a mark covers its subtree; null = none): a consumer leaves
-  those runs out of an outcome. Up walk: PK probes, stops at a mark. Down walk: per-run LATERAL OFFSET 0 (a JOIN seq-scanned runs, 145 s).
-- Prod check 2026-09-27 (brand 75d7e3e8): billed/vendor per day = 5.000 since 09-15, 4.000 Jul–Aug.
-  Unpriced = older Instantly lines costs-service states as unknown + rows before 2026-05-03.
+  (sourcing brand-wide; Threads per campaign) + dashboard `/v1/runs/vendor` (paged). brandId or campaignId required (400).
+  `supportFunction` = kind of the nearest mark among the run + ancestors (null = none). Stamped: billed/net
+  from `run_subtree_costs`, support from `run_support_effective` (0091), vendor walks ONLY subtrees with a rollup row (the
+  vendor route too). Child fetch always per-run LATERAL OFFSET 0 (a JOIN seq-scanned 7.3M runs: 145 s, 2026-10-31).
+- **0091 `run_support_effective`**: inherited at run insert; a mark write/undo queues its run, the worker
+  (`services/support-effective.ts`, 15 s, two passes 60 s apart) rewrites the subtree down to the next own mark. Past
+  filled by `scripts/backfill-support-effective.ts`, which stamps `support_effective`. Test `support-effective.test.ts`.
+- Unpriced = older Instantly lines costs-service states as unknown + rows before 2026-05-03 (2026-09-27).
 - **Grouped twin `GET /internal/stats/costs/vendor`** — the UNDATED grouped aggregation
   (`/v1/stats/costs` org-scoped, `/v1/stats/public/costs` fleet) on the same basis, same
   pricing, same field vocabulary (`totalCostInUsdCents` billed gross, `vendor*`, `unpriced*`,
@@ -584,10 +587,8 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   billed unit price, cost-row UTC HOUR) rollup of migrations 0050 + 0051 (stamp
   `campaign_cost_items`, 59.7k groups for 2.16M ledger rows) unless the read names
   audienceId/serviceName/taskName: a group straddling a served-from instant and the bounds'
-  partial UTC days are read from the ledger. Live it was 13-25 s for the cold email feature and
-  500'd on the statement timeout at 3-4 concurrent reads; from the rollup ~1.2-1.8 s (2026-10-18).
-  The cost-row hour is load-bearing: without it (0050) a group held up to 44 days of Instantly
-  sends, 294 groups straddled a price change and their ledger re-read timed out. Parity +
+  partial UTC days are read from the ledger (live 13-25 s, rollup ~1.5 s, 2026-10-18). The cost-row
+  hour is load-bearing: without it (0050) 294 groups straddled a price change and timed out. Parity +
   straddle: `stats-rollup-campaign-cost-items.test.ts`.
 - **Margin `GET /internal/stats/costs/margin[?orgId=]`** (staff Monitoring page): platform rows only,
   one pass over `runs_costs` (no runs join; `orgId` reads the frozen 0029 org), `GROUPING SETS` →
@@ -1274,9 +1275,8 @@ Built CONCURRENTLY out-of-band on prod (0087's dropped CONCURRENTLY). Guard: `te
 
 ## Subtree cost per run, kept at write time (migration 0086, BOX-DB-LOAD-1027-RUNS)
 
-`GET /v1/runs?include=subtreeCost` was this database's heaviest statement: 89k calls / 1,041 min in ~23 h
-(2026-10-26/27), ~0.7-1 s each (a 200-run page walked ~1.7k runs, three cold random reads each, box in swap).
-Main caller: features-service's Research catalogue (`readWorkflowRuns`, newest 200 execute-workflow runs per org per pipe).
+`GET /v1/runs?include=subtreeCost` was the heaviest statement (89k calls / 1,041 min in ~23 h, 2026-10-26/27; caller
+features-service Research `readWorkflowRuns`).
 
 - **`run_subtree_costs`**: per run with an actual/provisioned cost row in its subtree (itself included): n_rows, gross +
   frozen net (`COALESCE(net, gross)`) per status. Cancelled/refunded are in no served figure, so not kept.
@@ -1288,7 +1288,7 @@ Main caller: features-service's Research catalogue (`readWorkflowRuns`, newest 2
   between them); unstamped = the live walk, unchanged. The route formats every figure with `toFixed(10)`, so the body is
   byte-identical either way (guard: `tests/integration/run-subtree-costs-rollup.test.ts`, red if a trigger is off).
 - **Readiness**: `scripts/rebuild-stats-rollup.ts subtree_cost` after the deploy (prod: inside the container against `dist/`).
-  TRUNCATE in global-setup. Other tree reads (`GET /v1/runs/:id`, batch, `/internal/runs/subtree-costs`) still walk.
+  TRUNCATE in global-setup. `GET /v1/runs/:id` and batch still walk; subtree-costs + vendor read it (above).
 
 ## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
 

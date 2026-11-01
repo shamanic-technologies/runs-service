@@ -15,6 +15,8 @@ import { VendorCostCatalogError, fetchVendorCostCatalog, type VendorCostVersion 
 import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv } from "./stats.js";
 import { listRunsPage } from "./runs.js";
 import { isStatsRollupReady } from "../services/stats-rollup.js";
+import { SUBTREE_COST_ROLLUP_NAME } from "../services/stats-rollup-subtree-cost.js";
+import { SUPPORT_EFFECTIVE_STAMP } from "../services/support-effective.js";
 import { COST_DAY_ROLLUP_NAME } from "../services/stats-rollup-cost-day.js";
 import { CAMPAIGN_COST_ITEMS_ROLLUP_NAME } from "../services/stats-rollup-campaign-cost-items.js";
 
@@ -487,11 +489,23 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
         -- GET /v1/runs/:id. An execute-workflow run has no cost rows of its own:
         -- what it cost is its subtree, so both the own and the subtree figures
         -- are served.
-        WITH RECURSIVE descendants AS (
-          SELECT id, id AS root_run_id FROM runs
-          WHERE id = ANY(string_to_array(${ids.join(",")}, ',')::uuid[])
+        -- Walked only from the page runs whose subtree holds an actual/provisioned cost row
+        -- (run_subtree_costs, kept at write time; read with its stamp in this statement):
+        -- every served figure sums those statuses, so a run without one reads 0 either way.
+        -- Unstamped: every page run. Child fetch fenced per run (LATERAL ... OFFSET 0): a
+        -- plain JOIN hash-joins a seq scan of all of runs (subtree-costs, 145 s, 2026-10-31).
+        WITH RECURSIVE ready AS MATERIALIZED (
+          SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUBTREE_COST_ROLLUP_NAME}) AS ok
+        ),
+        anchor AS MATERIALIZED (
+          SELECT p.id FROM unnest(string_to_array(${ids.join(",")}, ',')::uuid[]) AS p(id) CROSS JOIN ready
+          WHERE NOT ready.ok OR EXISTS (SELECT 1 FROM run_subtree_costs s WHERE s.run_id = p.id AND s.n_rows > 0)
+        ),
+        descendants AS (
+          SELECT id, id AS root_run_id FROM anchor
           UNION ALL
-          SELECT r.id, d.root_run_id FROM runs r INNER JOIN descendants d ON r.parent_run_id = d.id
+          SELECT r.id, d.root_run_id FROM descendants d
+          CROSS JOIN LATERAL (SELECT x.id FROM runs x WHERE x.parent_run_id = d.id OFFSET 0) r
         ),
         v AS MATERIALIZED (${versionWindowsSql(versions)}),
         costed AS (
@@ -625,16 +639,35 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
 
     const versions = await fetchVendorCostCatalog();
     const rows = (await db.execute(sql`
-      WITH RECURSIVE roots AS MATERIALIZED (
+      -- Both stamps are read IN this statement: a rebuild cannot clear one between
+      -- the check and the read. Stamped = the write-time stores answer; else the walks.
+      WITH RECURSIVE ready AS MATERIALIZED (
+        SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUBTREE_COST_ROLLUP_NAME}) AS cost_ok,
+               EXISTS (SELECT 1 FROM stats_rollups WHERE name = ${SUPPORT_EFFECTIVE_STAMP}) AS support_ok
+      ),
+      roots AS MATERIALIZED (
         SELECT id, parent_run_id, audience_id, campaign_id, started_at FROM runs
         WHERE ${sql.join(conditions, sql` AND `)}
       ),
-      -- Support function covering each matched run: the nearest run_support_marks
-      -- row among the run itself and its ancestors (a mark covers its subtree).
-      -- Walks UP from the matched runs only (PK probes) and stops at the first mark.
+      -- Billed + net subtree cost kept at cost-write time (run_subtree_costs, 0086).
+      stored AS MATERIALIZED (
+        SELECT s.run_id, s.n_rows, s.gross_actual, s.net_actual
+        FROM roots ro JOIN run_subtree_costs s ON s.run_id = ro.id
+      ),
+      -- The vendor basis needs each cost row (its price version), so the subtree is still
+      -- walked, but ONLY where the rollup says a cost row exists (owner brand: a few hundred
+      -- of 83,584 serves). Unstamped rollup: every matched run, as before.
+      walk_roots AS MATERIALIZED (
+        SELECT ro.id FROM roots ro CROSS JOIN ready WHERE NOT ready.cost_ok
+        UNION ALL
+        SELECT st.run_id FROM stored st CROSS JOIN ready WHERE ready.cost_ok AND st.n_rows > 0
+      ),
+      -- Support function before the 0091 backfill stamp: walk UP from each matched run to the
+      -- nearest mark. Stamped: run_support_effective (kept at write time) answers, no walk.
       chain AS (
         SELECT ro.id AS root_run_id, ro.parent_run_id, 0 AS depth, m.kind
-        FROM roots ro LEFT JOIN run_support_marks m ON m.run_id = ro.id
+        FROM roots ro CROSS JOIN ready LEFT JOIN run_support_marks m ON m.run_id = ro.id
+        WHERE NOT ready.support_ok
         UNION ALL
         SELECT c.root_run_id, p.parent_run_id, c.depth + 1, m.kind
         FROM chain c
@@ -642,13 +675,13 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         LEFT JOIN run_support_marks m ON m.run_id = p.id
         WHERE c.kind IS NULL
       ),
-      support AS (
+      support_walk AS (
         SELECT DISTINCT ON (root_run_id) root_run_id, kind
         FROM chain WHERE kind IS NOT NULL
         ORDER BY root_run_id, depth
       ),
       descendants AS (
-        SELECT id, id AS root_run_id FROM roots
+        SELECT id, id AS root_run_id FROM walk_roots
         UNION ALL
         -- Per-run LATERAL fenced by OFFSET 0 on idx_runs_parent: a plain JOIN
         -- trusts the recursive CTE's estimate (4M rows for 686 roots) and
@@ -690,11 +723,17 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         FROM costed
         GROUP BY root_run_id
       )
-      SELECT ro.id, ro.audience_id, ro.campaign_id, s.billed_actual, s.net_actual, s.vendor_actual, s.unpriced_actual,
-             sp.kind AS support_function
+      SELECT ro.id, ro.audience_id, ro.campaign_id,
+             CASE WHEN ready.cost_ok THEN COALESCE(st.gross_actual, 0)::text ELSE s.billed_actual END AS billed_actual,
+             CASE WHEN ready.cost_ok THEN COALESCE(st.net_actual, 0)::text ELSE s.net_actual END AS net_actual,
+             s.vendor_actual, s.unpriced_actual,
+             CASE WHEN ready.support_ok THEN e.kind ELSE sw.kind END AS support_function
       FROM roots ro
+      CROSS JOIN ready
+      LEFT JOIN stored st ON st.run_id = ro.id
       LEFT JOIN sums s ON s.root_run_id = ro.id
-      LEFT JOIN support sp ON sp.root_run_id = ro.id
+      LEFT JOIN support_walk sw ON sw.root_run_id = ro.id
+      LEFT JOIN run_support_effective e ON e.run_id = ro.id
       ORDER BY ro.started_at DESC, ro.id DESC
     `)) as any[];
 
