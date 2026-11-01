@@ -597,8 +597,9 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   run to `/internal/runs/vendor` + `/v1/runs?include=subtreeCost` (guard `run-subtree-costs.test.ts`). Read by features-service
   (sourcing brand-wide; Threads per campaign) + dashboard `/v1/runs/vendor` (paged). brandId or campaignId required (400).
   `supportFunction` = kind of the nearest mark among the run + ancestors (null = none). Stamped: billed/net
-  from `run_subtree_costs`, support from `run_support_effective` (0091), vendor walks ONLY subtrees with a rollup row (the
-  vendor route too). Child fetch always per-run LATERAL OFFSET 0 (a JOIN seq-scanned 7.3M runs: 145 s, 2026-10-31).
+  from `run_subtree_costs`, support from `run_support_effective` (0091), vendor from `run_subtree_cost_items` (0092: actual
+  rows per cost name x billed unit x UTC hour, 0086's triggers; stamp `subtree_cost_items`; an hour straddling a version
+  re-reads that run from the ledger). Child fetch per-run LATERAL OFFSET 0 (a JOIN seq-scanned 7.3M runs, 2026-10-31).
 - **0091 `run_support_effective`**: inherited at run insert; a mark write/undo queues its run, the worker
   (`services/support-effective.ts`, 15 s, two passes 60 s apart) rewrites the subtree down to the next own mark. Past
   filled by `scripts/backfill-support-effective.ts`, which stamps `support_effective`. Test `support-effective.test.ts`.
@@ -1310,10 +1311,9 @@ features-service Research `readWorkflowRuns`).
 
 - **`run_subtree_costs`**: per run with an actual/provisioned cost row in its subtree (itself included): n_rows, gross +
   frozen net (`COALESCE(net, gross)`) per status. Cancelled/refunded are in no served figure, so not kept.
-- **Triggers**: a cost write adds its delta to its run and every ancestor, upserted ROOT FIRST (two writers in one tree
-  meet on the root, so a multi-row statement cannot deadlock a single write); a run delete (BEFORE, still visible) takes
-  its still-visible subtree out of its visible ancestors and drops its own row (exact in any row order, 0054's rule); a
-  reparent moves the subtree. Same walk as 0054's root_of on every cost write.
+- **Triggers** (0092 items too): a cost write adds its delta to its run and every ancestor, ROOT FIRST (writers meet on
+  the root: no deadlock); a run delete (BEFORE) takes its live subtree out of its visible ancestors and drops its own
+  row (exact in any row order, 0054's rule); a reparent moves the subtree.
 - **Read** (`services/run-subtree-cost.ts`): stamp `subtree_cost` and rows in ONE statement (a rebuild cannot un-stamp
   between them); unstamped = the live walk, unchanged. The route formats every figure with `toFixed(10)`, so the body is
   byte-identical either way (guard: `tests/integration/run-subtree-costs-rollup.test.ts`, red if a trigger is off).
