@@ -148,8 +148,11 @@ export async function backfillSupportEffective(
         ) ch
       ),
       ins AS (
+        -- No join back to runs: every id is a live run (a mark cascades with its run, children
+        -- come from runs), and the FK checks it. A JOIN hash-joined a full scan of runs_pkey
+        -- (7.4M) per chunk: 101 s for 2,000 marks on prod (2026-11-01).
         INSERT INTO run_support_effective (run_id, kind)
-        SELECT eff.id, eff.kind FROM eff JOIN runs r ON r.id = eff.id
+        SELECT eff.id, eff.kind FROM eff
         ON CONFLICT (run_id) DO UPDATE SET kind = EXCLUDED.kind
           WHERE run_support_effective.kind IS DISTINCT FROM EXCLUDED.kind
         RETURNING 1
