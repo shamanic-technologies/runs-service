@@ -569,7 +569,7 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   `supportFunction` = kind of the nearest mark among the run + ancestors (null = none). Stamped: billed/net
   from `run_subtree_costs`, support from `run_support_effective` (0091), vendor from `run_subtree_cost_items` (0092: actual
   rows per cost name x billed unit x UTC hour, 0086's triggers; stamp `subtree_cost_items`; an hour straddling a version
-  re-reads that run from the ledger). Child fetch per-run LATERAL OFFSET 0 (a JOIN seq-scanned 7.3M runs, 2026-10-31).
+  re-reads that run from the ledger). Own tx, 120 s (owner brand 86.8k runs: 4 s warm, ~37 s cold). Child fetch LATERAL OFFSET 0.
 - **0091 `run_support_effective`**: inherited at run insert; a mark write/undo queues its run, the worker
   (`services/support-effective.ts`, 15 s, two passes 60 s apart) rewrites the subtree down to the next own mark. Past
   filled by `scripts/backfill-support-effective.ts`, which stamps `support_effective`. Test `support-effective.test.ts`.

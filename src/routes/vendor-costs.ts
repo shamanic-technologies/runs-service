@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { sql, type SQL } from "drizzle-orm";
 import { Decimal } from "decimal.js";
-import { statsDb as db } from "../db/index.js";
+import { statsDb, statsDb as db } from "../db/index.js";
 import { readConsumptionFromRollup } from "../services/stats-rollup-consumption-day.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import {
@@ -638,7 +638,14 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
     if (taskName) conditions.push(sql`task_name = ${taskName as string}`);
 
     const versions = await fetchVendorCostCatalog();
-    const rows = (await db.execute(sql`
+    // Its own transaction and statement budget: brand-wide on the owner brand (86,839 lead-serve
+    // runs) the stores answer in ~4 s warm, but cold on the loaded box the per-run reads (run rows,
+    // then one probe per store) took ~37 s (2026-11-01), past the stats pool's 30 s timeout. The
+    // caller (features-service sourcing investment) waits up to 300 s.
+    const rows = (await statsDb.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION READ ONLY`);
+      await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+      return tx.execute(sql`
       -- Both stamps are read IN this statement: a rebuild cannot clear one between
       -- the check and the read. Stamped = the write-time stores answer; else the walks.
       WITH RECURSIVE ready AS MATERIALIZED (
@@ -767,7 +774,8 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       LEFT JOIN support_walk sw ON sw.root_run_id = ro.id
       LEFT JOIN run_support_effective e ON e.run_id = ro.id
       ORDER BY ro.started_at DESC, ro.id DESC
-    `)) as any[];
+    `);
+    })) as any[];
 
     // A run whose subtree has no committed cost row has no sums row: 0 on every basis.
     const zero = "0";
