@@ -638,6 +638,13 @@
       "when": 1783410400000,
       "tag": "0090_consumption_day",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1783496800000,
+      "tag": "0091_run_support_effective",
+      "breakpoints": true
     }
   ]
 }

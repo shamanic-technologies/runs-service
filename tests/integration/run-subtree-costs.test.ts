@@ -5,6 +5,8 @@ import { createTestApp } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
+import { sql as rawSql } from "../../src/db/index.js";
+import { drainSupportPropagationQueue } from "../../src/services/support-effective.js";
 
 // GET /internal/runs/subtree-costs — every matching run with its subtree's
 // committed cost on the billed, net and vendor bases, in one read. Per run it
@@ -241,6 +243,11 @@ describe("GET /internal/runs/subtree-costs supportFunction", () => {
     await mark(nearestWins, "copilot");
     unmarked = await run("2026-10-30T08:00:00Z");
     await cost(underMarked, "tok", "1", "6", "2026-10-30T09:00:02Z");
+    // Marks reach run_support_effective through the background queue (0091): drain it so the
+    // stored path (stamped) and the walk (unstamped) both see them.
+    await drainSupportPropagationQueue();
+    await rawSql`UPDATE run_support_propagation_queue SET due_at = now()`;
+    await drainSupportPropagationQueue();
   });
 
   afterAll(async () => {
