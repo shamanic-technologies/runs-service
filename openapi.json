@@ -1171,6 +1171,28 @@
           "expected_cents"
         ]
       },
+      "LifecycleArchiveStatsResponse": {
+        "type": "object",
+        "properties": {
+          "objects": {
+            "type": "integer",
+            "description": "Archive objects uploaded to R2 and verified (one per table x UTC day x part)."
+          },
+          "rows": {
+            "type": "integer",
+            "description": "Bronze lifecycle events those objects hold."
+          },
+          "bytes": {
+            "type": "integer",
+            "description": "Compressed (gzip NDJSON) bytes stored in R2: the archive's total size."
+          }
+        },
+        "required": [
+          "objects",
+          "rows",
+          "bytes"
+        ]
+      },
       "OrgActualTotalResponse": {
         "type": "object",
         "properties": {
@@ -10911,6 +10933,32 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/lifecycle-archive/stats": {
+      "get": {
+        "summary": "Size of the R2 lifecycle-event archive (BOX-DISK-1101)",
+        "description": "Bronze run/cost lifecycle events older than the archive boundary (UTC midnight of the current month's first day minus 90 days) are moved to Cloudflare R2 as gzip NDJSON, verified on read-back, then deleted from Postgres. Sums over lifecycle_archive_objects (one row per verified object).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archive totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleArchiveStatsResponse"
                 }
               }
             }

@@ -39,6 +39,17 @@ const sql = postgres(url, { max: 1, idle_timeout: 5, connect_timeout: 10 });
 async function main() {
   console.log("[backfill] starting bronze-event synthesis");
 
+  // BOX-DISK-1101: once bronze history is archived to R2 (lifecycle_archive_objects),
+  // the NOT EXISTS checks below no longer see the archived events and this script
+  // would synthesize a second, fake copy of that history. Restore from R2 instead
+  // (scripts/restore-lifecycle-archive.ts).
+  const [reg] = await sql`SELECT to_regclass('lifecycle_archive_objects') IS NOT NULL AS present`;
+  const archived = reg.present ? (await sql`SELECT EXISTS (SELECT 1 FROM lifecycle_archive_objects) AS any`)[0].any : false;
+  if (archived) {
+    console.error("[backfill] refusing: bronze history is archived to R2 (lifecycle_archive_objects has rows)");
+    process.exit(1);
+  }
+
   // Temporarily disable projection triggers so backfill doesn't re-mutate silver.
   await sql`ALTER TABLE run_lifecycle_events DISABLE TRIGGER trg_project_run_lifecycle`;
   await sql`ALTER TABLE cost_lifecycle_events DISABLE TRIGGER trg_project_cost_lifecycle`;

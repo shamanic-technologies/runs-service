@@ -1015,6 +1015,30 @@ registry.registerPath({
   },
 });
 
+export const LifecycleArchiveStatsResponseSchema = z
+  .object({
+    objects: z.number().int().openapi({ description: "Archive objects uploaded to R2 and verified (one per table x UTC day x part)." }),
+    rows: z.number().int().openapi({ description: "Bronze lifecycle events those objects hold." }),
+    bytes: z.number().int().openapi({ description: "Compressed (gzip NDJSON) bytes stored in R2: the archive's total size." }),
+  })
+  .openapi("LifecycleArchiveStatsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/lifecycle-archive/stats",
+  summary: "Size of the R2 lifecycle-event archive (BOX-DISK-1101)",
+  description:
+    "Bronze run/cost lifecycle events older than the archive boundary (UTC midnight of the current month's first day minus 90 days) are moved to Cloudflare R2 as gzip NDJSON, verified on read-back, then deleted from Postgres. Sums over lifecycle_archive_objects (one row per verified object).",
+  security: [{ apiKey: [] }],
+  responses: {
+    200: {
+      description: "Archive totals",
+      content: { "application/json": { schema: LifecycleArchiveStatsResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/org-actual-total",

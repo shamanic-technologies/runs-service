@@ -7,6 +7,7 @@ import { requireInternalAuth } from "../middleware/auth.js";
 import { logRunLifecycle } from "../services/bronze.js";
 import { transferBrand, movedUsage } from "../services/brand-transfer.js";
 import { correctFeatureSlug } from "../services/feature-slug-correction.js";
+import { lifecycleArchiveStats } from "../services/lifecycle-archive.js";
 import {
   TransferBrandRequestSchema,
   BrandTransferMovedUsageQuerySchema,
@@ -266,6 +267,17 @@ router.get("/internal/org-actual-total", requireInternalAuth, async (req, res) =
     net_total_expected_cents: charged ? (row.net as string) : "0",
     as_of: new Date().toISOString(),
   });
+});
+
+// GET /internal/lifecycle-archive/stats — size of the R2 archive of bronze
+// lifecycle events (BOX-DISK-1101): a SUM over lifecycle_archive_objects.
+router.get("/internal/lifecycle-archive/stats", requireInternalAuth, async (_req, res) => {
+  try {
+    res.json(await lifecycleArchiveStats());
+  } catch (err) {
+    console.error("[Runs Service] lifecycle archive stats failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // GET /internal/org-usage-total — inline aggregate bounded by org_id, using the
