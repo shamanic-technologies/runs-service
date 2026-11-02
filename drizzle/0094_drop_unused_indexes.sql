@@ -1,5 +1,5 @@
 -- BOX-DISK-1101. The box disk had ~24 days of runway (Postgres grows ~0.65 GB/day). These indexes
--- cost ~4.2 GB and serve no read. Measured on prod 2026-11-02 (stats since the 2026-10-29 restart)
+-- cost ~3.5 GB (3531 MB) and serve no read. Measured on prod 2026-11-02 (stats since the 2026-10-29 restart)
 -- and checked against every query in src/, scripts/ and the SQL functions/triggers in drizzle/:
 --   never scanned, no reader filters/joins/orders on their leading column(s) without another index:
 --     runs.idx_runs_feature_brands (1175 MB), run_lifecycle_events.idx_rle_event_type (864 MB),
