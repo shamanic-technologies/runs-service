@@ -3690,6 +3690,82 @@ registry.registerPath({
   },
 });
 
+// ── Customer twins (FACTORY-USER-LEDGER-1102): the caller's org only, no vendor figure ──
+
+const CustomerLedgerMoneySchema = z.object({
+  grossCents: z.string().openapi({ description: "Billed gross, cents, 10 decimals." }),
+  netCents: z.string().openapi({ description: "Billed net of the usage discount frozen at write, cents, 10 decimals." }),
+});
+// Same lines and meaning as BrandBooksFields, on billed gross + net only.
+const CustomerBrandBooksFields = {
+  production: CustomerLedgerMoneySchema,
+  standardCharged: CustomerLedgerMoneySchema,
+  reuseGain: CustomerLedgerMoneySchema,
+  producedNone: CustomerLedgerMoneySchema,
+  support: CustomerLedgerMoneySchema,
+  undeclared: CustomerLedgerMoneySchema,
+  abnormal: CustomerLedgerMoneySchema,
+  spend: CustomerLedgerMoneySchema,
+  difference: CustomerLedgerMoneySchema,
+  balanced: BrandBooksFields.balanced,
+};
+
+export const CustomerBrandLedgerResponseSchema = z
+  .object({
+    brandId: z.string(),
+    since: z.string(),
+    until: z.string(),
+    complete: z.boolean(),
+    daysMissing: z.array(z.string()).openapi({ description: "Days not stored under the current allocation, or stale: out of every figure." }),
+    books: z.object(CustomerBrandBooksFields),
+    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...CustomerBrandBooksFields })).openapi({ description: "The same books per UTC day: every stored day of the range (a day with no row of the org's brand runs at zero); a day in daysMissing is absent." }),
+    outcomes: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number(), cost: CustomerLedgerMoneySchema })).openapi({ description: "Occurrences the org's runs of the brand declared produced over the range, and their production cost." }),
+  })
+  .openapi("CustomerBrandLedgerResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/brands/{brandId}/ledger",
+  summary: "The books of one brand for the caller's org, reconciled to the cent, over a range and per UTC day",
+  description:
+    "Customer twin of GET /internal/brands/{brandId}/ledger restricted to the org in x-org-id (required): only the stored rows of that org's runs (the run's org, the same run whose brands tag the row), so on a brand held by several orgs each org reads its own books and the orgs' books add up to the staff read. Same rule: standardCharged - reuseGain + producedNone + abnormal = spend, exact. Billed gross + net only: no vendor figure. Default range: since inception to today (400 days max).",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: z.object({ "x-org-id": z.string().uuid() }),
+    params: z.object({ brandId: z.string() }),
+    query: z.object({ since: z.string().optional(), until: z.string().optional() }),
+  },
+  responses: {
+    200: { description: "Books", content: { "application/json": { schema: CustomerBrandLedgerResponseSchema } } },
+    400: { description: "Invalid range, unknown parameter or missing x-org-id", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/v1/brands/{brandId}/ledger/runs",
+  summary: "One brand's production orders for the caller's org, newest first",
+  description:
+    "Customer twin of GET /internal/brands/{brandId}/ledger/runs restricted to the runs of the org in x-org-id (required); counts are of that org's runs. Same body (billed gross + net per run, no vendor figure), same paging: pass `nextBefore` (+ `nextBeforeId`) back for the next, older page.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: z.object({ "x-org-id": z.string().uuid() }),
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      before: z.string().optional().openapi({ description: "Timestamp (default now): runs started strictly before it." }),
+      beforeId: z.string().optional().openapi({ description: "With `before`: continue after this run at that instant." }),
+      limit: z.string().optional().openapi({ description: "1..100, default 50." }),
+      kind: z.enum(["made", "running", "none"]).optional().openapi({ description: "Only this tab's runs (default all)." }),
+    }),
+  },
+  responses: {
+    200: { description: "Runs page", content: { "application/json": { schema: BrandLedgerRunsResponseSchema } } },
+    400: { description: "Invalid parameter or missing x-org-id", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/outcome-costs/backfill",

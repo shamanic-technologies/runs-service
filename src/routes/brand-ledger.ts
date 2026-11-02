@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { requireInternalAuth } from "../middleware/auth.js";
+import type { Request, Response } from "express";
+import { requireApiKey, requireInternalAuth } from "../middleware/auth.js";
 import { addDays, utcDay, type Money } from "../services/outcome-ledger.js";
 import { firstOutcomeCostDay, MAX_RANGE_DAYS } from "../services/outcome-cost-totals.js";
 import { ledgerBackfillState, startLedgerBackfill } from "../services/outcome-ledger.js";
@@ -11,8 +12,12 @@ const router = Router();
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const BRAND_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
-const wire = (m: Money) => ({ grossCents: m.gross, netCents: m.net, vendorCents: m.vendor, unpricedGrossCents: m.unpricedGross });
-const wireBooks = (b: BrandBooks) => ({
+type Wire = (m: Money) => Record<string, string>;
+const wireStaff: Wire = (m) => ({ grossCents: m.gross, netCents: m.net, vendorCents: m.vendor, unpricedGrossCents: m.unpricedGross });
+// Customer body: billed gross + frozen net only. The vendor cost (and the billed part we could not
+// price at the vendor, which only means something beside it) never reaches a customer: it is our margin.
+const wireCustomer: Wire = (m) => ({ grossCents: m.gross, netCents: m.net });
+const wireBooks = (b: BrandBooks, wire: Wire) => ({
   production: wire(b.production),
   standardCharged: wire(b.standardCharged),
   reuseGain: wire(b.reuseGain),
@@ -32,7 +37,7 @@ const validDay = (d: string) => DAY_RE.test(d) && utcDay(new Date(`${d}T00:00:00
  * reuse gain, spend of runs producing none, abnormal loss and the runs spend, reconciled to the
  * cent, over the range and per UTC day (stored days only; default since inception to today).
  */
-router.get("/internal/brands/:brandId/ledger", requireInternalAuth, async (req, res) => {
+async function ledgerHandler(req: Request, res: Response, orgId: string | null, wire: Wire) {
   try {
     const unknown = Object.keys(req.query).filter((k) => k !== "since" && k !== "until");
     if (unknown.length > 0) {
@@ -59,29 +64,29 @@ router.get("/internal/brands/:brandId/ledger", requireInternalAuth, async (req, 
       res.status(400).json({ error: `range must be <= ${MAX_RANGE_DAYS} days` });
       return;
     }
-    const l = await readBrandLedgerCached(brandId, since, until);
+    const l = await readBrandLedgerCached(brandId, since, until, orgId);
     res.json({
       brandId: l.brandId,
       since: l.since,
       until: l.until,
       complete: l.complete,
       daysMissing: l.daysMissing,
-      books: wireBooks(l.books),
-      days: l.days.map((d) => ({ day: d.day, occurrences: d.occurrences, ...wireBooks(d) })),
+      books: wireBooks(l.books, wire),
+      days: l.days.map((d) => ({ day: d.day, occurrences: d.occurrences, ...wireBooks(d, wire) })),
       outcomes: l.outcomes.map((o) => ({ outcomeKey: o.outcomeKey, occurrences: o.occurrences, cost: wire(o.cost) })),
     });
   } catch (err) {
     console.error("[Runs Service] brand ledger read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+}
 
 /**
  * GET /internal/brands/:brandId/ledger/runs?before&beforeId&limit — the brand's production orders,
  * newest first, each with its own cost, the outcomes it declared produced and consumed, and its
  * support mark. One page reads at most a 24h window before `before`; follow `nextBefore`.
  */
-router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, async (req, res) => {
+async function runsHandler(req: Request, res: Response, orgId: string | null) {
   try {
     const unknown = Object.keys(req.query).filter((k) => !["before", "beforeId", "limit", "kind"].includes(k));
     if (unknown.length > 0) {
@@ -112,12 +117,22 @@ router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, async (
       res.status(400).json({ error: `kind must be one of ${BRAND_RUN_KINDS.join(", ")}` });
       return;
     }
-    res.json(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit, (q.kind as BrandRunKind | undefined) ?? null));
+    res.json(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit, (q.kind as BrandRunKind | undefined) ?? null, orgId));
   } catch (err) {
     console.error("[Runs Service] brand ledger runs read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+}
+
+router.get("/internal/brands/:brandId/ledger", requireInternalAuth, (req, res) => ledgerHandler(req, res, null, wireStaff));
+router.get("/internal/brands/:brandId/ledger/runs", requireInternalAuth, (req, res) => runsHandler(req, res, null));
+
+/**
+ * Customer twins (FACTORY-USER-LEDGER-1102): the same two reads restricted to the caller's org
+ * (x-org-id, required by requireApiKey): only that org's runs and their stored rows, no vendor figure.
+ */
+router.get("/v1/brands/:brandId/ledger", requireApiKey, (req, res) => ledgerHandler(req, res, req.orgId, wireCustomer));
+router.get("/v1/brands/:brandId/ledger/runs", requireApiKey, (req, res) => runsHandler(req, res, req.orgId));
 
 /**
  * POST /internal/outcome-costs/backfill — computes, once, every past day not current under the
