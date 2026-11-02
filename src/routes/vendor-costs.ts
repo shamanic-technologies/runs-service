@@ -192,7 +192,7 @@ export function vendorTimeseriesSql(
     const w = ledgerWindowSql(ledgerOnly);
     // The window rows are fetched behind an OFFSET 0 fence, by the run-start
     // index alone: given the status predicate in the same scan, the planner
-    // BitmapAnds idx_runs_costs_status (1.46M entries, 1.6 s) for nothing.
+    // BitmapAnds the (run_id, status) index (1.46M entries, 1.6 s) for nothing.
     baseFrom = sql`
       SELECT
         ${bucketOf(sql`w.run_started_at`)} AS bucket,

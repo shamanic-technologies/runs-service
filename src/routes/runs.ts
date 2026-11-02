@@ -79,7 +79,7 @@ function runCostRowsSql(runId: SQL) {
 // ---------------------------------------------------------------------------
 // Org-level platform spend. All math in Postgres. Single source of truth for
 // the platform-projected predicate (runs_costs.is_platform_projected generated
-// column + idx_runs_costs_projected partial index).
+// column + idx_runs_costs_org_projected partial index).
 // ---------------------------------------------------------------------------
 async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
   // Reads the denormalized runs_costs.organization_id (frozen at write, migration
@@ -1153,7 +1153,7 @@ export async function listRunsPage(
     //
     // Bitmap scans are off for this one statement. The planner estimates a few
     // hundred matches per member, so once `limit` nears that estimate it swaps the
-    // ordered index walk for a BitmapAnd with idx_runs_org_service (220k rows for
+    // ordered index walk for a BitmapAnd with an org-wide index (220k rows for
     // a large org) plus a sort, per member: 2s instead of 0.3s at limit=201 on
     // the 47-row family in prod. With bitmaps off it walks the index in order
     // and stops at the limit, or uses a selective btree when a filter has one.
