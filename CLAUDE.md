@@ -1379,7 +1379,7 @@ Industry-standard event-sourcing + projection layout per Kleppmann (log = source
 
 | Layer | Tables / Views | Status |
 |-------|---------------|--------|
-| **Bronze** | `run_lifecycle_events`, `cost_lifecycle_events` (migration 0018); `run_events` (raw telemetry log) | Live source of truth, append-only. The lifecycle tables project to silver via triggers. `run_events` is a **leaf** bronze log — trace/telemetry events written directly by `POST /v1/runs/:id/events` (`src/routes/events.ts`), it projects to nothing and is read directly. Served for reads by access-pattern indexes (see below), never by a rollup/aggregate. |
+| **Bronze** | `run_lifecycle_events`, `cost_lifecycle_events` (migration 0018); `run_events` (raw telemetry log) | Live source of truth, append-only; past the monthly boundary (~90-120 days) the lifecycle rows live in R2 ("Lifecycle archive to R2"). The lifecycle tables project to silver via triggers. `run_events` is a **leaf** bronze log — trace/telemetry events written directly by `POST /v1/runs/:id/events` (`src/routes/events.ts`), it projects to nothing and is read directly. Served for reads by access-pattern indexes (see below), never by a rollup/aggregate. |
 | **Silver** | `runs`, `runs_costs` | Projection cache. Maintained by `project_run_lifecycle_to_silver` and `project_cost_lifecycle_to_silver` triggers (migration 0020). **App code MUST NOT INSERT/UPDATE these tables directly** (except `tests/helpers/test-db.ts` for test setup, and `POST /internal/transfer-brand` which is tracked as a follow-up). |
 | **Gold** | **Inline bounded recursive CTEs** via the shared SUM-CASE builder in `src/services/cost-aggregator.ts` (NOT views). | Descendant cost rollup read by `POST /v1/runs/costs/batch`, `POST /v1/runs/batch`, `GET /v1/runs/:id`; org spend by `GET /internal/org-usage-total`. See "Gold = bounded CTE, never a view" below. |
 | **Semantic predicates** | `runs_costs.is_platform_projected`, `runs_costs.is_platform_committed` (migration 0017) | Generated boolean columns + partial indexes. The single source for the platform-spend predicate, used by every gold rollup + `GET /internal/runs-expected-totals`. |
@@ -1467,12 +1467,10 @@ pre-rename bronze events still replay (reference: migration 0025).
 (4.9 GB / 2.56M rows after 6.0M expired rows were deleted by hand from outside the
 repo) and re-accumulates ~2.6M rows a month.
 
-- **Only the LEAF telemetry log is purgeable.** `run_events` projects to nothing and
-  nothing is derived from it. The bronze LIFECYCLE logs (`run_lifecycle_events`,
-  `cost_lifecycle_events`) are the source silver is projected FROM — purging them
-  would destroy the ability to rebuild `runs` / `runs_costs`, which is the whole
-  point of the bronze layer. They are never swept, at any age. A test asserts a
-  400-day-old lifecycle row survives a sweep.
+- **Only the LEAF telemetry log is PURGED.** `run_events` projects to nothing and
+  nothing is derived from it. The bronze LIFECYCLE logs are never purged by this
+  sweep (a test asserts a 400-day-old lifecycle row survives it); they are ARCHIVED
+  instead, below.
 - **Sweep shape**: chunked `DELETE … WHERE id IN (SELECT id … ORDER BY created_at
   LIMIT 5000)`, capped at 400 chunks per sweep so a long-unpurged table cannot run
   unbounded; the remainder is picked up next sweep. Runs every 6h, started AFTER
@@ -1484,6 +1482,38 @@ repo) and re-accumulates ~2.6M rows a month.
   prod/staging (the migration ships `IF NOT EXISTS` non-concurrent → no-ops there),
   same discipline as 0027 / 0029 / 0030.
 
+## Lifecycle archive to R2 (BOX-DISK-1101, migration 0095)
+
+Owner decision 2026-11-02: bronze lifecycle events (`run_lifecycle_events`,
+`cost_lifecycle_events`) older than the boundary (UTC midnight of the current
+month's 1st minus 90 days, so it moves monthly) move to Cloudflare R2, then are
+deleted. Nothing is lost: history is `runs-archive/<table>/<yyyy>/<mm>/<dd>[-partN].ndjson.gz`
+in bucket `cloudflare-r2-bucket-name` (key-service platform keys `cloudflare-r2-*`,
+the ones cloudflare-service's pg-backup reads; no env var of ours).
+`src/services/lifecycle-archive.ts`, started after `listen()`: first tick ~60 s, then 6 h.
+- **Chunk = one UTC day, ≤50k rows, ordered by id**; every column `::text` (µs kept).
+  PUT, GET back, sha256 + row count + ordered ids must match, record in
+  `lifecycle_archive_objects` (bytes → `GET /internal/lifecycle-archive/stats`),
+  only then DELETE those ids (5k per statement). Log: `archived <table> <key> rows=N deleted=N`.
+  A failed upload/read-back deletes nothing (retried next tick); a recorded object with
+  `deleted_at` NULL (deploy mid-delete) is finished from R2 on the next tick.
+- **Kill switch `LIFECYCLE_ARCHIVE_DISABLED=true`** (`env/runs-service.env`).
+- **`idx_rle_occurred_at` / `idx_cle_occurred_at` are built CONCURRENTLY by the job**,
+  never in a migration (a plain build blocks every run write at boot).
+- **`run_origin_org()` reads `lifecycle_archived_run_origins` first** (the job copies the
+  earliest `run.created` org there before deleting it), so the no-campaign rollup's
+  -1 on a late refund/materialization of an old cost still finds its bucket.
+- **What Postgres no longer holds past the boundary**: replay/rebuild of `runs` /
+  `runs_costs` from bronze covers the last ~90-120 days only (older = restore first);
+  `staleComputedDays` cannot see a late materialization recorded before the boundary;
+  `scripts/backfill-bronze-events.ts` REFUSES once anything is archived (it would
+  synthesize a fake second history).
+- **Restore = `scripts/restore-lifecycle-archive.ts <table> <key|prefix>`**: sha256
+  verified, `ON CONFLICT (id) DO NOTHING`, into `<table>_restored` (trigger-less copy)
+  by default. Never the live table without `--allow-live`: its AFTER INSERT triggers
+  replay old events out of order onto silver (a restored `cost.materialized` un-refunds).
+- Disk: deleted rows free space Postgres REUSES (growth stops); the files shrink only
+  with `VACUUM FULL` / `pg_repack`.
 ## CI runs against an empty Postgres container
 
 Integration shards start a `postgres:17` service container (matching the production

@@ -23,6 +23,7 @@ import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
 import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
 import { startCostLedgerRefresh } from "./services/outcome-ledger.js";
+import { startLifecycleArchive } from "./services/lifecycle-archive.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -84,6 +85,10 @@ if (process.env.NODE_ENV !== "test") {
         // Support marks propagated to their subtrees (services/support-effective.ts, 0091):
         // first tick ~60 s after boot, then every 15 s.
         startSupportPropagation();
+        // Bronze lifecycle events past the archive boundary move to R2, verified, then
+        // deleted (services/lifecycle-archive.ts, BOX-DISK-1101): first tick ~60 s after
+        // boot, then every 6 h; the boundary moves monthly. Kill switch LIFECYCLE_ARCHIVE_DISABLED.
+        startLifecycleArchive();
       });
     })
     .catch((err) => {

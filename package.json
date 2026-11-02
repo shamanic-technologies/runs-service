@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^8.4.0",
+    "@aws-sdk/client-s3": "^3.1161.0",
     "cors": "^2.8.5",
     "decimal.js": "^10.6.0",
     "drizzle-orm": "^0.45.4",

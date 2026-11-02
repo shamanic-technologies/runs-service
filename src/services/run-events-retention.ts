@@ -13,7 +13,8 @@ import { sql as defaultSql } from "../db/index.js";
  * (`run_lifecycle_events`, `cost_lifecycle_events`) are the append-only source of
  * truth that the silver row tables are projected from; deleting from those would
  * destroy the ability to rebuild `runs` / `runs_costs`, which is the entire point
- * of the bronze layer. They are never swept, at any age.
+ * of the bronze layer. This sweep never touches them; past the archive boundary
+ * they move to R2, verified, by services/lifecycle-archive.ts (BOX-DISK-1101).
  */
 export const RUN_EVENTS_RETENTION_DAYS = 30;
 
