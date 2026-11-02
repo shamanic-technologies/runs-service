@@ -9811,6 +9811,437 @@
           "kind",
           "counts"
         ]
+      },
+      "CustomerBrandLedgerResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "daysMissing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Days not stored under the current allocation, or stale: out of every figure."
+          },
+          "books": {
+            "type": "object",
+            "properties": {
+              "production": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "standardCharged": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "reuseGain": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "producedNone": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "support": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "undeclared": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "abnormal": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "spend": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "difference": {
+                "type": "object",
+                "properties": {
+                  "grossCents": {
+                    "type": "string",
+                    "description": "Billed gross, cents, 10 decimals."
+                  },
+                  "netCents": {
+                    "type": "string",
+                    "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                  }
+                },
+                "required": [
+                  "grossCents",
+                  "netCents"
+                ]
+              },
+              "balanced": {
+                "type": "boolean",
+                "description": "difference is exactly 0 on every basis (no tolerance)."
+              }
+            },
+            "required": [
+              "production",
+              "standardCharged",
+              "reuseGain",
+              "producedNone",
+              "support",
+              "undeclared",
+              "abnormal",
+              "spend",
+              "difference",
+              "balanced"
+            ]
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string"
+                },
+                "occurrences": {
+                  "type": "number"
+                },
+                "production": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "standardCharged": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "reuseGain": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "producedNone": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "support": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "undeclared": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "abnormal": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "spend": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "difference": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                },
+                "balanced": {
+                  "type": "boolean",
+                  "description": "difference is exactly 0 on every basis (no tolerance)."
+                }
+              },
+              "required": [
+                "day",
+                "occurrences",
+                "production",
+                "standardCharged",
+                "reuseGain",
+                "producedNone",
+                "support",
+                "undeclared",
+                "abnormal",
+                "spend",
+                "difference",
+                "balanced"
+              ]
+            },
+            "description": "The same books per UTC day: every stored day of the range (a day with no row of the org's brand runs at zero); a day in daysMissing is absent."
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcomeKey": {
+                  "type": "string"
+                },
+                "occurrences": {
+                  "type": "number"
+                },
+                "cost": {
+                  "type": "object",
+                  "properties": {
+                    "grossCents": {
+                      "type": "string",
+                      "description": "Billed gross, cents, 10 decimals."
+                    },
+                    "netCents": {
+                      "type": "string",
+                      "description": "Billed net of the usage discount frozen at write, cents, 10 decimals."
+                    }
+                  },
+                  "required": [
+                    "grossCents",
+                    "netCents"
+                  ]
+                }
+              },
+              "required": [
+                "outcomeKey",
+                "occurrences",
+                "cost"
+              ]
+            },
+            "description": "Occurrences the org's runs of the brand declared produced over the range, and their production cost."
+          }
+        },
+        "required": [
+          "brandId",
+          "since",
+          "until",
+          "complete",
+          "daysMissing",
+          "books",
+          "days",
+          "outcomes"
+        ]
       }
     },
     "parameters": {}
@@ -16159,6 +16590,177 @@
           },
           "400": {
             "description": "Invalid parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/brands/{brandId}/ledger": {
+      "get": {
+        "summary": "The books of one brand for the caller's org, reconciled to the cent, over a range and per UTC day",
+        "description": "Customer twin of GET /internal/brands/{brandId}/ledger restricted to the org in x-org-id (required): only the stored rows of that org's runs (the run's org, the same run whose brands tag the row), so on a brand held by several orgs each org reads its own books and the orgs' books add up to the staff read. Same rule: standardCharged - reuseGain + producedNone + abnormal = spend, exact. Billed gross + net only: no vendor figure. Default range: since inception to today (400 days max).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "x-org-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Books",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerBrandLedgerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range, unknown parameter or missing x-org-id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/brands/{brandId}/ledger/runs": {
+      "get": {
+        "summary": "One brand's production orders for the caller's org, newest first",
+        "description": "Customer twin of GET /internal/brands/{brandId}/ledger/runs restricted to the runs of the org in x-org-id (required); counts are of that org's runs. Same body (billed gross + net per run, no vendor figure), same paging: pass `nextBefore` (+ `nextBeforeId`) back for the next, older page.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Timestamp (default now): runs started strictly before it."
+            },
+            "required": false,
+            "description": "Timestamp (default now): runs started strictly before it.",
+            "name": "before",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "With `before`: continue after this run at that instant."
+            },
+            "required": false,
+            "description": "With `before`: continue after this run at that instant.",
+            "name": "beforeId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "1..100, default 50."
+            },
+            "required": false,
+            "description": "1..100, default 50.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "made",
+                "running",
+                "none"
+              ],
+              "description": "Only this tab's runs (default all)."
+            },
+            "required": false,
+            "description": "Only this tab's runs (default all).",
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "x-org-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Runs page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandLedgerRunsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameter or missing x-org-id",
             "content": {
               "application/json": {
                 "schema": {
