@@ -14,6 +14,13 @@
 //     outcomes it declared produced and consumed, and its support mark.
 //
 // A co-branded run counts under each of its brands, as every other brand read here.
+//
+// Customer twin (FACTORY-USER-LEDGER-1102): GET /v1/brands/:brandId/ledger(/runs) serve the same
+// reads restricted to ONE org (`orgId`, the caller's x-org-id): a brand id can be held by several
+// orgs, so the staff read is brand-wide across orgs. The stored rows are kept on the RUN's org
+// (outcome_cost_days.organization_id = declaring / consuming / spending run's org, the same run
+// whose brand_ids tag the row), runs on runs.organization_id: per brand, the org reads add up to
+// the staff read (rows of org-less runs aside). The route strips every vendor figure.
 
 import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
@@ -121,7 +128,8 @@ async function usableDays(since: string, until: string): Promise<{ usable: strin
   return { usable, missing };
 }
 
-export async function readBrandLedger(brandId: string, since: string, until: string): Promise<BrandLedger> {
+export async function readBrandLedger(brandId: string, since: string, until: string, orgId: string | null = null): Promise<BrandLedger> {
+  const orgCut = orgId ? sql`AND d.organization_id = ${orgId}::uuid` : sql``;
   const { usable, missing } = await usableDays(since, until);
   const empty: BrandLedger = { brandId, since, until, daysMissing: missing, complete: missing.length === 0, books: books({}), days: [], outcomes: [] };
   if (usable.length === 0) return empty;
@@ -135,7 +143,7 @@ export async function readBrandLedger(brandId: string, since: string, until: str
     SELECT to_char(d.day, 'YYYY-MM-DD') AS day, d.outcome_key AS ok, GROUPING(d.day) AS by_outcome, ${BOOKS_SELECT}
     FROM outcome_cost_days d
     WHERE d.allocation_version = ${ALLOCATION_VERSION} AND d.day BETWEEN ${since}::date AND ${until}::date
-      AND d.brand_ids @> ARRAY[${brandId}]::text[]
+      AND d.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
     GROUP BY GROUPING SETS ((d.day), (d.outcome_key))
   `)) as any[];
   });
@@ -147,7 +155,7 @@ export async function readBrandLedger(brandId: string, since: string, until: str
       SELECT d.outcome_key AS ok, ${BOOKS_SELECT}
       FROM outcome_cost_days d
       WHERE d.allocation_version = ${ALLOCATION_VERSION} AND d.day = ANY(ARRAY[${sql.join(usable.map((d) => sql`${d}`), sql`, `)}]::date[])
-        AND d.brand_ids @> ARRAY[${brandId}]::text[]
+        AND d.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
       GROUP BY d.outcome_key
     `)) as any[];
     return assemble(empty, usable, dayRows, outcomes);
@@ -188,14 +196,14 @@ const STALE_MS = 60 * 60_000;
 const CACHE_MAX = 200;
 const ledgerCache = new Map<string, { at: number; value: BrandLedger | null; pending: Promise<BrandLedger> | null }>();
 
-export async function readBrandLedgerCached(brandId: string, since: string, until: string): Promise<BrandLedger> {
-  const key = `${brandId}|${since}|${until}`;
+export async function readBrandLedgerCached(brandId: string, since: string, until: string, orgId: string | null = null): Promise<BrandLedger> {
+  const key = `${brandId}|${since}|${until}|${orgId ?? "*"}`;
   const hit = ledgerCache.get(key);
   const age = hit?.value ? Date.now() - hit.at : Infinity;
   const refresh = () => {
     const entry = ledgerCache.get(key) ?? { at: 0, value: null, pending: null };
     if (entry.pending) return entry.pending;
-    entry.pending = readBrandLedger(brandId, since, until)
+    entry.pending = readBrandLedger(brandId, since, until, orgId)
       .then((value) => {
         ledgerCache.set(key, { at: Date.now(), value, pending: null });
         if (ledgerCache.size > CACHE_MAX) ledgerCache.delete(ledgerCache.keys().next().value!);
@@ -288,7 +296,9 @@ export async function readBrandLedgerRuns(
   beforeId: string | null,
   limit: number,
   kind: BrandRunKind | null = null,
+  orgId: string | null = null,
 ): Promise<BrandLedgerRunsPage> {
+  const orgCut = orgId ? sql`AND r.organization_id = ${orgId}::uuid` : sql``;
   const windowStart = (
     (await statsDb.execute(sql`SELECT (${before}::timestamptz - make_interval(hours => ${BRAND_RUNS_WINDOW_HOURS}))::text AS w`)) as any[]
   )[0].w as string;
@@ -304,7 +314,7 @@ export async function readBrandLedgerRuns(
     LEFT JOIN run_support_marks m ON m.run_id = r.id
     LEFT JOIN LATERAL (SELECT service_name, task_name FROM runs WHERE id = r.parent_run_id OFFSET 0) p ON true
     WHERE ${cut} AND r.started_at >= ${windowStart}::timestamptz
-      AND r.brand_ids @> ARRAY[${brandId}]::text[]
+      AND r.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
       ${kind ? sql`AND ${KIND_SQL[kind]}` : sql``}
     ORDER BY r.started_at DESC, r.id DESC
     LIMIT ${limit}
@@ -353,7 +363,7 @@ export async function readBrandLedgerRuns(
   });
   // A full page continues just before its oldest run; a short one continues before the window.
   const full = rows.length === limit;
-  const counts = beforeId ? null : await windowCounts(brandId, windowStart, before);
+  const counts = beforeId ? null : await windowCounts(brandId, windowStart, before, orgId);
   return {
     kind,
     counts,
@@ -374,14 +384,14 @@ export async function readBrandLedgerRuns(
  */
 const countsCache = new Map<string, { at: number; value: NonNullable<BrandLedgerRunsPage["counts"]> | null; pending: boolean }>();
 
-async function windowCounts(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]> | null> {
-  const key = `${brandId}|${since.slice(0, 15)}`; // 10-min buckets: a window sliding with "now" reuses its count
+async function windowCounts(brandId: string, since: string, until: string, orgId: string | null): Promise<NonNullable<BrandLedgerRunsPage["counts"]> | null> {
+  const key = `${brandId}|${orgId ?? "*"}|${since.slice(0, 15)}`; // 10-min buckets: a window sliding with "now" reuses its count
   const hit = countsCache.get(key);
   if (hit?.value && Date.now() - hit.at < 10 * 60_000) return hit.value;
   if (!hit?.pending) {
     const entry = { at: hit?.at ?? 0, value: hit?.value ?? null, pending: true };
     countsCache.set(key, entry);
-    countWindow(brandId, since, until)
+    countWindow(brandId, since, until, orgId)
       .then((value) => countsCache.set(key, { at: Date.now(), value, pending: false }))
       .catch((err) => {
         entry.pending = false;
@@ -392,7 +402,8 @@ async function windowCounts(brandId: string, since: string, until: string): Prom
   return hit?.value ?? null;
 }
 
-async function countWindow(brandId: string, since: string, until: string): Promise<NonNullable<BrandLedgerRunsPage["counts"]>> {
+async function countWindow(brandId: string, since: string, until: string, orgId: string | null): Promise<NonNullable<BrandLedgerRunsPage["counts"]>> {
+  const orgCut = orgId ? sql`AND r.organization_id = ${orgId}::uuid` : sql``;
   const [c] = await statsDb.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
     return (await tx.execute(sql`
@@ -403,7 +414,7 @@ async function countWindow(brandId: string, since: string, until: string): Promi
       FROM runs r
       CROSS JOIN LATERAL (SELECT ${MADE} AS made) x
       WHERE r.started_at < ${until}::timestamptz AND r.started_at >= ${since}::timestamptz
-        AND r.brand_ids @> ARRAY[${brandId}]::text[]
+        AND r.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
     `)) as any[];
   });
   return { since, until, all: Number(c.all), made: Number(c.made), running: Number(c.running), none: Number(c.none) };
