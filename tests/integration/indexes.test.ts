@@ -50,14 +50,27 @@ describe("Database indexes", () => {
     expect(result[0].indexdef).toContain("status");
   });
 
-  it("has the feature_slug + brand_ids covering index on runs (migration 0030)", async () => {
-    const result = await sql`
-      SELECT indexname, indexdef FROM pg_indexes
-      WHERE tablename = 'runs' AND indexname = 'idx_runs_feature_brands'
-    `;
-    expect(result).toHaveLength(1);
-    expect(result[0].indexdef).toContain("feature_slug");
-    expect(result[0].indexdef).toContain("brand_ids");
+  // Migration 0094 (BOX-DISK-1101): never scanned in prod, or a leading prefix of a kept index.
+  it("dropped the unused and redundant indexes (migration 0094)", async () => {
+    const dropped = [
+      "idx_runs_feature_brands", "idx_rle_event_type", "idx_run_events_service_created",
+      "idx_cle_run_occurred", "idx_runs_goal_org", "idx_runs_audience", "idx_runs_brand_profile",
+      "idx_runs_costs_projected", "idx_runs_costs_audience", "idx_runs_costs_goal",
+      "idx_runs_costs_brand_profile", "idx_rle_idempotency", "idx_runs_campaign",
+      "idx_runs_feature_slug", "idx_runs_org_service", "idx_runs_costs_status",
+    ];
+    const result = await sql`SELECT indexname FROM pg_indexes WHERE indexname = ANY(${dropped})`;
+    expect(result.map((r) => r.indexname)).toEqual([]);
+  });
+
+  it("keeps the indexes that serve the dropped ones' reads (migration 0094)", async () => {
+    const kept = [
+      "idx_runs_campaign_started", "idx_runs_feature_org", "idx_runs_org_service_task_status",
+      "idx_runs_costs_run_agg", "idx_runs_brand_ids", "idx_run_campaign_entries_campaign_started",
+      "idx_runs_costs_org_no_campaign", "idx_rle_run_occurred", "idx_cle_event_type",
+    ];
+    const result = await sql`SELECT indexname FROM pg_indexes WHERE indexname = ANY(${kept})`;
+    expect(result.map((r) => r.indexname).sort()).toEqual([...kept].sort());
   });
 
   it("has the created_at index on runs_costs for budget queries", async () => {

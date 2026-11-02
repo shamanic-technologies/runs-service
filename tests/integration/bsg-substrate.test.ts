@@ -131,9 +131,11 @@ describe("B/S/G substrate — Phase 1", () => {
       }
     });
 
-    it("partial index idx_runs_costs_projected exists and is partial", async () => {
+    // idx_runs_costs_projected was dropped in migration 0094 (never scanned: run_id reads use
+    // idx_runs_costs_run_agg); the org-level projected SUM keeps its own partial index.
+    it("partial index idx_runs_costs_org_projected exists and is partial", async () => {
       const result = await db.execute(sql`
-        SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_runs_costs_projected'
+        SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_runs_costs_org_projected'
       `);
       const row = (result as any[])[0];
       expect(row).toBeDefined();

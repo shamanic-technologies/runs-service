@@ -659,6 +659,13 @@
       "when": 1783669600000,
       "tag": "0093_support_effective_stops_at_outcome",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1783756000000,
+      "tag": "0094_drop_unused_indexes",
+      "breakpoints": true
     }
   ]
 }

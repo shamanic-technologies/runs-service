@@ -26,32 +26,22 @@ export const runs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("idx_runs_org_service").on(table.organizationId, table.serviceName),
     // GET /v1/runs?serviceName&taskName&status (campaign-service's "is this campaign running?"
     // gate check, migration 0085): equality on all four, not a heap walk of the org's service runs.
     index("idx_runs_org_service_task_status").on(table.organizationId, table.serviceName, table.taskName, table.status),
     // Covering index for the de-joined per-UTC-day run counts read by
     // GET /public/stats/runs (migration 0030) — index-only scan, no heap.
     index("idx_runs_started_status").on(table.startedAt, table.status),
-    // Covering index for the per-brand cross-org cost aggregation (migration 0030).
-    // INCLUDE (id, brand_ids) is applied in the hand-authored migration; drizzle's
-    // index builder can't express INCLUDE, so it is omitted here.
-    index("idx_runs_feature_brands").on(table.featureSlug),
     index("idx_runs_parent").on(table.parentRunId),
     index("idx_runs_brand_ids").using("gin", table.brandIds),
-    index("idx_runs_campaign").on(table.campaignId),
     // Newest-first runs of ONE campaign (migration 0036). Serves GET /v1/runs?campaignIds=
     // as a per-member top-N walk, so a campaign family of any age answers in O(members x limit).
     index("idx_runs_campaign_started").on(table.campaignId, sql`${table.startedAt} DESC`),
-    index("idx_runs_feature_slug").on(table.featureSlug),
     index("idx_runs_feature_org").on(table.featureSlug, table.organizationId),
     // Covering index for the org-scoped brand reads (GET /v1/stats/costs, migration 0039).
     // INCLUDE (started_at, campaign_id, workflow_slug, brand_ids, audience_id, id) is in the
     // hand-authored migration; drizzle's index builder can't express INCLUDE.
     index("idx_runs_org_feature_cover").on(table.organizationId, table.featureSlug),
-    index("idx_runs_goal_org").on(table.goal, table.organizationId),
-    index("idx_runs_brand_profile").on(table.brandProfileId),
-    index("idx_runs_audience").on(table.audienceId),
     uniqueIndex("idx_runs_idempotency_key")
       .on(table.idempotencyKey)
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
@@ -104,11 +94,7 @@ export const runsCosts = pgTable(
   },
   (table) => [
     index("idx_runs_costs_run_agg").on(table.runId, table.status, table.totalCostInUsdCents, table.quantity),
-    index("idx_runs_costs_status").on(table.runId, table.status),
     index("idx_runs_costs_created_at").on(table.createdAt),
-    index("idx_runs_costs_goal").on(table.goal),
-    index("idx_runs_costs_brand_profile").on(table.brandProfileId),
-    index("idx_runs_costs_audience").on(table.audienceId),
     // Partial covering index for org-level platform-spend SUMs (migration 0029).
     // INCLUDE (total/net cost) is applied in the hand-authored migration; drizzle's
     // index builder can't express INCLUDE, so it is intentionally omitted here.
@@ -205,7 +191,6 @@ export const runEvents = pgTable(
   },
   (table) => [
     index("idx_run_events_run_created").on(table.runId, table.createdAt),
-    index("idx_run_events_service_created").on(table.service, table.createdAt),
     // Serves the dashboard launch-progress poll: GET /v1/events?campaignId=X
     // ORDER BY created_at DESC. Without it, the campaignId filter falls back to a
     // seq scan + sort over the full bronze log (millions of rows) — the slow read
@@ -237,7 +222,6 @@ export const runLifecycleEvents = pgTable(
   },
   (table) => [
     index("idx_rle_run_occurred").on(table.runId, table.occurredAt),
-    index("idx_rle_event_type").on(table.eventType, table.occurredAt),
   ]
 );
 
@@ -258,7 +242,6 @@ export const costLifecycleEvents = pgTable(
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("idx_cle_run_occurred").on(table.runId, table.occurredAt),
     index("idx_cle_event_type").on(table.eventType, table.occurredAt),
   ]
 );
