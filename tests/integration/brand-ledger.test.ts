@@ -129,6 +129,26 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     expect(produced).toEqual({ email_found: 2, email_checked: 2 });
   });
 
+  it("LEDGER-BRAND-SINCE-1106: with no since, the books start on the brand's own first spend day, totals unchanged", async () => {
+    // The fleet's first day is at least 60 days back (firstLedgerDay's floor); B1 first spent yesterday, B2 today.
+    const all = await request(app).get(`/internal/brands/${B1}/ledger`).set(getInternalAuthHeaders());
+    expect(all.status).toBe(200);
+    expect(all.body.since).toBe(YESTERDAY);
+    expect(all.body.until).toBe(TODAY);
+    expect(all.body.daysMissing.filter((d: string) => d < YESTERDAY)).toEqual([]);
+    expect(all.body.complete).toBe(true);
+    const ranged = await request(app).get(`/internal/brands/${B1}/ledger?since=${YESTERDAY}&until=${TODAY}`).set(getInternalAuthHeaders());
+    expect(all.body.books).toEqual(ranged.body.books);
+    const wide = await request(app).get(`/internal/brands/${B1}/ledger?since=${addDays(TODAY, -60)}&until=${TODAY}`).set(getInternalAuthHeaders());
+    expect(wide.body.books).toEqual(all.body.books); // nothing before the brand's first day
+    expect((await request(app).get(`/internal/brands/${B2}/ledger`).set(getInternalAuthHeaders())).body.since).toBe(TODAY);
+    // A brand that never spent: one empty day, today.
+    const none = await request(app).get(`/internal/brands/brand-p4-ledger-never/ledger`).set(getInternalAuthHeaders());
+    expect([none.body.since, none.body.until]).toEqual([TODAY, TODAY]);
+    // An until before the brand's first day: since = until, never an inverted range.
+    expect((await request(app).get(`/internal/brands/${B2}/ledger?until=${YESTERDAY}`).set(getInternalAuthHeaders())).body.since).toBe(YESTERDAY);
+  });
+
   it("refuses an unknown parameter and a bad range", async () => {
     expect((await request(app).get(`/internal/brands/${B1}/ledger?brand=x`).set(getInternalAuthHeaders())).status).toBe(400);
     expect((await request(app).get(`/internal/brands/${B1}/ledger?since=${TODAY}&until=${YESTERDAY}`).set(getInternalAuthHeaders())).status).toBe(400);

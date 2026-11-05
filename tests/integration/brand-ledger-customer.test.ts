@@ -121,6 +121,17 @@ describe("GET /v1/brands/:brandId/ledger (+ /runs): a brand's books for the call
     expect(occs(all.body)).toEqual({ email_found: 3, email_checked: 2 });
   });
 
+  it("LEDGER-BRAND-SINCE-1106: with no since, each org's books start on ITS first spend day on the brand", async () => {
+    const a = await customer(ORG_A, "/ledger");
+    const b = await customer(ORG_B, "/ledger");
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(a.body.since).toBe(YESTERDAY);
+    expect(b.body.since).toBe(TODAY); // org B first spent on the brand today
+    expect((await staff("/ledger")).body.since).toBe(YESTERDAY);
+    expect(a.body.books).toEqual((await customer(ORG_A, `/ledger?${range}`)).body.books);
+    expect(b.body.books).toEqual((await customer(ORG_B, `/ledger?${range}`)).body.books);
+  });
+
   it("serves no vendor figure in either customer body (the staff body keeps it)", async () => {
     const [all, books, runs] = await Promise.all([
       staff(`/ledger?${range}`),
