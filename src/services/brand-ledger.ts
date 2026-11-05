@@ -99,6 +99,27 @@ function books(r: any): BrandBooks {
   return { production: produced, standardCharged, reuseGain, producedNone, support, undeclared, abnormal, spend, difference, balanced };
 }
 
+/**
+ * Default `since` of a brand's books (LEDGER-BRAND-SINCE-1106): the brand's OWN first spend day, never the
+ * fleet's. The fleet's first day (2026-02-02) made a brand born 2026-10-27 list ~270 days it never lived
+ * as "not computed yet". Read from the consumption rollup (migration 0090: counted actual/refunded cost
+ * rows per cost row's UTC day x run's brand_ids, ~13k rows, ms): the same rows and the same day the ledger
+ * allocates. Stamp and rows in ONE statement. `orgId` (customer twin) keeps that org's rows only.
+ * Returns null while the rollup is not stamped (the caller keeps the fleet's first day: a wider range,
+ * same totals) and `until` for a brand with no spend at all (one empty day).
+ */
+export async function firstBrandSpendDay(brandId: string, orgId: string | null, until: string): Promise<string | null> {
+  const orgCut = orgId ? sql`AND g.organization_id = ${orgId}::uuid` : sql``;
+  const [row] = (await statsDb.execute(sql`
+    SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = 'consumption_day') AS ready,
+      (SELECT to_char(min(g.day), 'YYYY-MM-DD') FROM stats_rollup_consumption_day g
+        WHERE g.n > 0 AND g.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}) AS first
+  `)) as any[];
+  if (!row.ready) return null;
+  const first = row.first as string | null;
+  return first === null || first > until ? until : first;
+}
+
 /** The money columns every books row needs, from one scan of the brand's stored days. */
 const BOOKS_SELECT = sql.raw(
   [

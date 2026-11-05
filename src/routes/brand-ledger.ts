@@ -4,7 +4,7 @@ import { requireApiKey, requireInternalAuth } from "../middleware/auth.js";
 import { addDays, utcDay, type Money } from "../services/outcome-ledger.js";
 import { firstOutcomeCostDay, MAX_RANGE_DAYS } from "../services/outcome-cost-totals.js";
 import { ledgerBackfillState, startLedgerBackfill } from "../services/outcome-ledger.js";
-import { BRAND_RUN_KINDS, type BrandRunKind, BRAND_RUNS_MAX_LIMIT, readBrandLedgerCached, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
+import { BRAND_RUN_KINDS, type BrandRunKind, BRAND_RUNS_MAX_LIMIT, firstBrandSpendDay, readBrandLedgerCached, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
 import { OUTCOME_UUID_RE } from "../schemas.js";
 
 const router = Router();
@@ -32,10 +32,15 @@ const wireBooks = (b: BrandBooks, wire: Wire) => ({
 
 const validDay = (d: string) => DAY_RE.test(d) && utcDay(new Date(`${d}T00:00:00Z`)) === d;
 
+async function defaultSince(brandId: string, orgId: string | null, until: string): Promise<string> {
+  const [fleetFirst, brandFirst] = await Promise.all([firstOutcomeCostDay(), firstBrandSpendDay(brandId, orgId, until)]);
+  return brandFirst === null || brandFirst < fleetFirst ? fleetFirst : brandFirst;
+}
+
 /**
  * GET /internal/brands/:brandId/ledger?since&until — the brand's books: standard cost charged,
  * reuse gain, spend of runs producing none, abnormal loss and the runs spend, reconciled to the
- * cent, over the range and per UTC day (stored days only; default since inception to today).
+ * cent, over the range and per UTC day (stored days only; default since the brand's first spend day to today).
  */
 async function ledgerHandler(req: Request, res: Response, orgId: string | null, wire: Wire) {
   try {
@@ -51,11 +56,13 @@ async function ledgerHandler(req: Request, res: Response, orgId: string | null, 
     }
     const q = req.query as Record<string, string | undefined>;
     const until = q.until ?? utcDay(new Date());
-    const since = q.since ?? (await firstOutcomeCostDay());
-    if (!validDay(since) || !validDay(until)) {
+    if (!validDay(until) || (q.since !== undefined && !validDay(q.since))) {
       res.status(400).json({ error: "since/until must be YYYY-MM-DD" });
       return;
     }
+    // Default since = the brand's own first spend day (in the caller's org for the customer twin), capped
+    // to the read's range like the fleet default; the fleet's first day only while the rollup is unstamped.
+    const since = q.since ?? (await defaultSince(brandId, orgId, until));
     if (since > until) {
       res.status(400).json({ error: "since must be <= until" });
       return;
