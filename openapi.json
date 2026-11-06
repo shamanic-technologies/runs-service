@@ -4248,9 +4248,10 @@
               "recorded",
               "redated",
               "performer_stated",
+              "performer_corrected",
               "already_recorded"
             ],
-            "description": "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
+            "description": "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); performer_corrected = already recorded with ANOTHER performer, the run's own service corrected it (batch `correctPerformer` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
           }
         },
         "required": [
@@ -4306,9 +4307,10 @@
           "crm",
           "tracker",
           "mailbox",
-          "organic"
+          "organic",
+          "platform"
         ],
-        "description": "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted)."
+        "description": "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted); platform = our own system did the work on its own (a timer sweep, a background refill: no script and no person of the client involved; name = the service that ran it, e.g. human-service)."
       },
       "OutcomeConflictResponse": {
         "type": "object",
@@ -4595,6 +4597,10 @@
             "type": "integer",
             "description": "Served only when the call states a performer (see DeclareRunOutcomesResponse)."
           },
+          "performerCorrectedCount": {
+            "type": "integer",
+            "description": "Served only when a run of the call states correctPerformer: occurrences whose different performer was corrected (status performer_corrected)."
+          },
           "runs": {
             "type": "array",
             "items": {
@@ -4621,6 +4627,9 @@
                   }
                 },
                 "redatedCount": {
+                  "type": "integer"
+                },
+                "performerCorrectedCount": {
                   "type": "integer"
                 }
               },
@@ -4761,6 +4770,10 @@
                   ],
                   "description": "BACKFILL (declaring the outcomes of a PAST run): the occurrences' effective declaration time. Absent = now (on time, unchanged). `run_started_at` = the run's own start (the usual backfill value), or an ISO instant between the run's start and now (e.g. the producer's own row timestamp); out of bounds = 400. Every rule keys on this effective time, never on when the call arrives: consumption resolution (a backfilled `lead_found` of August is the input of an August `message_sent` consumption: declare BOTH sides with their past time, the producer first or in the same call), which consumption of an occurrence is the first (paid) one and which are reuses, and the UTC day an occurrence is counted on in the stored series. The cost an occurrence carries always lands on the UTC days of its run's cost rows. Every stored day the declaration moves (ledger check, coverage, outcome cost totals) is recomputed by the refresher (every 15 min, a 10-min budget per tick, recent days first, then days never computed, then moved ones; `daysMissing` / `complete` say when a range is not stored yet); a recompute with the same declarations gives the same figures (allocation v1 unchanged). Days are stored back to the first day of spend (2026-02-02 in prod). Idempotent like any declaration: re-running a backfill returns `already_recorded` and writes nothing (an occurrence already recorded keeps its stored time). For volume: POST /v1/platform-runs/outcomes/batch (up to 500 runs, 1000 occurrences per call). RECORDED PAST FACT (MEETING-DATED-OCCURRENCES-1024): on a SPEND-FREE run (no cost row and no child run, e.g. lead-service `outcome-recording`, a production order that only states a fact reached in the past: a meeting booked in May recorded today) the ISO instant may be ANY past time, BEFORE the run's own start: the occurrence then counts on the day the fact happened (outcome-costs `until` includes it). Only the run's own service may (x-service-name = the run's service; else 403 `not_run_owner` on the one-run doors, 422 `not_run_owner` on the batch). From then on the run takes no cost and no child run (409 `run_holds_dated_facts`): spend is never back-dated, and a run with spend keeps the [start, now] bound.",
                   "example": "run_started_at"
+                },
+                "correctPerformer": {
+                  "type": "boolean",
+                  "description": "CORRECT A PERFORMER (PERFORMER-CORRECT-1107; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY carrying ANOTHER performer takes the one stated here (status `performer_corrected`), instead of the 409 performer_conflict a plain re-statement gets. One bronze `outcomes.performer_corrected` event per run keeps the previous performer (history never lost). Same performer = already_recorded; no stored performer = performer_stated as usual; not yet recorded = recorded. Needs a performer on at least one produced occurrence."
                 },
                 "redate": {
                   "type": "boolean",
@@ -16198,10 +16211,10 @@
           {
             "schema": {
               "type": "string",
-              "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known)."
+              "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic, platform), or `none` (no performer known)."
             },
             "required": false,
-            "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known).",
+            "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic, platform), or `none` (no performer known).",
             "name": "performerKind",
             "in": "query"
           },

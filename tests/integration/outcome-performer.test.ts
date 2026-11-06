@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import { sql } from "drizzle-orm";
-import { createTestApp, getInternalAuthHeaders, getPlatformAuthHeaders } from "../helpers/test-app.js";
+import { createTestApp, getAuthHeaders, getInternalAuthHeaders, getPlatformAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb, insertTestRun } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 
@@ -121,6 +121,61 @@ describe("OUTCOME-PERFORMER-1106: who performed each outcome occurrence", () => 
       SELECT COUNT(*)::int AS n FROM outcome_declaration_events WHERE run_id = ${run.id}::uuid AND event_type = 'outcomes.performer_stated'
     `)) as any[];
     expect(ev.n).toBe(1);
+  });
+
+  it("platform (our own system, on its own) is stored, served and filterable on every door; workflowSlug refused", async () => {
+    const run = await recording();
+    const platform = { kind: "platform", name: "human-service" };
+    const res = await declare(run.id, { produced: [lead("lead_found", "P1", platform)] });
+    expect(res.status).toBe(201);
+    expect(res.body.occurrences[0]).toMatchObject({ status: "recorded", performer: platform });
+    const viaBatch = await batch({ runs: [{ runId: run.id, produced: [lead("lead_found", "P2", { kind: "platform" })] }] });
+    expect(viaBatch.status).toBe(201);
+    const runDoor = await request(app)
+      .post(`/v1/runs/${run.id}/outcomes`)
+      .set(getAuthHeaders({ orgId: ORG }))
+      .send({ produced: [lead("lead_found", "P3", platform)] });
+    expect(runDoor.status).toBe(201);
+    expect(await stored(run.id)).toEqual(expect.arrayContaining([
+      { outcome_key: "lead_found", subject_id: "P1", performer_kind: "platform", performer_workflow_slug: null, performer_name: "human-service" },
+      { outcome_key: "lead_found", subject_id: "P2", performer_kind: "platform", performer_workflow_slug: null, performer_name: null },
+      { outcome_key: "lead_found", subject_id: "P3", performer_kind: "platform", performer_workflow_slug: null, performer_name: "human-service" },
+    ]));
+    const served = await occurrences(`orgId=${ORG}&performerKind=platform`);
+    expect(served.map((o) => o.subjectId).sort()).toEqual(["P1", "P2", "P3"]);
+    expect(served.find((o) => o.subjectId === "P1").performer).toEqual({ kind: "platform", workflowSlug: null, name: "human-service", basis: "stated" });
+    const refused = await declare(run.id, { produced: [lead("lead_found", "P4", { kind: "platform", workflowSlug: "x" })] });
+    expect(refused.status).toBe(400);
+  });
+
+  it("correctPerformer: the run's own service corrects a different performer, history kept; anyone else 422; plain re-statement 409", async () => {
+    const run = await insertTestRun({ organizationId: ORG, serviceName: "human-service", taskName: "audience-refill", status: "completed" });
+    const built = (performer: unknown) => ({ outcomeKey: "lead_found", subjectService: "human-service", subjectId: "A1", performer });
+    expect((await batch({ runs: [{ runId: run.id, produced: [built({ kind: "client_team" })] }] }, "human-service")).status).toBe(201);
+
+    const plain = await batch({ runs: [{ runId: run.id, produced: [built({ kind: "platform", name: "human-service" })] }] }, "human-service");
+    expect(plain.status).toBe(409);
+
+    const foreign = await batch({ runs: [{ runId: run.id, correctPerformer: true, produced: [built({ kind: "platform" })] }] }, "lead-service");
+    expect(foreign.status).toBe(422);
+    expect(foreign.body.details.invalid[0]).toMatchObject({ runId: run.id, reason: "not_run_owner" });
+
+    const noPerformer = await batch({ runs: [{ runId: run.id, correctPerformer: true, produced: [{ outcomeKey: "lead_found", subjectService: "human-service", subjectId: "A1" }] }] }, "human-service");
+    expect(noPerformer.status).toBe(400);
+
+    const fix = await batch({ runs: [{ runId: run.id, correctPerformer: true, produced: [built({ kind: "platform", name: "human-service" })] }] }, "human-service");
+    expect(fix.status).toBe(201);
+    expect(fix.body).toMatchObject({ performerCorrectedCount: 1, alreadyRecordedCount: 0 });
+    expect(fix.body.runs[0].occurrences[0]).toMatchObject({ status: "performer_corrected", performer: { kind: "platform", name: "human-service" } });
+    expect((await stored(run.id))[0]).toMatchObject({ performer_kind: "platform", performer_name: "human-service" });
+    const [ev] = (await db.execute(sql`
+      SELECT payload FROM outcome_declaration_events WHERE run_id = ${run.id}::uuid AND event_type = 'outcomes.performer_corrected'
+    `)) as any[];
+    expect(ev.payload.items[0]).toMatchObject({ performer_kind: "platform", previous_performer_kind: "client_team", previous_performer_name: null });
+
+    const replay = await batch({ runs: [{ runId: run.id, correctPerformer: true, produced: [built({ kind: "platform", name: "human-service" })] }] }, "human-service");
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ performerCorrectedCount: 0, alreadyRecordedCount: 1 });
   });
 
   it("only the run's owner or a service that declared on it states a performer on recorded occurrences", async () => {
