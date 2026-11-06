@@ -33,6 +33,13 @@
 -- and stamped it.
 --
 -- BOOT-WINDOW SAFE. One empty table, one index on it, functions, triggers.
+-- LOCKS. CREATE TRIGGER takes SHARE ROW EXCLUSIVE on runs / runs_costs: readers
+-- never wait, writers queue behind it. No DROP TRIGGER IF EXISTS (it takes ACCESS
+-- EXCLUSIVE, i.e. waits behind the multi-minute stats readers and blocks every
+-- read queued after it). lock_timeout bounds the wait: a busy tick fails the boot,
+-- the deploy rolls back and the next tick retries.
+SET LOCAL lock_timeout = '10s';
+--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS stats_rollup_cost_name_audience_day (
   campaign_id text,
@@ -243,18 +250,12 @@ END;
 $$ LANGUAGE plpgsql;
 --> statement-breakpoint
 
-DROP TRIGGER IF EXISTS stats_rollup_cna_run_update ON runs;
---> statement-breakpoint
 CREATE TRIGGER stats_rollup_cna_run_update
   AFTER UPDATE OF campaign_id, started_at, organization_id, brand_ids, feature_slug, workflow_slug, audience_id ON runs
   FOR EACH ROW EXECUTE FUNCTION stats_rollup_cna_on_run();
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS stats_rollup_cna_run_delete ON runs;
---> statement-breakpoint
 CREATE TRIGGER stats_rollup_cna_run_delete BEFORE DELETE ON runs
   FOR EACH ROW EXECUTE FUNCTION stats_rollup_cna_on_run();
---> statement-breakpoint
-DROP TRIGGER IF EXISTS stats_rollup_cna_cost_write ON runs_costs;
 --> statement-breakpoint
 CREATE TRIGGER stats_rollup_cna_cost_write
   AFTER INSERT OR DELETE OR UPDATE OF run_id, cost_name, audience_id, status, quantity, total_cost_in_usd_cents, net_cost_in_usd_cents ON runs_costs
