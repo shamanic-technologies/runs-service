@@ -71,8 +71,10 @@ export interface BrandLedger {
   brandId: string;
   since: string;
   until: string;
-  /** Days not stored under the current allocation, or stale: out of every figure. */
+  /** Days never stored under the current allocation: out of every figure. */
   daysMissing: string[];
+  /** Stored days a fact recorded since will move: served at their last computed figures until the refresher recomputes them. */
+  daysStale: string[];
   complete: boolean;
   books: BrandBooks;
   days: BrandLedgerDay[];
@@ -134,25 +136,39 @@ const BOOKS_SELECT = sql.raw(
   ].join(",\n    "),
 );
 
-/** Stored days usable for a read: computed under the current allocation, with the state ladder, not stale. */
-async function usableDays(since: string, until: string): Promise<{ usable: string[]; missing: string[] }> {
+/**
+ * Stored days usable for a read: computed under the current allocation, with the state ladder. A STALE day
+ * (a fact recorded after it was computed) is served at its last computed figures and listed in daysStale,
+ * never dropped (LEDGER-BRAND-SINCE-1106-B): instantly's later sends declare on runs charged days earlier
+ * (email-send-step-2/3, 2026-10-21..11-03), which re-staled every one of those days within minutes of each
+ * recompute, so a brand that spent $315 read $0 with every day "missing". Each stored day balances on its
+ * own, so the books stay exact as of each day's computation; only a day never stored is missing.
+ */
+async function usableDays(since: string, until: string): Promise<{ usable: string[]; missing: string[]; stale: string[] }> {
   const rows = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs AND state_ladder AND state_inputs AND our_factory
       AND day BETWEEN ${since}::date AND ${until}::date
   `)) as any[];
   const stored = new Set(rows.map((r) => r.day as string));
-  const stale = new Set(await staleDaysIn(since, until));
+  const staleSet = new Set(await staleDaysIn(since, until));
   const usable: string[] = [];
   const missing: string[] = [];
-  for (let d = since; d <= until; d = addDays(d, 1)) (stored.has(d) && !stale.has(d) ? usable : missing).push(d);
-  return { usable, missing };
+  const stale: string[] = [];
+  for (let d = since; d <= until; d = addDays(d, 1)) {
+    if (!stored.has(d)) missing.push(d);
+    else {
+      usable.push(d);
+      if (staleSet.has(d)) stale.push(d);
+    }
+  }
+  return { usable, missing, stale };
 }
 
 export async function readBrandLedger(brandId: string, since: string, until: string, orgId: string | null = null): Promise<BrandLedger> {
   const orgCut = orgId ? sql`AND d.organization_id = ${orgId}::uuid` : sql``;
-  const { usable, missing } = await usableDays(since, until);
-  const empty: BrandLedger = { brandId, since, until, daysMissing: missing, complete: missing.length === 0, books: books({}), days: [], outcomes: [] };
+  const { usable, missing, stale } = await usableDays(since, until);
+  const empty: BrandLedger = { brandId, since, until, daysMissing: missing, daysStale: stale, complete: missing.length === 0, books: books({}), days: [], outcomes: [] };
   if (usable.length === 0) return empty;
   // ONE scan of the brand's stored rows (~6 s for the busiest brand on the loaded box): per day, and per
   // produced outcome. The range total is the exact sum of the days (decimal.js, no float).

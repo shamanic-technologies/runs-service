@@ -3606,10 +3606,11 @@ export const BrandLedgerResponseSchema = z
     brandId: z.string(),
     since: z.string(),
     until: z.string(),
-    complete: z.boolean(),
-    daysMissing: z.array(z.string()).openapi({ description: "Days not stored under the current allocation, or stale: out of every figure." }),
+    complete: z.boolean().openapi({ description: "Every day of the range is stored (daysMissing empty); stale days count as stored." }),
+    daysMissing: z.array(z.string()).openapi({ description: "Days never stored under the current allocation: out of every figure." }),
+    daysStale: z.array(z.string()).openapi({ description: "Stored days a fact recorded since (a later declaration, mark, void or late spend) will move: in the figures at their last computed values, recomputed by the refresher every 15 min." }),
     books: z.object(BrandBooksFields),
-    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...BrandBooksFields })).openapi({ description: "The same books per UTC day: every stored day of the range (a day with no row of the brand at zero); a day in daysMissing is absent." }),
+    days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...BrandBooksFields })).openapi({ description: "The same books per UTC day: every stored day of the range (a day with no row of the brand at zero); a day in daysMissing is absent, a day in daysStale is present." }),
     outcomes: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number(), cost: LedgerMoneySchema })).openapi({ description: "Occurrences the brand's runs declared produced over the range, and their production cost." }),
   })
   .openapi("BrandLedgerResponse");
@@ -3619,7 +3620,7 @@ registry.registerPath({
   path: "/internal/brands/{brandId}/ledger",
   summary: "The books of one brand, reconciled to the cent, over a range and per UTC day (service-auth)",
   description:
-    "standardCharged - reuseGain + producedNone + abnormal = spend, each side summed apart from the stored days (outcome_cost_days), exact decimals on gross, net, vendor and unpriced gross. A co-branded run counts under each of its brands. Default range: since inception to today (400 days max).",
+    "standardCharged - reuseGain + producedNone + abnormal = spend, each side summed apart from the stored days (outcome_cost_days), exact decimals on gross, net, vendor and unpriced gross. A co-branded run counts under each of its brands. Default range: since the brand's own first spend day (in the caller's org for the customer twin) to today (400 days max).",
   security: [{ apiKey: [] }],
   request: {
     params: z.object({ brandId: z.string() }),
@@ -3715,8 +3716,9 @@ export const CustomerBrandLedgerResponseSchema = z
     brandId: z.string(),
     since: z.string(),
     until: z.string(),
-    complete: z.boolean(),
-    daysMissing: z.array(z.string()).openapi({ description: "Days not stored under the current allocation, or stale: out of every figure." }),
+    complete: z.boolean().openapi({ description: "Every day of the range is stored (daysMissing empty); stale days count as stored." }),
+    daysMissing: z.array(z.string()).openapi({ description: "Days never stored under the current allocation: out of every figure." }),
+    daysStale: z.array(z.string()).openapi({ description: "Stored days a fact recorded since (a later declaration, mark, void or late spend) will move: in the figures at their last computed values, recomputed by the refresher every 15 min." }),
     books: z.object(CustomerBrandBooksFields),
     days: z.array(z.object({ day: z.string(), occurrences: z.number(), ...CustomerBrandBooksFields })).openapi({ description: "The same books per UTC day: every stored day of the range (a day with no row of the org's brand runs at zero); a day in daysMissing is absent." }),
     outcomes: z.array(z.object({ outcomeKey: z.string(), occurrences: z.number(), cost: CustomerLedgerMoneySchema })).openapi({ description: "Occurrences the org's runs of the brand declared produced over the range, and their production cost." }),
@@ -3728,7 +3730,7 @@ registry.registerPath({
   path: "/v1/brands/{brandId}/ledger",
   summary: "The books of one brand for the caller's org, reconciled to the cent, over a range and per UTC day",
   description:
-    "Customer twin of GET /internal/brands/{brandId}/ledger restricted to the org in x-org-id (required): only the stored rows of that org's runs (the run's org, the same run whose brands tag the row), so on a brand held by several orgs each org reads its own books and the orgs' books add up to the staff read. Same rule: standardCharged - reuseGain + producedNone + abnormal = spend, exact. Billed gross + net only: no vendor figure. Default range: since inception to today (400 days max).",
+    "Customer twin of GET /internal/brands/{brandId}/ledger restricted to the org in x-org-id (required): only the stored rows of that org's runs (the run's org, the same run whose brands tag the row), so on a brand held by several orgs each org reads its own books and the orgs' books add up to the staff read. Same rule: standardCharged - reuseGain + producedNone + abnormal = spend, exact. Billed gross + net only: no vendor figure. Default range: since the brand's own first spend day (in the caller's org for the customer twin) to today (400 days max).",
   security: [{ apiKey: [] }],
   request: {
     headers: z.object({ "x-org-id": z.string().uuid() }),

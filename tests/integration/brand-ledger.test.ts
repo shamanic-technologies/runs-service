@@ -200,4 +200,26 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
       .set(getInternalAuthHeaders());
     expect(p2.body.counts).toBeNull();
   });
+
+  it("LEDGER-BRAND-SINCE-1106-B: a stale stored day keeps its books (listed in daysStale), only a day never stored is missing", async () => {
+    clearBrandLedgerCache();
+    const before = await request(app).get(`/internal/brands/${B1}/ledger`).set(getInternalAuthHeaders());
+    // A send declared now on a run charged yesterday (instantly's later steps): yesterday's stored figures predate it.
+    const late = await insertTestRun({ organizationId: ORG, serviceName: "svc", taskName: "late-send", status: "completed", brandIds: ["brand-p4-ledger-3"], startedAt: new Date(`${YESTERDAY}T02:00:00Z`) });
+    await declare(late.id, { produced: [occ("email_found", "p9")] });
+    clearBrandLedgerCache();
+    const after = await request(app).get(`/internal/brands/${B1}/ledger`).set(getInternalAuthHeaders());
+    expect(after.status).toBe(200);
+    expect(after.body.since).toBe(YESTERDAY);
+    expect(after.body.daysStale).toContain(YESTERDAY);
+    expect(after.body.daysMissing).toEqual([]);
+    expect(after.body.complete).toBe(true);
+    expect(after.body.books).toEqual(before.body.books);
+    expect(after.body.days.map((d: any) => d.day)).toEqual([YESTERDAY, TODAY]);
+    expect(new Decimal(after.body.books.spend.grossCents).gt(0)).toBe(true);
+    // A day never stored stays missing and out of the figures.
+    const wide = await request(app).get(`/internal/brands/${B1}/ledger?since=${addDays(YESTERDAY, -1)}`).set(getInternalAuthHeaders());
+    expect(wide.body.daysMissing.every((d: string) => d < YESTERDAY)).toBe(true);
+    expect(wide.body.books).toEqual(before.body.books);
+  });
 });
