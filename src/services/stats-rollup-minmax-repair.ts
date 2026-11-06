@@ -1,7 +1,7 @@
 import { sql as defaultSql } from "../db/index.js";
 
 /**
- * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052, 0053).
+ * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052, 0053, 0096).
  *
  * A removed run (a delete, or a key move: transfer-brand, feature-slug correction, a
  * workflow re-tag) cannot shrink a group's min/max without a scan, so its trigger marks
@@ -59,6 +59,15 @@ const SPECS: RollupSpec[] = [
   {
     table: "stats_rollup_org_task",
     keys: ["organization_id", "service_name", "task_name", "campaign_id"],
+    bucket: {
+      column: "day",
+      lower: `({b}::timestamp AT TIME ZONE 'UTC')`,
+      upper: `(({b} + 1)::timestamp AT TIME ZONE 'UTC')`,
+    },
+  },
+  {
+    table: "stats_rollup_task_day",
+    keys: ["organization_id", "campaign_id", "feature_slug", "service_name", "task_name", "brand_ids"],
     bucket: {
       column: "day",
       lower: `({b}::timestamp AT TIME ZONE 'UTC')`,
