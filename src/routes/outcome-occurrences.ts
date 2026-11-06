@@ -229,10 +229,11 @@ async function handleDeclareBatch(req: Request, res: Response) {
       if (headerOrg && run.organization_id !== headerOrg) return invalid.push({ runId: e.runId, reason: "run_org_mismatch" }), null;
       if (run.voided) return invalid.push({ runId: e.runId, reason: "run_outcomes_voided" }), null;
       if (e.redate && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `run belongs to ${run.service_name}` }), null;
+      if (e.correctPerformer && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `a performer is corrected by the run's own service (${run.service_name}) only` }), null;
       const effective = effectiveDeclaredAt(e.occurredAt, run);
       if ("error" in effective) return invalid.push({ runId: e.runId, reason: "invalid_occurred_at", message: effective.error }), null;
       if (effective.beforeStart && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `a fact dated before the run started is stated by the run's own service (${run.service_name}) only` }), null;
-      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, runServiceName: run.service_name as string, declaredAt: effective.at, redate: e.redate === true };
+      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, runServiceName: run.service_name as string, declaredAt: effective.at, redate: e.redate === true, correctPerformer: e.correctPerformer === true };
     });
     if (invalid.length > 0) {
       res.status(422).json({ error: "invalid_runs", details: { invalid } });
@@ -240,6 +241,7 @@ async function handleDeclareBatch(req: Request, res: Response) {
     }
     const results = await declareOutcomesBatch(declarations.filter((d) => d !== null));
     const performerStated = entries.some((e) => statesPerformer(e));
+    const correcting = entries.some((e) => e.correctPerformer === true);
     const out = entries.map((e, i) => {
       const count = (st: string) => results[i].filter((o) => o.status === st).length;
       return {
@@ -248,16 +250,18 @@ async function handleDeclareBatch(req: Request, res: Response) {
         redatedCount: count("redated"),
         alreadyRecordedCount: count("already_recorded"),
         ...(performerStated && { performerStatedCount: count("performer_stated") }),
+        ...(correcting && { performerCorrectedCount: count("performer_corrected") }),
         occurrences: results[i],
       };
     });
-    const sum = (k: "recordedCount" | "redatedCount" | "alreadyRecordedCount" | "performerStatedCount") => out.reduce((n, r) => n + ((r as any)[k] ?? 0), 0);
-    res.status(sum("recordedCount") + sum("redatedCount") + sum("performerStatedCount") > 0 ? 201 : 200).json({
+    const sum = (k: "recordedCount" | "redatedCount" | "alreadyRecordedCount" | "performerStatedCount" | "performerCorrectedCount") => out.reduce((n, r) => n + ((r as any)[k] ?? 0), 0);
+    res.status(sum("recordedCount") + sum("redatedCount") + sum("performerStatedCount") + sum("performerCorrectedCount") > 0 ? 201 : 200).json({
       allocationVersion: ALLOCATION_VERSION,
       recordedCount: sum("recordedCount"),
       redatedCount: sum("redatedCount"),
       alreadyRecordedCount: sum("alreadyRecordedCount"),
       ...(performerStated && { performerStatedCount: sum("performerStatedCount") }),
+      ...(correcting && { performerCorrectedCount: sum("performerCorrectedCount") }),
       runs: out,
     });
   } catch (err) {

@@ -41,7 +41,7 @@ describe("OpenAPI", () => {
     expect(res.body.paths["/internal/stats/outcome-coverage"]?.get).toBeDefined();
     expect(Object.keys(res.body.components.schemas.OutcomeOccurrenceInput.properties).sort()).toEqual(["outcomeKey", "performer", "quantity", "subjectId", "subjectService"]);
     // OUTCOME-PERFORMER-1106: who performed each occurrence, and the grouped read.
-    expect(res.body.components.schemas.OutcomePerformerKind.enum).toEqual(["script", "client_team", "crm", "tracker", "mailbox", "organic"]);
+    expect(res.body.components.schemas.OutcomePerformerKind.enum).toEqual(["script", "client_team", "crm", "tracker", "mailbox", "organic", "platform"]);
     expect(res.body.paths["/internal/stats/outcome-performers"]?.get).toBeDefined();
   });
 

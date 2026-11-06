@@ -1136,12 +1136,15 @@ resolution keys on declaration time.
 Owner 2026-11-06: « la provenance est clé pour les stats, mais doit être stockée de façon généralisée, par outcome ». This is
 the ONE store of provenance; never a consumer-side copy (lead-service source tags), never a fake run / workflow slug per performer.
 - **Wire**: `produced[].performer` on both declare doors and the batch: `{kind, workflowSlug?, name?}`, kind `script | client_team |
-  crm | tracker | mailbox | organic`; `workflowSlug` REQUIRED for `script` (the slug its runs carry) and refused otherwise; `name` =
+  crm | tracker | mailbox | organic | platform` (`platform` = our own system did it on its own, a timer sweep or background refill,
+  no script and no client person; `name` = the service that ran it, e.g. `human-service`; owner 2026-11-07); `workflowSlug` REQUIRED for `script` (the slug its runs carry) and refused otherwise; `name` =
   optional tool/channel label (≤128, never a person). Strict object (400 on anything else). Not on `consumed` (stripped like quantity).
 - **Stored once** (`run_outcomes.performer_kind/_workflow_slug/_name`, from bronze: `outcomes.declared` items, or a new
   `outcomes.performer_stated` event that fills a NULL only): an occurrence recorded without one takes it once (status
   `performer_stated`, `performerStatedCount`); same performer (or one stating less: no name) = `already_recorded`; another one = 409
-  `performer_conflict`, never overwritten. On a recorded occurrence only the run's owner or a service that declared on the run may
+  `performer_conflict`, never overwritten silently: only the run's OWN service corrects it, explicitly, with batch
+  `correctPerformer: true` (status `performer_corrected`, bronze `outcomes.performer_corrected` keeps the previous value,
+  migration 0098; anyone else 422 `not_run_owner`; PERFORMER-PLATFORM-1107). On a recorded occurrence only the run's owner or a service that declared on the run may
   state it (403 `not_run_declarer`). Absent = byte-identical answers (`performer` / `performerStatedCount` keys only when stated).
 - **Effective performer on reads** (`src/services/outcome-performers.ts`, one SQL fragment): stated > (produced on a run with a
   workflow) `script` + the run's workflow, basis `run_workflow` > null. Served as `performer` on `/internal/outcome-occurrences`

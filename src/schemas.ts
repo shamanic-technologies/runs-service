@@ -2683,10 +2683,10 @@ const DECIMAL_STRING_RE = /^\d+(\.\d{1,6})?$/;
 const UUID_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome).
-export const OUTCOME_PERFORMER_KINDS = ["script", "client_team", "crm", "tracker", "mailbox", "organic"] as const;
+export const OUTCOME_PERFORMER_KINDS = ["script", "client_team", "crm", "tracker", "mailbox", "organic", "platform"] as const;
 export const OutcomePerformerKindEnum = z.enum(OUTCOME_PERFORMER_KINDS).openapi("OutcomePerformerKind", {
   description:
-    "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted).",
+    "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted); platform = our own system did the work on its own (a timer sweep, a background refill: no script and no person of the client involved; name = the service that ran it, e.g. human-service).",
 });
 export const PERFORMER_WORKFLOW_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 export const OutcomePerformerSchema = z
@@ -2766,6 +2766,10 @@ export const DeclareOutcomesBatchRequestSchema = z
         z.object({
           runId: z.string().regex(UUID_STRING_RE).openapi({ description: "The run (production order) these occurrences are declared on; each run at most once per call." }),
           ...declareRunOutcomesShape,
+          correctPerformer: z.boolean().optional().openapi({
+            description:
+              "CORRECT A PERFORMER (PERFORMER-CORRECT-1107; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY carrying ANOTHER performer takes the one stated here (status `performer_corrected`), instead of the 409 performer_conflict a plain re-statement gets. One bronze `outcomes.performer_corrected` event per run keeps the previous performer (history never lost). Same performer = already_recorded; no stored performer = performer_stated as usual; not yet recorded = recorded. Needs a performer on at least one produced occurrence.",
+          }),
           redate: z.boolean().optional().openapi({
             description:
               "RE-DATE (requires occurredAt; x-service-name must be the run's own service, else 422 not_run_owner): an occurrence of this run ALREADY recorded with a LATER effective time (declared through today's door before occurredAt existed) moves EARLIER to occurredAt (status `redated`). Never later: an occurrence already at or before occurredAt stays `already_recorded`. Occurrences not yet recorded are recorded at occurredAt as usual. Only the occurrences listed in this entry move: to give each occurrence of one run its own time, send one batch call per time (a run appears once per call). On a SPEND-FREE run (no cost row, no child run) occurredAt may be before the run's start (see occurredAt: a recorded past fact moved to the day it happened, the SAME occurrence, never a second one). Same quantity rule (another quantity = 409). One bronze `outcomes.redated` event per run keeps the previous time; the refresher recomputes every stored day the move touches. Idempotent: a replay finds nothing to move.",
@@ -2775,6 +2779,7 @@ export const DeclareOutcomesBatchRequestSchema = z
       .min(1)
       .max(OUTCOMES_BATCH_MAX_RUNS),
   })
+  .refine((b) => b.runs.every((r) => !r.correctPerformer || (r.produced ?? []).some((o) => o.performer !== undefined)), { message: "correctPerformer needs a performer on at least one produced occurrence" })
   .refine((b) => b.runs.every((r) => occurrenceCount(r) >= 1), { message: "each run states at least one produced or consumed occurrence" })
   .refine((b) => b.runs.reduce((n, r) => n + occurrenceCount(r), 0) <= 1000, { message: "at most 1000 occurrences per call" })
   .refine((b) => new Set(b.runs.map((r) => r.runId.toLowerCase())).size === b.runs.length, { message: "a run stated twice in the batch" })
@@ -2794,7 +2799,7 @@ export const DeclaredOutcomeOccurrenceSchema = z
     declaredAt: z.string().datetime().openapi({ description: "Effective declaration time: what every rule keys on (= recordedAt on time; the stated past instant for a backfill)." }),
     recordedAt: z.string().datetime().openapi({ description: "When runs-service recorded it." }),
     performer: OutcomePerformerSchema.optional().openapi({ description: "Served only when the call states a performer for this occurrence: the performer now STORED on it." }),
-    status: z.enum(["recorded", "redated", "performer_stated", "already_recorded"]).openapi({ description: "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
+    status: z.enum(["recorded", "redated", "performer_stated", "performer_corrected", "already_recorded"]).openapi({ description: "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); performer_corrected = already recorded with ANOTHER performer, the run's own service corrected it (batch `correctPerformer` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
   })
   .openapi("DeclaredOutcomeOccurrence");
 
@@ -2926,7 +2931,8 @@ export const DeclareOutcomesBatchResponseSchema = z
     alreadyRecordedCount: z.number().int(),
     redatedCount: z.number().int(),
     performerStatedCount: z.number().int().optional().openapi({ description: "Served only when the call states a performer (see DeclareRunOutcomesResponse)." }),
-    runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true }).extend({ redatedCount: z.number().int() })),
+    performerCorrectedCount: z.number().int().optional().openapi({ description: "Served only when a run of the call states correctPerformer: occurrences whose different performer was corrected (status performer_corrected)." }),
+    runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true }).extend({ redatedCount: z.number().int(), performerCorrectedCount: z.number().int().optional() })),
   })
   .openapi("DeclareOutcomesBatchResponse");
 
@@ -3173,7 +3179,7 @@ export const ListOutcomeOccurrencesQuerySchema = z.object({
   direction: OutcomeDirectionEnum.optional(),
   declaredAfter: z.string().datetime({ offset: true }).optional().openapi({ description: "Inclusive." }),
   declaredBefore: z.string().datetime({ offset: true }).optional().openapi({ description: "Exclusive." }),
-  performerKind: z.string().optional().openapi({ description: "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known)." }),
+  performerKind: z.string().optional().openapi({ description: "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic, platform), or `none` (no performer known)." }),
   cursor: z.string().uuid().optional().openapi({ description: "nextCursor of the previous page." }),
   limit: z.string().optional().openapi({ description: "1..1000, default 500." }),
 });
