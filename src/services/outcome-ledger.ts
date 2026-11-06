@@ -64,6 +64,7 @@ import { fetchVendorCostCatalog, type VendorCostVersion } from "./vendor-costs.j
 import { versionWindowsSql } from "../routes/vendor-costs.js";
 import type { SupportFunction } from "./support-marks.js";
 import { fetchAllocationInputs, syncLeadStates, type AllocationInputs } from "./lead-states.js";
+import { EFFECTIVE_PERFORMER_COLUMNS, EFFECTIVE_PERFORMER_KIND_SQL, effectivePerformerOf, type EffectivePerformer } from "./outcome-performers.js";
 
 export const ALLOCATION_VERSION = 6;
 export const ALLOCATION_RULE =
@@ -83,6 +84,38 @@ export interface OccurrenceInput {
   subjectService: string;
   subjectId: string;
   quantity?: string | number;
+  /** PRODUCED only (OUTCOME-PERFORMER-1106): who performed it. */
+  performer?: OutcomePerformer;
+}
+
+/** OUTCOME-PERFORMER-1106: who performed an occurrence (see OutcomePerformerSchema). */
+export interface OutcomePerformer {
+  kind: string;
+  workflowSlug?: string;
+  name?: string;
+}
+
+/** The performer stored on a run_outcomes row, or null (none stated). */
+export function storedPerformerOf(row: { performer_kind?: string | null; performer_workflow_slug?: string | null; performer_name?: string | null }): OutcomePerformer | null {
+  if (!row.performer_kind) return null;
+  return {
+    kind: row.performer_kind,
+    ...(row.performer_workflow_slug != null && { workflowSlug: row.performer_workflow_slug }),
+    ...(row.performer_name != null && { name: row.performer_name }),
+  };
+}
+
+/**
+ * A stated performer agrees with the stored one when kind and script are the same
+ * and the stated name (if any) is the stored name. Stating less (no name) than
+ * what is stored is a replay; stating anything else is a conflict, never an overwrite.
+ */
+export function samePerformer(stored: OutcomePerformer, stated: OutcomePerformer): boolean {
+  return (
+    stored.kind === stated.kind &&
+    (stored.workflowSlug ?? null) === (stated.workflowSlug ?? null) &&
+    (stated.name === undefined || stated.name === (stored.name ?? undefined))
+  );
 }
 
 export function normalizeOutcomeKey(key: string): string {
@@ -104,13 +137,29 @@ export interface DeclaredOccurrence {
   declaredAt: string;
   /** When runs-service recorded it. */
   recordedAt: string;
-  /** recorded = written now; redated = was recorded later than the stated time, moved earlier to it; already_recorded = nothing written. */
-  status: "recorded" | "redated" | "already_recorded";
+  /** Served only when the call stated a performer for this occurrence: the one now stored. */
+  performer?: OutcomePerformer;
+  /** recorded = written now; redated = was recorded later than the stated time, moved earlier to it; performer_stated = recorded with no performer, this call stated it; already_recorded = nothing written. */
+  status: "recorded" | "redated" | "performer_stated" | "already_recorded";
 }
 
 export class OutcomeDeclarationConflictError extends Error {
   constructor(public readonly conflicts: Array<{ runId: string; direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; storedQuantity: string; statedQuantity: string }>) {
     super("outcome occurrence already recorded with another quantity");
+  }
+}
+
+/** OUTCOME-PERFORMER-1106: an occurrence already carries ANOTHER performer (409, nothing written). */
+export class OutcomePerformerConflictError extends Error {
+  constructor(public readonly conflicts: Array<{ runId: string; direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; storedPerformer: OutcomePerformer; statedPerformer: OutcomePerformer }>) {
+    super("performer_conflict");
+  }
+}
+
+/** OUTCOME-PERFORMER-1106: a performer stated on recorded occurrences of a run the caller neither owns nor declared on. */
+export class NotRunDeclarerError extends Error {
+  constructor(public readonly runIds: string[]) {
+    super("not_run_declarer");
   }
 }
 
@@ -178,6 +227,12 @@ export interface DeclarationEntry {
   runId: string;
   body: { produced?: OccurrenceInput[]; consumed?: OccurrenceInput[] };
   sourceService: string | null;
+  /**
+   * The run's own service. When set and the call states a performer on an
+   * occurrence ALREADY recorded, the caller (sourceService) must own the run or
+   * have declared on it (else NotRunDeclarerError).
+   */
+  runServiceName?: string;
   /** Effective declaration time (backfill); null = on time. */
   declaredAt: Date | null;
   /**
@@ -197,7 +252,7 @@ export interface DeclarationEntry {
  */
 export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise<DeclaredOccurrence[][]> {
   const statedPerEntry = entries.map((e) => {
-    const stated: Array<{ direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; quantity: string }> = [];
+    const stated: Array<{ direction: Direction; outcomeKey: string; subjectService: string; subjectId: string; quantity: string; performer: OutcomePerformer | null }> = [];
     const seen = new Set<string>();
     for (const direction of ["produced", "consumed"] as const) {
       for (const item of e.body[direction] ?? []) {
@@ -207,6 +262,8 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
           subjectService: item.subjectService,
           subjectId: item.subjectId,
           quantity: new Decimal(item.quantity ?? 1).toFixed(6),
+          // Produced only (the request schema refuses it on consumed).
+          performer: direction === "produced" && item.performer ? item.performer : null,
         };
         const k = occurrenceKeyOf(direction, o);
         if (seen.has(k)) throw new DuplicateOccurrenceInBodyError(`${e.runId}|${k}`);
@@ -222,7 +279,8 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
   const readExisting = async () => {
     const rows = (await db.execute(sql`
       SELECT id, run_id, direction, outcome_key, subject_service, subject_id, quantity::text AS quantity,
-             declared_at, COALESCE(recorded_at, declared_at) AS recorded_at
+             declared_at, COALESCE(recorded_at, declared_at) AS recorded_at,
+             performer_kind, performer_workflow_slug, performer_name
       FROM run_outcomes WHERE run_id = ANY(${`{${runIds.join(",")}}`}::uuid[])
     `)) as any[];
     return new Map(rows.map((r) => [`${r.run_id}|${occurrenceKeyOf(r.direction, { outcomeKey: r.outcome_key, subjectService: r.subject_service, subjectId: r.subject_id })}`, r]));
@@ -244,6 +302,15 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
         })),
     );
     if (conflicts.length > 0) throw new OutcomeDeclarationConflictError(conflicts);
+    const performerConflicts = entries.flatMap((e, i) =>
+      statedPerEntry[i].flatMap((o) => {
+        const row = existing.get(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`);
+        const stored = row ? storedPerformerOf(row) : null;
+        if (!o.performer || !stored || samePerformer(stored, o.performer)) return [];
+        return [{ runId: e.runId, direction: o.direction, outcomeKey: o.outcomeKey, subjectService: o.subjectService, subjectId: o.subjectId, storedPerformer: stored, statedPerformer: o.performer }];
+      }),
+    );
+    if (performerConflicts.length > 0) throw new OutcomePerformerConflictError(performerConflicts);
   };
 
   let existing = await readExisting();
@@ -268,6 +335,32 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
       },
     }];
   });
+  // OUTCOME-PERFORMER-1106: an occurrence recorded with NO performer takes the stated one, once.
+  const performerKeys = new Set<string>();
+  const performerEntries = entries.map((e, i) => ({
+    e,
+    items: statedPerEntry[i]
+      .map((o) => ({ o, key: `${e.runId}|${occurrenceKeyOf(o.direction, o)}` }))
+      .filter(({ o, key }) => o.performer && existing.has(key) && !existing.get(key).performer_kind),
+  })).filter((x) => x.items.length > 0);
+  const notDeclarer: string[] = [];
+  for (const { e } of performerEntries) {
+    if (e.runServiceName === undefined || e.sourceService === e.runServiceName) continue;
+    if (!e.sourceService || !(await hasDeclaredOnRun(e.runId, e.sourceService))) notDeclarer.push(e.runId);
+  }
+  if (notDeclarer.length > 0) throw new NotRunDeclarerError(notDeclarer);
+  const performerEvents = performerEntries.map(({ e, items }) => {
+    for (const { key } of items) performerKeys.add(key);
+    return {
+      runId: e.runId,
+      eventType: "outcomes.performer_stated",
+      sourceService: e.sourceService,
+      payload: {
+        allocationVersion: ALLOCATION_VERSION,
+        items: items.map(({ o, key }) => ({ id: existing.get(key).id, ...performerPayload(o.performer!) })),
+      },
+    };
+  });
   const events = entries.flatMap((e, i) => {
     const fresh = statedPerEntry[i].filter((o) => !existing.has(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`));
     if (fresh.length === 0) return [];
@@ -287,13 +380,14 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
           subject_id: o.subjectId,
           quantity: o.quantity,
           ...(e.declaredAt && { declared_at: e.declaredAt.toISOString() }),
+          ...(o.performer && performerPayload(o.performer)),
         })),
       },
     }];
   });
 
-  if (events.length + redates.length > 0) {
-    await db.insert(outcomeDeclarationEvents).values([...events, ...redates]);
+  if (events.length + redates.length + performerEvents.length > 0) {
+    await db.insert(outcomeDeclarationEvents).values([...events, ...redates, ...performerEvents]);
     existing = await readExisting();
     // A concurrent call may have recorded the same occurrence with another quantity.
     assertNoConflict(existing);
@@ -312,10 +406,16 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
         quantity: new Decimal(row.quantity).toFixed(6),
         declaredAt: new Date(row.declared_at).toISOString(),
         recordedAt: new Date(row.recorded_at).toISOString(),
-        status: freshKeys.has(key) ? "recorded" : redatedKeys.has(key) ? "redated" : "already_recorded",
+        ...(o.performer && { performer: storedPerformerOf(row) ?? undefined }),
+        status: freshKeys.has(key) ? "recorded" : redatedKeys.has(key) ? "redated" : performerKeys.has(key) ? "performer_stated" : "already_recorded",
       };
     }),
   );
+}
+
+/** Bronze item fields of a stated performer (projected into run_outcomes.performer_*, migration 0097). */
+function performerPayload(p: OutcomePerformer) {
+  return { performer_kind: p.kind, performer_workflow_slug: p.workflowSlug ?? null, performer_name: p.name ?? null };
 }
 
 /** One run's declaration (see declareOutcomesBatch). */
@@ -324,8 +424,9 @@ export async function declareRunOutcomes(
   body: { produced?: OccurrenceInput[]; consumed?: OccurrenceInput[] },
   sourceService: string | null,
   declaredAt: Date | null = null,
+  runServiceName?: string,
 ): Promise<DeclaredOccurrence[]> {
-  const [out] = await declareOutcomesBatch([{ runId, body, sourceService, declaredAt }]);
+  const [out] = await declareOutcomesBatch([{ runId, body, sourceService, declaredAt, runServiceName }]);
   return out;
 }
 
@@ -2533,6 +2634,8 @@ export interface OccurrenceFilters {
   declaredBefore?: string;
   cursor?: string;
   limit: number;
+  /** Effective performer kind (OUTCOME-PERFORMER-1106); `none` = no performer known. */
+  performerKind?: string;
 }
 
 export interface OccurrenceWithCost {
@@ -2559,6 +2662,8 @@ export interface OccurrenceWithCost {
     audienceId: string | null;
   };
   /** PRODUCED: its production (= standard) cost. CONSUMED: null. */
+  /** OUTCOME-PERFORMER-1106: who performed it (stated, else the declaring run's workflow for a produced occurrence), null = unknown. */
+  performer: EffectivePerformer | null;
   cost: Money | null;
   /** PRODUCED: `cost` per (UTC day, org) of the spend it carries (sums exactly to cost). CONSUMED: null. */
   costSlices: CostSlice[] | null;
@@ -2802,12 +2907,15 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
   if (f.declaredAfter) where.push(sql`o.declared_at >= ${f.declaredAfter}::timestamptz`);
   if (f.declaredBefore) where.push(sql`o.declared_at < ${f.declaredBefore}::timestamptz`);
   if (f.orgId) where.push(sql`r.organization_id = ${f.orgId}::uuid`);
+  if (f.performerKind === "none") where.push(sql`${EFFECTIVE_PERFORMER_KIND_SQL} IS NULL`);
+  else if (f.performerKind) where.push(sql`${EFFECTIVE_PERFORMER_KIND_SQL} = ${f.performerKind}`);
   if (f.cursor) where.push(sql`o.id > ${f.cursor}::uuid`);
   const whereSql = where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
   const rows = (await statsDb.execute(sql`
     SELECT o.id, o.run_id, r.organization_id, r.service_name, r.task_name, o.direction, o.outcome_key,
            o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at,
-           COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id
+           COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id,
+           ${EFFECTIVE_PERFORMER_COLUMNS}
     FROM run_outcomes o JOIN runs r ON r.id = o.run_id
     ${whereSql}
     ORDER BY o.id
@@ -2852,6 +2960,7 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
         featureSlug: r.feature_slug ?? null,
         audienceId: r.audience_id ?? null,
       },
+      performer: effectivePerformerOf(r),
       cost: r.direction === "produced" ? costs.get(r.id) ?? null : null,
       costSlices: r.direction === "produced" ? sliced.get(r.id)?.slices ?? null : null,
       consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs, consumingKeys.get(r.run_id) ?? []) : null,

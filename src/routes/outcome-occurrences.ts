@@ -10,7 +10,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema } from "../schemas.js";
+import { OUTCOME_PERFORMER_KINDS, MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -26,6 +26,8 @@ import {
   ledgerCheckInputOf,
   declareRunOutcomes,
   declareOutcomesBatch,
+  OutcomePerformerConflictError,
+  NotRunDeclarerError,
   supportTotal,
   type SupportByFunction,
   effectiveDeclaredAt,
@@ -37,6 +39,13 @@ import {
   type Money,
 } from "../services/outcome-ledger.js";
 import { VendorCostCatalogError } from "../services/vendor-costs.js";
+import {
+  DEFAULT_PERFORMER_GROUP_BY,
+  PERFORMER_STAT_DIMENSIONS,
+  readPerformerStats,
+  TooManyPerformerGroupsError,
+  type PerformerStatDimension,
+} from "../services/outcome-performers.js";
 import {
   MAX_SUPPORT_MARK_RUNS,
   SUPPORT_FUNCTIONS,
@@ -120,13 +129,16 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       }
     }
     if (await isRunOutcomesVoided(id)) throw new RunOutcomesVoidedError(id);
-    const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name, effective.at);
+    const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name, effective.at, run.service_name);
     const recordedCount = occurrences.filter((o) => o.status === "recorded").length;
-    res.status(recordedCount > 0 ? 201 : 200).json({
+    const performerStatedCount = occurrences.filter((o) => o.status === "performer_stated").length;
+    res.status(recordedCount + performerStatedCount > 0 ? 201 : 200).json({
       runId: id,
       allocationVersion: ALLOCATION_VERSION,
       recordedCount,
-      alreadyRecordedCount: occurrences.length - recordedCount,
+      alreadyRecordedCount: occurrences.length - recordedCount - performerStatedCount,
+      // OUTCOME-PERFORMER-1106: only when the call states a performer (byte-identical otherwise).
+      ...(statesPerformer(parsed.data) && { performerStatedCount }),
       occurrences,
     });
   } catch (err) {
@@ -134,8 +146,19 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
   }
 }
 
+/** True when a declaration body states a performer on any occurrence (OUTCOME-PERFORMER-1106). */
+const statesPerformer = (b: { produced?: Array<{ performer?: unknown }> }) => (b.produced ?? []).some((o) => o.performer !== undefined);
+
 /** The declaration errors both doors share (one run, a batch). */
 function declarationError(res: Response, err: unknown) {
+  if (err instanceof OutcomePerformerConflictError) {
+    res.status(409).json({ error: "performer_conflict", conflicts: err.conflicts });
+    return;
+  }
+  if (err instanceof NotRunDeclarerError) {
+    res.status(403).json({ error: "not_run_declarer", details: { runIds: err.runIds, message: "a performer is stated on recorded occurrences only by the run's own service or a service that declared on it" } });
+    return;
+  }
   if (err instanceof DuplicateOccurrenceInBodyError) {
     res.status(400).json({ error: "Invalid request", details: err.message });
     return;
@@ -209,23 +232,32 @@ async function handleDeclareBatch(req: Request, res: Response) {
       const effective = effectiveDeclaredAt(e.occurredAt, run);
       if ("error" in effective) return invalid.push({ runId: e.runId, reason: "invalid_occurred_at", message: effective.error }), null;
       if (effective.beforeStart && run.service_name !== req.platformServiceName) return invalid.push({ runId: e.runId, reason: "not_run_owner", message: `a fact dated before the run started is stated by the run's own service (${run.service_name}) only` }), null;
-      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, declaredAt: effective.at, redate: e.redate === true };
+      return { runId: e.runId, body: e, sourceService: req.platformServiceName ?? run.service_name, runServiceName: run.service_name as string, declaredAt: effective.at, redate: e.redate === true };
     });
     if (invalid.length > 0) {
       res.status(422).json({ error: "invalid_runs", details: { invalid } });
       return;
     }
     const results = await declareOutcomesBatch(declarations.filter((d) => d !== null));
+    const performerStated = entries.some((e) => statesPerformer(e));
     const out = entries.map((e, i) => {
       const count = (st: string) => results[i].filter((o) => o.status === st).length;
-      return { runId: e.runId, recordedCount: count("recorded"), redatedCount: count("redated"), alreadyRecordedCount: count("already_recorded"), occurrences: results[i] };
+      return {
+        runId: e.runId,
+        recordedCount: count("recorded"),
+        redatedCount: count("redated"),
+        alreadyRecordedCount: count("already_recorded"),
+        ...(performerStated && { performerStatedCount: count("performer_stated") }),
+        occurrences: results[i],
+      };
     });
-    const sum = (k: "recordedCount" | "redatedCount" | "alreadyRecordedCount") => out.reduce((n, r) => n + r[k], 0);
-    res.status(sum("recordedCount") + sum("redatedCount") > 0 ? 201 : 200).json({
+    const sum = (k: "recordedCount" | "redatedCount" | "alreadyRecordedCount" | "performerStatedCount") => out.reduce((n, r) => n + ((r as any)[k] ?? 0), 0);
+    res.status(sum("recordedCount") + sum("redatedCount") + sum("performerStatedCount") > 0 ? 201 : 200).json({
       allocationVersion: ALLOCATION_VERSION,
       recordedCount: sum("recordedCount"),
       redatedCount: sum("redatedCount"),
       alreadyRecordedCount: sum("alreadyRecordedCount"),
+      ...(performerStated && { performerStatedCount: sum("performerStatedCount") }),
       runs: out,
     });
   } catch (err) {
@@ -581,6 +613,10 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
       res.status(400).json({ error: "direction must be produced or consumed" });
       return;
     }
+    if (q.performerKind && q.performerKind !== "none" && !(OUTCOME_PERFORMER_KINDS as readonly string[]).includes(q.performerKind)) {
+      res.status(400).json({ error: `performerKind must be one of ${OUTCOME_PERFORMER_KINDS.join(", ")}, none` });
+      return;
+    }
     const limit = q.limit === undefined ? 500 : Number(q.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
       res.status(400).json({ error: "limit must be an integer 1..1000" });
@@ -595,6 +631,7 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
       direction: q.direction as Direction | undefined,
       declaredAfter: q.declaredAfter,
       declaredBefore: q.declaredBefore,
+      performerKind: q.performerKind,
       cursor: q.cursor,
       limit,
     });
@@ -629,6 +666,56 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
 });
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * OUTCOME-PERFORMER-1106: produced occurrences counted per WHO performed them
+ * (stated performer, else the declaring run's script), groupable with the run's tags.
+ */
+router.get("/internal/stats/outcome-performers", requireInternalAuth, async (req, res) => {
+  try {
+    const q = req.query as Record<string, string | undefined>;
+    const range = parseRange(q, utcDay(new Date()), 30);
+    if (typeof range === "string") {
+      res.status(400).json({ error: range });
+      return;
+    }
+    const groupBy = (csv(q.groupBy) ?? DEFAULT_PERFORMER_GROUP_BY) as PerformerStatDimension[];
+    const unknownDims = groupBy.filter((d) => !(PERFORMER_STAT_DIMENSIONS as readonly string[]).includes(d));
+    if (unknownDims.length > 0 || new Set(groupBy).size !== groupBy.length) {
+      res.status(400).json({ error: `groupBy must be distinct values of ${PERFORMER_STAT_DIMENSIONS.join(", ")}`, details: { unknown: unknownDims } });
+      return;
+    }
+    if (q.orgId && !OUTCOME_UUID_RE.test(q.orgId)) {
+      res.status(400).json({ error: "orgId must be a uuid" });
+      return;
+    }
+    if (q.performerKind && q.performerKind !== "none" && !(OUTCOME_PERFORMER_KINDS as readonly string[]).includes(q.performerKind)) {
+      res.status(400).json({ error: `performerKind must be one of ${OUTCOME_PERFORMER_KINDS.join(", ")}, none` });
+      return;
+    }
+    const out = await readPerformerStats(
+      groupBy,
+      {
+        outcomeKey: q.outcomeKey ? normalizeOutcomeKey(q.outcomeKey) : undefined,
+        orgId: q.orgId,
+        brandId: q.brandId,
+        campaignId: q.campaignId,
+        performerKind: q.performerKind,
+        workflowSlug: q.workflowSlug,
+      },
+      range.since,
+      range.until,
+    );
+    res.json({ since: range.since, until: range.until, groupBy, ...out });
+  } catch (err) {
+    if (err instanceof TooManyPerformerGroupsError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    console.error("[Runs Service] outcome performers read failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 /** since/until as UTC days (inclusive), or an error message. */
 function parseRange(q: Record<string, string | undefined>, defaultUntil: string, defaultSpan: number): { since: string; until: string } | string {
