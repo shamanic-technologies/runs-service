@@ -111,11 +111,18 @@ export async function readOrgTaskGroups(opts: {
       WHERE ${rollupF} AND o.minmax_stale AND o.run_count <> 0
       ${sql.join(boundaryDays, sql` `)}
     ),
+    -- Per live day, fenced (LATERAL + OFFSET 0): with a time bound in liveF and
+    -- ld estimated at ~2 rows, the planner otherwise scanned the org's WHOLE
+    -- bounded history (2.2M runs for f0420eb5) and filtered it against ld, past
+    -- the 30 s statement timeout even with ld empty (2026-11-06, v0.47.135).
     lr AS MATERIALIZED (
-      SELECT r.id, ${dimsOf("r")}, r.started_at
-      FROM ld JOIN runs r
-        ON r.started_at >= ${UTC_DAY_START("ld.d")} AND r.started_at < ${UTC_DAY_START("ld.d + 1")}
-      WHERE ${liveF}
+      SELECT x.* FROM ld CROSS JOIN LATERAL (
+        SELECT r.id, ${dimsOf("r")}, r.started_at
+        FROM runs r
+        WHERE ${liveF}
+          AND r.started_at >= ${UTC_DAY_START("ld.d")} AND r.started_at < ${UTC_DAY_START("ld.d + 1")}
+        OFFSET 0
+      ) x
     ),
     u AS (
       SELECT ${dimsOf("o")}, o.run_count AS n,
