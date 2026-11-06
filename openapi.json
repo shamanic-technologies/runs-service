@@ -4185,6 +4185,10 @@
           "alreadyRecordedCount": {
             "type": "integer"
           },
+          "performerStatedCount": {
+            "type": "integer",
+            "description": "Served only when the call states a performer: occurrences already recorded with none that took the stated one (status performer_stated)."
+          },
           "occurrences": {
             "type": "array",
             "items": {
@@ -4235,14 +4239,18 @@
             "format": "date-time",
             "description": "When runs-service recorded it."
           },
+          "performer": {
+            "$ref": "#/components/schemas/OutcomePerformer"
+          },
           "status": {
             "type": "string",
             "enum": [
               "recorded",
               "redated",
+              "performer_stated",
               "already_recorded"
             ],
-            "description": "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
+            "description": "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)."
           }
         },
         "required": [
@@ -4263,6 +4271,44 @@
           "produced",
           "consumed"
         ]
+      },
+      "OutcomePerformer": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OutcomePerformerKind"
+          },
+          "workflowSlug": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "description": "REQUIRED when kind = script, refused otherwise: the script's workflow slug, exactly as its runs carry it (runs.workflow_slug). The occurrence then reads as that script's output wherever stats group by workflowSlug.",
+            "example": "ai-meeting-booking-v3"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional label of the tool / channel that performed it (e.g. gohighlevel, posthog, gmail). Never a person's address or name.",
+            "example": "gohighlevel"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "description": "Served only when the call states a performer for this occurrence: the performer now STORED on it."
+      },
+      "OutcomePerformerKind": {
+        "type": "string",
+        "enum": [
+          "script",
+          "client_team",
+          "crm",
+          "tracker",
+          "mailbox",
+          "organic"
+        ],
+        "description": "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted)."
       },
       "OutcomeConflictResponse": {
         "type": "object",
@@ -4292,10 +4338,31 @@
                   "type": "string"
                 },
                 "storedQuantity": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Quantity conflict (error `outcome occurrence already recorded with another quantity`)."
                 },
                 "statedQuantity": {
                   "type": "string"
+                },
+                "storedPerformer": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/OutcomePerformer"
+                    },
+                    {
+                      "description": "Performer conflict (error `performer_conflict`): the performer already stored on the occurrence."
+                    }
+                  ]
+                },
+                "statedPerformer": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/OutcomePerformer"
+                    },
+                    {
+                      "description": "PRODUCED only, optional (OUTCOME-PERFORMER-1106): WHO performed this occurrence. Absent = nothing stated (the answer is byte-identical to a declaration without it). Stored once per occurrence: a replay with the same performer (or none) is already_recorded; an occurrence already recorded WITHOUT one takes it once (status performer_stated, on either declare door or the batch); a DIFFERENT performer on an occurrence that has one is a 409 performer_conflict, never overwritten. Never read by cost allocation."
+                    }
+                  ]
                 }
               },
               "required": [
@@ -4303,9 +4370,7 @@
                 "direction",
                 "outcomeKey",
                 "subjectService",
-                "subjectId",
-                "storedQuantity",
-                "statedQuantity"
+                "subjectId"
               ]
             }
           }
@@ -4413,6 +4478,16 @@
             ],
             "description": "PRODUCED only: this occurrence's weight in its run's cost split (default 1 = equal shares). State it only when one output really costs more than another (e.g. tokens written per message). Up to 6 decimals.",
             "example": 1
+          },
+          "performer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/OutcomePerformer"
+              },
+              {
+                "description": "PRODUCED only, optional (OUTCOME-PERFORMER-1106): WHO performed this occurrence. Absent = nothing stated (the answer is byte-identical to a declaration without it). Stored once per occurrence: a replay with the same performer (or none) is already_recorded; an occurrence already recorded WITHOUT one takes it once (status performer_stated, on either declare door or the batch); a DIFFERENT performer on an occurrence that has one is a 409 performer_conflict, never overwritten. Never read by cost allocation."
+              }
+            ]
           }
         },
         "required": [
@@ -4516,6 +4591,10 @@
           "redatedCount": {
             "type": "integer"
           },
+          "performerStatedCount": {
+            "type": "integer",
+            "description": "Served only when the call states a performer (see DeclareRunOutcomesResponse)."
+          },
           "runs": {
             "type": "array",
             "items": {
@@ -4530,6 +4609,10 @@
                 },
                 "alreadyRecordedCount": {
                   "type": "integer"
+                },
+                "performerStatedCount": {
+                  "type": "integer",
+                  "description": "Served only when the call states a performer: occurrences already recorded with none that took the stated one (status performer_stated)."
                 },
                 "occurrences": {
                   "type": "array",
@@ -5293,6 +5376,9 @@
             ],
             "description": "The declaring run's tags (for a produced occurrence: the production tags). Offer = the campaign's (campaign-service). Any customer scope is an exact sum of occurrences over these tags."
           },
+          "performer": {
+            "$ref": "#/components/schemas/EffectiveOutcomePerformer"
+          },
           "cost": {
             "$ref": "#/components/schemas/ProductionCost"
           },
@@ -5419,10 +5505,45 @@
           "declaredAt",
           "recordedAt",
           "tags",
+          "performer",
           "cost",
           "costSlices",
           "consumption"
         ]
+      },
+      "EffectiveOutcomePerformer": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OutcomePerformerKind"
+          },
+          "workflowSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "The script (kind script): the stated workflowSlug, else the declaring run's workflow. Null for every other kind."
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "description": "The stated tool / channel label, null when none was stated."
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "stated",
+              "run_workflow"
+            ],
+            "description": "stated = the declaring service stated it; run_workflow = nothing stated, the occurrence was declared on a run of one of our scripts (kind script, workflowSlug = the run's)."
+          }
+        },
+        "required": [
+          "kind",
+          "workflowSlug",
+          "name",
+          "basis"
+        ],
+        "description": "OUTCOME-PERFORMER-1106: WHO performed it. Null = unknown (nothing stated and no workflow on the declaring run; always null for a consumed occurrence)."
       },
       "ProductionCost": {
         "type": "object",
@@ -5452,6 +5573,121 @@
           "unpricedGrossCents"
         ],
         "description": "PRODUCED: what this occurrence cost to make (its standard cost), under allocation v1, as of now (a cost row written later on its run moves it). CONSUMED: null (see consumption)."
+      },
+      "OutcomePerformerStatsResponse": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string"
+          },
+          "groupBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcomeKey": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "day": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "orgId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "brandId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "campaignId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "featureSlug": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "serviceName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "taskName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "performerKind": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Null = no performer known."
+                },
+                "performerBasis": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "stated",
+                    "run_workflow",
+                    null
+                  ]
+                },
+                "workflowSlug": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "performerName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "count": {
+                  "type": "integer",
+                  "description": "Produced occurrences in the group."
+                },
+                "quantity": {
+                  "type": "string",
+                  "description": "Sum of their quantities, 6-decimal string."
+                }
+              },
+              "required": [
+                "count",
+                "quantity"
+              ],
+              "description": "One row per distinct value of the groupBy dimensions (only those keys are present)."
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer"
+              },
+              "quantity": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "count",
+              "quantity"
+            ],
+            "description": "Every matching occurrence counted ONCE (a co-branded occurrence is under each brand in groups)."
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "groupBy",
+          "groups",
+          "totals"
+        ]
       },
       "LedgerCheckResponse": {
         "type": "object",
@@ -15962,6 +16198,16 @@
           {
             "schema": {
               "type": "string",
+              "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known)."
+            },
+            "required": false,
+            "description": "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known).",
+            "name": "performerKind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "format": "uuid",
               "description": "nextCursor of the previous page."
             },
@@ -16007,6 +16253,139 @@
           },
           "502": {
             "description": "costs-service vendor catalogue unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/outcome-performers": {
+      "get": {
+        "summary": "Produced outcome occurrences per WHO performed them (service-auth)",
+        "description": "OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome). Counts PRODUCED occurrences whose effective declaration time falls in [since, until], grouped by the asked dimensions. The performer is the EFFECTIVE one: what the declaring service stated (POST /v1/runs/{id}/outcomes, /v1/platform-runs/{id}/outcomes, /v1/platform-runs/outcomes/batch: `produced[].performer`), else, for an occurrence declared on a run carrying a workflow, that script (kind script, basis run_workflow), else null (unknown, never guessed). `workflowSlug` therefore groups a script's whole output: what its runs declared AND what other services stated it performed. Counts only: cost allocation never reads the performer (cost per occurrence: /internal/outcome-occurrences). Live off the stored occurrences (no day storage, no staleness). > 5000 groups = 422 too_many_groups, never truncated.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "First UTC day, YYYY-MM-DD (inclusive). Default: until - 29 days."
+            },
+            "required": false,
+            "description": "First UTC day, YYYY-MM-DD (inclusive). Default: until - 29 days.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Last UTC day, YYYY-MM-DD (inclusive). Default: today. Range <= 400 days."
+            },
+            "required": false,
+            "description": "Last UTC day, YYYY-MM-DD (inclusive). Default: today. Range <= 400 days.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma list of: outcomeKey, day (UTC day of the occurrence's effective declaration time = when the fact happened for a recorded past fact), orgId, brandId (a co-branded occurrence counts under EACH brand), campaignId, featureSlug, serviceName, taskName (the DECLARING run's), performerKind, performerBasis, workflowSlug (the SCRIPT: stated workflowSlug, else the declaring run's workflow), performerName. Default outcomeKey,performerKind,workflowSlug."
+            },
+            "required": false,
+            "description": "Comma list of: outcomeKey, day (UTC day of the occurrence's effective declaration time = when the fact happened for a recorded past fact), orgId, brandId (a co-branded occurrence counts under EACH brand), campaignId, featureSlug, serviceName, taskName (the DECLARING run's), performerKind, performerBasis, workflowSlug (the SCRIPT: stated workflowSlug, else the declaring run's workflow), performerName. Default outcomeKey,performerKind,workflowSlug.",
+            "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "outcomeKey",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The declaring run's org."
+            },
+            "required": false,
+            "description": "The declaring run's org.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Effective kind, or `none` (no performer known)."
+            },
+            "required": false,
+            "description": "Effective kind, or `none` (no performer known).",
+            "name": "performerKind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Effective script: every occurrence that script performed, whether declared on its own runs or stated by another service."
+            },
+            "required": false,
+            "description": "Effective script: every occurrence that script performed, whether declared on its own runs or stated by another service.",
+            "name": "workflowSlug",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomePerformerStatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range, groupBy, orgId or performerKind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "too_many_groups",
             "content": {
               "application/json": {
                 "schema": {

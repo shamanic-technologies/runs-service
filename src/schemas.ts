@@ -2682,6 +2682,34 @@ export const SUBJECT_SERVICE_RE = /^[a-z][a-z0-9-]{1,63}$/;
 const DECIMAL_STRING_RE = /^\d+(\.\d{1,6})?$/;
 const UUID_STRING_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome).
+export const OUTCOME_PERFORMER_KINDS = ["script", "client_team", "crm", "tracker", "mailbox", "organic"] as const;
+export const OutcomePerformerKindEnum = z.enum(OUTCOME_PERFORMER_KINDS).openapi("OutcomePerformerKind", {
+  description:
+    "WHO performed the occurrence: script = one of OUR scripts (name it in workflowSlug); client_team = the client's own team (a person of theirs did it); crm = the client's CRM stated it (a form, a stage, a booking its tool recorded); tracker = the brand's website tracker measured it; mailbox = a mailbox received/recorded it (a reply landing, an email event); organic = the organic market (the person came on their own, nobody of ours or theirs acted).",
+});
+export const PERFORMER_WORKFLOW_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+export const OutcomePerformerSchema = z
+  .object({
+    kind: OutcomePerformerKindEnum,
+    workflowSlug: z.string().regex(PERFORMER_WORKFLOW_SLUG_RE).optional().openapi({
+      description: "REQUIRED when kind = script, refused otherwise: the script's workflow slug, exactly as its runs carry it (runs.workflow_slug). The occurrence then reads as that script's output wherever stats group by workflowSlug.",
+      example: "ai-meeting-booking-v3",
+    }),
+    name: z.string().trim().min(1).max(128).optional().openapi({
+      description: "Optional label of the tool / channel that performed it (e.g. gohighlevel, posthog, gmail). Never a person's address or name.",
+      example: "gohighlevel",
+    }),
+  })
+  .strict()
+  .refine((p) => (p.kind === "script") === (p.workflowSlug !== undefined), {
+    message: "performer.workflowSlug is required when kind is script and refused otherwise",
+  })
+  .openapi("OutcomePerformer", {
+    description:
+      "PRODUCED only, optional (OUTCOME-PERFORMER-1106): WHO performed this occurrence. Absent = nothing stated (the answer is byte-identical to a declaration without it). Stored once per occurrence: a replay with the same performer (or none) is already_recorded; an occurrence already recorded WITHOUT one takes it once (status performer_stated, on either declare door or the batch); a DIFFERENT performer on an occurrence that has one is a 409 performer_conflict, never overwritten. Never read by cost allocation.",
+  });
+
 export const OutcomeOccurrenceInputSchema = z
   .object({
     outcomeKey: z.string().regex(OUTCOME_KEY_RE).openapi({
@@ -2702,6 +2730,7 @@ export const OutcomeOccurrenceInputSchema = z
           "PRODUCED only: this occurrence's weight in its run's cost split (default 1 = equal shares). State it only when one output really costs more than another (e.g. tokens written per message). Up to 6 decimals.",
         example: 1,
       }),
+    performer: OutcomePerformerSchema.optional(),
   })
   .openapi("OutcomeOccurrenceInput");
 
@@ -2714,7 +2743,7 @@ const declareRunOutcomesShape = {
     description:
       "The outcome occurrences this run MADE: the run's whole cost (its own cost rows + those of descendants that declare nothing) is split over them. Declare only what was KEPT (a rejected email is not an output: the kept ones carry its cost) and only the run's DECLARED output (a by-product it also caused is not declared: $0).",
   }),
-  consumed: z.array(OutcomeOccurrenceInputSchema.omit({ quantity: true })).optional().openapi({
+  consumed: z.array(OutcomeOccurrenceInputSchema.omit({ quantity: true, performer: true })).optional().openapi({
     description: "The outcome occurrences this run USED as inputs (e.g. the `email_checked` a `message_sent` run sent to). STANDARD COST ON REUSE: each consumption is charged the producing occurrence's production cost; the first consumption of an occurrence is the one its spend paid for, every later one (a lead found for org 1 reused by org 2) is a reuse charged the same price with no new spend (the reuse gain). Resolution: the latest produced occurrence of the same (outcomeKey, subjectService, subjectId) declared at or before the consumption, else the earliest declared later, among those declared before the end of the consumption's UTC day; none = unknown provenance (never $0). Declare the producer first.",
   }),
   occurredAt: OccurredAtSchema.optional(),
@@ -2764,7 +2793,8 @@ export const DeclaredOutcomeOccurrenceSchema = z
     quantity: z.string().openapi({ description: "6-decimal string." }),
     declaredAt: z.string().datetime().openapi({ description: "Effective declaration time: what every rule keys on (= recordedAt on time; the stated past instant for a backfill)." }),
     recordedAt: z.string().datetime().openapi({ description: "When runs-service recorded it." }),
-    status: z.enum(["recorded", "redated", "already_recorded"]).openapi({ description: "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
+    performer: OutcomePerformerSchema.optional().openapi({ description: "Served only when the call states a performer for this occurrence: the performer now STORED on it." }),
+    status: z.enum(["recorded", "redated", "performer_stated", "already_recorded"]).openapi({ description: "recorded = written by this call; redated = already recorded with a later effective time, moved earlier to occurredAt (batch `redate` only); performer_stated = already recorded with no performer, this call stated it (OUTCOME-PERFORMER-1106); already_recorded = the same (run, direction, outcome, subject) was stated before (nothing written)." }),
   })
   .openapi("DeclaredOutcomeOccurrence");
 
@@ -2774,6 +2804,7 @@ export const DeclareRunOutcomesResponseSchema = z
     allocationVersion: z.number().int(),
     recordedCount: z.number().int(),
     alreadyRecordedCount: z.number().int(),
+    performerStatedCount: z.number().int().optional().openapi({ description: "Served only when the call states a performer: occurrences already recorded with none that took the stated one (status performer_stated)." }),
     occurrences: z.array(DeclaredOutcomeOccurrenceSchema),
   })
   .openapi("DeclareRunOutcomesResponse");
@@ -2788,8 +2819,10 @@ export const OutcomeConflictResponseSchema = z
         outcomeKey: z.string(),
         subjectService: z.string(),
         subjectId: z.string(),
-        storedQuantity: z.string(),
-        statedQuantity: z.string(),
+        storedQuantity: z.string().optional().openapi({ description: "Quantity conflict (error `outcome occurrence already recorded with another quantity`)." }),
+        statedQuantity: z.string().optional(),
+        storedPerformer: OutcomePerformerSchema.optional().openapi({ description: "Performer conflict (error `performer_conflict`): the performer already stored on the occurrence." }),
+        statedPerformer: OutcomePerformerSchema.optional(),
       }),
     ),
   })
@@ -2892,6 +2925,7 @@ export const DeclareOutcomesBatchResponseSchema = z
     recordedCount: z.number().int(),
     alreadyRecordedCount: z.number().int(),
     redatedCount: z.number().int(),
+    performerStatedCount: z.number().int().optional().openapi({ description: "Served only when the call states a performer (see DeclareRunOutcomesResponse)." }),
     runs: z.array(DeclareRunOutcomesResponseSchema.omit({ allocationVersion: true }).extend({ redatedCount: z.number().int() })),
   })
   .openapi("DeclareOutcomesBatchResponse");
@@ -3121,6 +3155,15 @@ for (const step of ["preview", "apply"] as const) {
   });
 }
 
+export const EffectivePerformerSchema = z
+  .object({
+    kind: OutcomePerformerKindEnum,
+    workflowSlug: z.string().nullable().openapi({ description: "The script (kind script): the stated workflowSlug, else the declaring run's workflow. Null for every other kind." }),
+    name: z.string().nullable().openapi({ description: "The stated tool / channel label, null when none was stated." }),
+    basis: z.enum(["stated", "run_workflow"]).openapi({ description: "stated = the declaring service stated it; run_workflow = nothing stated, the occurrence was declared on a run of one of our scripts (kind script, workflowSlug = the run's)." }),
+  })
+  .openapi("EffectiveOutcomePerformer");
+
 export const ListOutcomeOccurrencesQuerySchema = z.object({
   runIds: z.string().optional().openapi({ description: "Comma-separated run ids (<= 500)." }),
   subjectService: z.string().optional(),
@@ -3130,6 +3173,7 @@ export const ListOutcomeOccurrencesQuerySchema = z.object({
   direction: OutcomeDirectionEnum.optional(),
   declaredAfter: z.string().datetime({ offset: true }).optional().openapi({ description: "Inclusive." }),
   declaredBefore: z.string().datetime({ offset: true }).optional().openapi({ description: "Exclusive." }),
+  performerKind: z.string().optional().openapi({ description: "OUTCOME-PERFORMER-1106: only occurrences whose EFFECTIVE performer is of this kind (script, client_team, crm, tracker, mailbox, organic), or `none` (no performer known)." }),
   cursor: z.string().uuid().optional().openapi({ description: "nextCursor of the previous page." }),
   limit: z.string().optional().openapi({ description: "1..1000, default 500." }),
 });
@@ -3157,6 +3201,7 @@ export const OutcomeOccurrenceWithCostSchema = z
         audienceId: z.string().nullable(),
       })
       .openapi({ description: "The declaring run's tags (for a produced occurrence: the production tags). Offer = the campaign's (campaign-service). Any customer scope is an exact sum of occurrences over these tags." }),
+    performer: EffectivePerformerSchema.nullable().openapi({ description: "OUTCOME-PERFORMER-1106: WHO performed it. Null = unknown (nothing stated and no workflow on the declaring run; always null for a consumed occurrence)." }),
     cost: ProductionCostSchema.nullable().openapi({ description: "PRODUCED: what this occurrence cost to make (its standard cost), under allocation v1, as of now (a cost row written later on its run moves it). CONSUMED: null (see consumption)." }),
     costSlices: z
       .array(
@@ -3212,6 +3257,68 @@ registry.registerPath({
     400: { description: "No filter, or invalid filter", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "costs-service vendor catalogue unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- WHO performed each occurrence (OUTCOME-PERFORMER-1106) ---
+
+export const OutcomePerformerStatsQuerySchema = z.object({
+  since: z.string().optional().openapi({ description: "First UTC day, YYYY-MM-DD (inclusive). Default: until - 29 days." }),
+  until: z.string().optional().openapi({ description: "Last UTC day, YYYY-MM-DD (inclusive). Default: today. Range <= 400 days." }),
+  groupBy: z.string().optional().openapi({
+    description:
+      "Comma list of: outcomeKey, day (UTC day of the occurrence's effective declaration time = when the fact happened for a recorded past fact), orgId, brandId (a co-branded occurrence counts under EACH brand), campaignId, featureSlug, serviceName, taskName (the DECLARING run's), performerKind, performerBasis, workflowSlug (the SCRIPT: stated workflowSlug, else the declaring run's workflow), performerName. Default outcomeKey,performerKind,workflowSlug.",
+  }),
+  outcomeKey: z.string().optional(),
+  orgId: z.string().uuid().optional().openapi({ description: "The declaring run's org." }),
+  brandId: z.string().optional(),
+  campaignId: z.string().optional(),
+  performerKind: z.string().optional().openapi({ description: "Effective kind, or `none` (no performer known)." }),
+  workflowSlug: z.string().optional().openapi({ description: "Effective script: every occurrence that script performed, whether declared on its own runs or stated by another service." }),
+});
+
+export const OutcomePerformerStatsResponseSchema = z
+  .object({
+    since: z.string(),
+    until: z.string(),
+    groupBy: z.array(z.string()),
+    groups: z.array(
+      z
+        .object({
+          outcomeKey: z.string().nullable().optional(),
+          day: z.string().nullable().optional(),
+          orgId: z.string().nullable().optional(),
+          brandId: z.string().nullable().optional(),
+          campaignId: z.string().nullable().optional(),
+          featureSlug: z.string().nullable().optional(),
+          serviceName: z.string().nullable().optional(),
+          taskName: z.string().nullable().optional(),
+          performerKind: z.string().nullable().optional().openapi({ description: "Null = no performer known." }),
+          performerBasis: z.enum(["stated", "run_workflow"]).nullable().optional(),
+          workflowSlug: z.string().nullable().optional(),
+          performerName: z.string().nullable().optional(),
+          count: z.number().int().openapi({ description: "Produced occurrences in the group." }),
+          quantity: z.string().openapi({ description: "Sum of their quantities, 6-decimal string." }),
+        })
+        .openapi({ description: "One row per distinct value of the groupBy dimensions (only those keys are present)." }),
+    ),
+    totals: z.object({ count: z.number().int(), quantity: z.string() }).openapi({ description: "Every matching occurrence counted ONCE (a co-branded occurrence is under each brand in groups)." }),
+  })
+  .openapi("OutcomePerformerStatsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-performers",
+  summary: "Produced outcome occurrences per WHO performed them (service-auth)",
+  description:
+    "OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome). Counts PRODUCED occurrences whose effective declaration time falls in [since, until], grouped by the asked dimensions. The performer is the EFFECTIVE one: what the declaring service stated (POST /v1/runs/{id}/outcomes, /v1/platform-runs/{id}/outcomes, /v1/platform-runs/outcomes/batch: `produced[].performer`), else, for an occurrence declared on a run carrying a workflow, that script (kind script, basis run_workflow), else null (unknown, never guessed). `workflowSlug` therefore groups a script's whole output: what its runs declared AND what other services stated it performed. Counts only: cost allocation never reads the performer (cost per occurrence: /internal/outcome-occurrences). Live off the stored occurrences (no day storage, no staleness). > 5000 groups = 422 too_many_groups, never truncated.",
+  security: [{ apiKey: [] }],
+  request: { query: OutcomePerformerStatsQuerySchema },
+  responses: {
+    200: { description: "Groups", content: { "application/json": { schema: OutcomePerformerStatsResponseSchema } } },
+    400: { description: "Invalid range, groupBy, orgId or performerKind", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    422: { description: "too_many_groups", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

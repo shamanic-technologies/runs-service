@@ -286,6 +286,11 @@ export const runOutcomes = pgTable(
     declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
     // When runs-service recorded it; NULL on rows before 0060 (= declared_at).
     recordedAt: timestamp("recorded_at", { withTimezone: true }),
+    // WHO performed it (migration 0097, OUTCOME-PERFORMER-1106): stated by the declaring
+    // service, NULL = not stated. Never read by cost allocation.
+    performerKind: text("performer_kind"),
+    performerWorkflowSlug: text("performer_workflow_slug"),
+    performerName: text("performer_name"),
   },
   (table) => [
     uniqueIndex("idx_run_outcomes_occurrence").on(
