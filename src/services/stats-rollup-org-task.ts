@@ -4,7 +4,14 @@
 //
 // Served (when the `org_task` stamp is present): org-scoped, groupBy ⊆
 // {serviceName, taskName, campaignId}, filters ⊆ {campaignId, campaignIds,
-// serviceName, taskName}. No time bounds (a bounded read keeps the live query).
+// serviceName, taskName}, optional startedAfter / startedBefore.
+//
+// BOUNDS (2026-11-06). A bound cuts through one UTC day. That day is served from
+// the rollup when the part the bound excludes holds no run of the read (always
+// the case for the `…T23:59:59.999999Z` / UTC-midnight bounds callers send), else
+// it is read LIVE with the exact bound: the brand rollup's rule (0041). Bounded,
+// the live read of the largest org (8c043fa7, startedBefore) ran past the 30 s
+// statement timeout.
 //
 // EXACTNESS. Every filter is an exact predicate on a rollup row, every grouping
 // is one of its columns, and a run sits in exactly one row. A UTC day holding a
@@ -61,18 +68,48 @@ const UTC_DAY_START = (day: string) => sql.raw(`((${day})::timestamp AT TIME ZON
  * TEXT, `run_count`, `min_started_at`, `max_started_at`, ordered by
  * `total_cost` (text) DESC.
  */
-export async function readOrgTaskGroups(opts: { groupBy: string[]; filters: OrgTaskFilters }): Promise<any[]> {
+export async function readOrgTaskGroups(opts: {
+  groupBy: string[];
+  filters: OrgTaskFilters;
+  startedAfter?: string;
+  startedBefore?: string;
+}): Promise<any[]> {
+  const { startedAfter: sa, startedBefore: sb } = opts;
   const cols = opts.groupBy.map((k) => ORG_TASK_GROUP_BY[k]);
   const dims = sql.raw(cols.join(", "));
   const dimsOf = (alias: string) => sql.raw(cols.map((c) => `${alias}.${c}`).join(", "));
   const groupRefs = sql.raw(cols.map((_, i) => `${i + 1}`).join(", "));
-  const rollupF = and(filterParts(opts.filters, "o."));
-  const liveF = and(filterParts(opts.filters, "r."));
+  const dayA = sa ? sql`(${sa}::timestamptz AT TIME ZONE 'UTC')::date` : null;
+  const dayB = sb ? sql`(${sb}::timestamptz AT TIME ZONE 'UTC')::date` : null;
+  const dayStart = (day: SQL) => sql`((${day})::timestamp AT TIME ZONE 'UTC')`;
+  const dayRange: SQL[] = [];
+  if (dayA) dayRange.push(sql`o.day >= ${dayA}`);
+  if (dayB) dayRange.push(sql`o.day <= ${dayB}`);
+  const bounds: SQL[] = [];
+  if (sa) bounds.push(sql`r.started_at >= ${sa}::timestamptz`);
+  if (sb) bounds.push(sql`r.started_at <= ${sb}::timestamptz`);
+  const rollupF = and([...filterParts(opts.filters, "o."), ...dayRange]);
+  const liveF = and([...filterParts(opts.filters, "r."), ...bounds]);
+  // A bound's day is read live only when the part it excludes holds a run of the read.
+  const boundaryDays: SQL[] = [];
+  if (dayA) {
+    boundaryDays.push(sql`
+      UNION SELECT ${dayA} WHERE EXISTS (
+        SELECT 1 FROM runs r WHERE ${and(filterParts(opts.filters, "r."))}
+          AND r.started_at >= ${dayStart(dayA)} AND r.started_at < ${sa}::timestamptz)`);
+  }
+  if (dayB) {
+    boundaryDays.push(sql`
+      UNION SELECT ${dayB} WHERE EXISTS (
+        SELECT 1 FROM runs r WHERE ${and(filterParts(opts.filters, "r."))}
+          AND r.started_at > ${sb}::timestamptz AND r.started_at < ${dayStart(sql`${dayB} + 1`)})`);
+  }
 
   const rows = await statsDb.execute(sql`
     WITH ld AS MATERIALIZED (
       SELECT DISTINCT o.day AS d FROM stats_rollup_org_task o
       WHERE ${rollupF} AND o.minmax_stale AND o.run_count <> 0
+      ${sql.join(boundaryDays, sql` `)}
     ),
     lr AS MATERIALIZED (
       SELECT r.id, ${dimsOf("r")}, r.started_at
