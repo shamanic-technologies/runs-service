@@ -673,6 +673,13 @@
       "when": 1783842400000,
       "tag": "0095_lifecycle_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1783928800000,
+      "tag": "0096_stats_rollup_task_day",
+      "breakpoints": true
     }
   ]
 }
