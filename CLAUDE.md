@@ -1131,6 +1131,25 @@ resolution keys on declaration time.
   The guards compare at MILLISECOND precision (migration 0070): `runs.started_at` holds µs, every stated time arrives in ms, so
   `run_started_at` on a run with spend was read as 548 µs before its start (400 on every workflow-service backfill, 2026-10-24).
 
+## Who performed each occurrence (migration 0097, OUTCOME-PERFORMER-1106)
+
+Owner 2026-11-06: « la provenance est clé pour les stats, mais doit être stockée de façon généralisée, par outcome ». This is
+the ONE store of provenance; never a consumer-side copy (lead-service source tags), never a fake run / workflow slug per performer.
+- **Wire**: `produced[].performer` on both declare doors and the batch: `{kind, workflowSlug?, name?}`, kind `script | client_team |
+  crm | tracker | mailbox | organic`; `workflowSlug` REQUIRED for `script` (the slug its runs carry) and refused otherwise; `name` =
+  optional tool/channel label (≤128, never a person). Strict object (400 on anything else). Not on `consumed` (stripped like quantity).
+- **Stored once** (`run_outcomes.performer_kind/_workflow_slug/_name`, from bronze: `outcomes.declared` items, or a new
+  `outcomes.performer_stated` event that fills a NULL only): an occurrence recorded without one takes it once (status
+  `performer_stated`, `performerStatedCount`); same performer (or one stating less: no name) = `already_recorded`; another one = 409
+  `performer_conflict`, never overwritten. On a recorded occurrence only the run's owner or a service that declared on the run may
+  state it (403 `not_run_declarer`). Absent = byte-identical answers (`performer` / `performerStatedCount` keys only when stated).
+- **Effective performer on reads** (`src/services/outcome-performers.ts`, one SQL fragment): stated > (produced on a run with a
+  workflow) `script` + the run's workflow, basis `run_workflow` > null. Served as `performer` on `/internal/outcome-occurrences`
+  (filter `performerKind`, `none` = unknown) and grouped live by `GET /internal/stats/outcome-performers` (dims incl.
+  `performerKind`, `performerBasis`, `workflowSlug` = the script, so a script's output = what its runs declared + what others stated it
+  performed). Cost allocation and the stored days never read it (no recompute, no staleness).
+- Guard: `tests/integration/outcome-performer.test.ts`.
+
 ## Support spend, named and reported apart (migrations 0062 + 0064 + 0065, COST-SUPPORT-1024-RUNS)
 
 Doctrine (cost-accounting skill "Not outcomes ... Support functions, reported apart"): spend that produces no outcome BY DESIGN
