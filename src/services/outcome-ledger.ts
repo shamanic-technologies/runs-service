@@ -139,8 +139,8 @@ export interface DeclaredOccurrence {
   recordedAt: string;
   /** Served only when the call stated a performer for this occurrence: the one now stored. */
   performer?: OutcomePerformer;
-  /** recorded = written now; redated = was recorded later than the stated time, moved earlier to it; performer_stated = recorded with no performer, this call stated it; already_recorded = nothing written. */
-  status: "recorded" | "redated" | "performer_stated" | "already_recorded";
+  /** recorded = written now; redated = was recorded later than the stated time, moved earlier to it; performer_stated = recorded with no performer, this call stated it; performer_corrected = recorded with ANOTHER performer, the run's own service corrected it (batch `correctPerformer`); already_recorded = nothing written. */
+  status: "recorded" | "redated" | "performer_stated" | "performer_corrected" | "already_recorded";
 }
 
 export class OutcomeDeclarationConflictError extends Error {
@@ -241,6 +241,12 @@ export interface DeclarationEntry {
    * to `declaredAt`. Never later. The caller checks it owns the run.
    */
   redate?: boolean;
+  /**
+   * PERFORMER-CORRECT-1107: an occurrence of this run already carrying ANOTHER
+   * performer takes the stated one (bronze `outcomes.performer_corrected` keeps
+   * the previous value). The caller checks it is the run's own service.
+   */
+  correctPerformer?: boolean;
 }
 
 /**
@@ -306,7 +312,7 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
       statedPerEntry[i].flatMap((o) => {
         const row = existing.get(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`);
         const stored = row ? storedPerformerOf(row) : null;
-        if (!o.performer || !stored || samePerformer(stored, o.performer)) return [];
+        if (!o.performer || !stored || samePerformer(stored, o.performer) || e.correctPerformer) return [];
         return [{ runId: e.runId, direction: o.direction, outcomeKey: o.outcomeKey, subjectService: o.subjectService, subjectId: o.subjectId, storedPerformer: stored, statedPerformer: o.performer }];
       }),
     );
@@ -361,6 +367,37 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
       },
     };
   });
+  // PERFORMER-CORRECT-1107: the run's own service replaces a DIFFERENT stored performer, explicitly.
+  const correctedKeys = new Set<string>();
+  const correctionEvents = entries.flatMap((e, i) => {
+    if (!e.correctPerformer) return [];
+    const items = statedPerEntry[i]
+      .map((o) => ({ o, key: `${e.runId}|${occurrenceKeyOf(o.direction, o)}` }))
+      .filter(({ o, key }) => {
+        const stored = existing.has(key) ? storedPerformerOf(existing.get(key)) : null;
+        return o.performer && stored && !samePerformer(stored, o.performer);
+      });
+    if (items.length === 0) return [];
+    for (const { key } of items) correctedKeys.add(key);
+    return [{
+      runId: e.runId,
+      eventType: "outcomes.performer_corrected",
+      sourceService: e.sourceService,
+      payload: {
+        allocationVersion: ALLOCATION_VERSION,
+        items: items.map(({ o, key }) => {
+          const row = existing.get(key);
+          return {
+            id: row.id,
+            ...performerPayload(o.performer!),
+            previous_performer_kind: row.performer_kind,
+            previous_performer_workflow_slug: row.performer_workflow_slug ?? null,
+            previous_performer_name: row.performer_name ?? null,
+          };
+        }),
+      },
+    }];
+  });
   const events = entries.flatMap((e, i) => {
     const fresh = statedPerEntry[i].filter((o) => !existing.has(`${e.runId}|${occurrenceKeyOf(o.direction, o)}`));
     if (fresh.length === 0) return [];
@@ -386,8 +423,8 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
     }];
   });
 
-  if (events.length + redates.length + performerEvents.length > 0) {
-    await db.insert(outcomeDeclarationEvents).values([...events, ...redates, ...performerEvents]);
+  if (events.length + redates.length + performerEvents.length + correctionEvents.length > 0) {
+    await db.insert(outcomeDeclarationEvents).values([...events, ...redates, ...performerEvents, ...correctionEvents]);
     existing = await readExisting();
     // A concurrent call may have recorded the same occurrence with another quantity.
     assertNoConflict(existing);
@@ -407,7 +444,7 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
         declaredAt: new Date(row.declared_at).toISOString(),
         recordedAt: new Date(row.recorded_at).toISOString(),
         ...(o.performer && { performer: storedPerformerOf(row) ?? undefined }),
-        status: freshKeys.has(key) ? "recorded" : redatedKeys.has(key) ? "redated" : performerKeys.has(key) ? "performer_stated" : "already_recorded",
+        status: freshKeys.has(key) ? "recorded" : redatedKeys.has(key) ? "redated" : performerKeys.has(key) ? "performer_stated" : correctedKeys.has(key) ? "performer_corrected" : "already_recorded",
       };
     }),
   );
