@@ -37,6 +37,7 @@ import {
 } from "../services/stats-rollup-campaign.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { ORG_HOUR_ROLLUP_NAME, readOrgHourTimeseries } from "../services/stats-rollup-org-hour.js";
+import { TASK_DAY_ROLLUP_NAME, readTaskDayTimeseries } from "../services/stats-rollup-task-day.js";
 import {
   AUDIENCE_DAY_ROLLUP_NAME,
   AUDIENCE_ROLLUP_GROUP_BY,
@@ -650,7 +651,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 const ORG_TIMESERIES_INTERVALS = new Set(["day", "week", "month"]);
 // groupBy=serviceName,taskName splits each bucket per task (spend by ACTION):
 // summed over tasks, a bucket's money and runCount equal the unsplit bucket.
-// Always the live query (the hour rollup carries no service/task).
+// Served from the task-day rollup (0096) in UTC; live otherwise.
 const ORG_TIMESERIES_GROUP_BY = new Set(["campaignId", "serviceName", "taskName"]);
 
 router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
@@ -755,9 +756,34 @@ router.get("/v1/stats/costs/timeseries", requireApiKey, async (req, res) => {
         })
       : null;
 
+    // Task-day rollup (migration 0096, SPEND-BY-ACTION-TIMEOUT-1106): the per-task
+    // split (and any feature-filtered read) in UTC with no bound and no workflow
+    // filter. Live, a funnel's 3 campaigns (147k runs) ran 51 s, past the timeout.
+    const taskDayServes =
+      !fromRollup && timezone === "UTC" && !workflowSlug && !startedAfter && !startedBefore &&
+      (await isStatsRollupReady(TASK_DAY_ROLLUP_NAME));
+    const fromTaskDay = taskDayServes
+      ? await readTaskDayTimeseries({
+          interval,
+          byCampaign,
+          byService,
+          byTask,
+          filters: {
+            orgId: req.orgId,
+            brandId,
+            campaignId,
+            campaignIds: parsedCampaignIds.ids,
+            featureSlug,
+            featureSlugs: parseCsv(featureSlugsParam),
+            serviceName,
+            taskName,
+          },
+        })
+      : null;
+
     // Split (counts | sums), as the run-side GET /v1/stats/costs: the run count
     // never needs the cost ledger, and the sums only touch runs that have cost rows.
-    const rows: any[] = fromRollup ?? ((await db.execute(sql`
+    const rows: any[] = fromRollup ?? fromTaskDay ?? ((await db.execute(sql`
       WITH counts AS (
         SELECT ${dims},
           COUNT(*) AS run_count,

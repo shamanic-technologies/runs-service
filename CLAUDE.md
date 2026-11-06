@@ -33,6 +33,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/vendor-costs.ts` + `src/services/vendor-costs.ts` — `GET /internal/stats/costs/timeseries/vendor` + `GET /internal/stats/costs/vendor` + `GET /internal/stats/costs/margin` (+ `/timeseries`) + `GET /internal/runs/vendor` + `GET /internal/runs/subtree-costs` (all service-auth). See "Vendor-cost basis".
 - `src/services/stats-rollup-campaign.ts` — (campaign, UTC day) rollup read + rebuild (migration 0037). See "Campaign-family cost reads".
 - `src/services/stats-rollup-brand.ts` — brand-history reads (org-scoped `GET /v1/stats/costs`, public timeseries) from the same rollup (migration 0041), + audience (0052) and cost-name (0053) twins. See "Brand-history cost reads".
+- `src/services/stats-rollup-task-day.ts` — spend-by-action timeseries (migration 0096). See "Spend by action".
 - `src/services/stats-rollup-org-task.ts` — org usage read (`GET /v1/stats/costs` by service/task/campaign) from the 0043 rollup. See "Org usage read".
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` (+ `src/services/ledger-reconciliation.ts`, "Ledger reconciliation") — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
@@ -441,6 +442,24 @@ rollup has no service/task, hence its own table.
   after the deploy (prod: inside the container against `dist/`).
 - **Parity guard**: `tests/integration/stats-rollup-org-task.test.ts` (raw bodies,
   red if the stale-day logic is disabled).
+
+## Spend by action — (org, campaign, feature, service, task, UTC day, brand set) rollup (migration 0096, SPEND-BY-ACTION-TIMEOUT-1106)
+
+features-service's campaign spend chart (dashboard v2, a sales funnel campaign) splits each day's spend per action
+(`spend-by-task-day-client.ts`): `GET /v1/stats/costs/timeseries?interval=day&groupBy=serviceName,taskName`, org + brand +
+the funnel's feature slugs + 1..~230 campaign ids, net. Live it read every run of those campaigns + their cost rows: 147k
+runs for 3 campaigns of brand 33211c62 = 51 s for the run count alone at box load ~50, every call 500 on the 30 s timeout
+(2026-11-05/06). 0043 org_task has no brand/feature and serves three other reads (re-keying it blanks them while it rebuilds).
+
+- **`stats_rollup_task_day`** (`src/services/stats-rollup-task-day.ts`): run count, min/max/stale, per status n + gross + net,
+  and `committed_run_count` (runs with >= 1 actual/provisioned row = `committedRunCount`), unique key led by (org, campaign).
+  Committed membership = 0049's lock-then-read (upsert the key row first, then look for ANOTHER committed row of the run).
+- **Served** whenever the hour rollup does not: tz UTC, no bound, no workflow filter; groupBy ⊆ {campaignId, serviceName,
+  taskName}; filters ⊆ {brandId, campaignId(s), featureSlug(s), serviceName, taskName}. A UTC day holding a stale row is read
+  live (0041's rule); the min/max repair pass covers the table. Same body as live (route renders with `toFixed(10)`).
+- **Readiness** stamp `task_day`; run `scripts/rebuild-stats-rollup.ts task_day` after the deploy (prod: inside the container
+  against `dist/`). TRUNCATE in global-setup. Guard (rollup == live raw bodies, tasks sum to the unsplit day, 20 concurrent
+  rows count one committed run): `tests/integration/stats-rollup-task-day.test.ts`.
 
 ## Run outcomes — how runs ended and how long they took (`GET /v1/stats/run-outcomes`)
 
