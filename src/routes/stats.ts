@@ -44,6 +44,8 @@ import {
   BRAND_ROLLUP_GROUP_BY,
   COST_NAME_DAY_ROLLUP_NAME,
   COST_NAME_ROLLUP_GROUP_BY,
+  COST_NAME_AUDIENCE_DAY_ROLLUP_NAME,
+  COST_NAME_AUDIENCE_ROLLUP_GROUP_BY,
   readBrandRollupGroups,
 } from "../services/stats-rollup-brand.js";
 import { ORG_TASK_GROUP_BY, ORG_TASK_ROLLUP_NAME, readOrgTaskGroups } from "../services/stats-rollup-org-task.js";
@@ -484,11 +486,14 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
     // bound) groups every run of the org; live it ran past the 30 s statement
     // timeout for the largest orgs. Served from the (org, service, task,
     // campaign, UTC day) rollup — same rows, same text, see stats-rollup-org-task.ts.
+    // Bounded reads too (startedBefore=<UTC day end>: the largest org timed out
+    // live, 2026-11-06); a day a bound cuts through with runs on its excluded side
+    // is read live with the exact bound.
     const orgTaskRollupServes =
       splitServes && !brandRollupServes && !!req.orgId &&
       uniqueSqlGroupByKeys.every((k) => !!ORG_TASK_GROUP_BY[k]) &&
       !brandId && !workflowSlug && !workflowSlugsParam && !workflowDynastySlug &&
-      !featureSlug && !featureSlugsParam && !startedAfter && !startedBefore &&
+      !featureSlug && !featureSlugsParam &&
       (await isStatsRollupReady(ORG_TASK_ROLLUP_NAME));
 
     // Rollup path (migration 0052): features-service's per-audience spend
@@ -521,6 +526,22 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       !serviceName && !taskName &&
       (await isStatsRollupReady(COST_NAME_DAY_ROLLUP_NAME));
 
+    // Rollup path (migration 0099): features-service's offer-sourcing evidence
+    // (groupBy=campaignId,audienceId,costName, org + brand + channel/sourcing
+    // slugs, often startedBefore). Neither 0052 nor 0053 carries both dimensions,
+    // so it ran live: the brand's whole history INNER JOINed to the ledger, 12-19 s
+    // for Doc Dinners and past the 30 s statement timeout under load (2026-11-06).
+    // Served when costName AND audienceId are grouped on and every other key and
+    // filter is one the (…, cost name, audience) rollup carries.
+    const costNameAudienceRollupServes =
+      !costNameRollupServes && hasCostName &&
+      uniqueSqlGroupByKeys.includes("audienceId") &&
+      uniqueSqlGroupByKeys.every((k) => !!COST_NAME_AUDIENCE_ROLLUP_GROUP_BY[k]) &&
+      !goal && !brandProfileId && !audienceId && !workflowContext &&
+      (!attributionStatus || attributionStatus === "all") &&
+      !serviceName && !taskName &&
+      (await isStatsRollupReady(COST_NAME_AUDIENCE_DAY_ROLLUP_NAME));
+
     const rollupFilters = {
       orgId: req.orgId,
       brandId,
@@ -536,7 +557,18 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
 
     // Cost aggregation via cost-aggregator (atomic literals, doctrine-compliant).
     // Gross + frozen net (features-service reads GROSS or NET per-attribution).
-    const result = costNameRollupServes
+    const result = costNameAudienceRollupServes
+      ? await readBrandRollupGroups({
+          rollup: "costNameAudience",
+          dims: uniqueSqlGroupByKeys.map((k) => COST_NAME_AUDIENCE_ROLLUP_GROUP_BY[k]),
+          outNames: uniqueSqlGroupByKeys.map((k) => RESULT_COL_NAMES[k]),
+          filters: rollupFilters,
+          startedAfter,
+          startedBefore,
+          minMax: true,
+          orderBy: "total_cost DESC",
+        })
+      : costNameRollupServes
       ? await readBrandRollupGroups({
           rollup: "costName",
           dims: uniqueSqlGroupByKeys.map((k) => COST_NAME_ROLLUP_GROUP_BY[k]),
@@ -568,6 +600,8 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
             serviceName,
             taskName,
           },
+          startedAfter,
+          startedBefore,
         })
       : brandRollupServes
       ? await readBrandRollupGroups({

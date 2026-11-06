@@ -1,7 +1,7 @@
 import { sql as defaultSql } from "../db/index.js";
 
 /**
- * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052, 0053, 0096).
+ * Repair of STALE min/max in the run-grain rollups (migrations 0041, 0042, 0043, 0052, 0053, 0096, 0099).
  *
  * A removed run (a delete, or a key move: transfer-brand, feature-slug correction, a
  * workflow re-tag) cannot shrink a group's min/max without a scan, so its trigger marks
@@ -41,7 +41,8 @@ interface RollupSpec {
   bucket: { column: "day" | "hour"; lower: string; upper: string };
   /**
    * Keys that are NOT a plain `runs` column: run membership as SQL over `{k}` (the key
-   * value). The audience (0052) is the cost rows' effective audience.
+   * value) and `{key:<col>}` (another key's value). The audience (0052) is the cost
+   * rows' effective audience.
    */
   memberMatch?: Record<string, string>;
 }
@@ -107,6 +108,22 @@ const SPECS: RollupSpec[] = [
       cost_name: `EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id AND rc.cost_name = {k})`,
     },
   },
+  {
+    table: "stats_rollup_cost_name_audience_day",
+    keys: ["campaign_id", "organization_id", "brand_ids", "feature_slug", "workflow_slug", "cost_name", "audience_id"],
+    bucket: {
+      column: "day",
+      lower: `({b}::timestamp AT TIME ZONE 'UTC')`,
+      upper: `(({b} + 1)::timestamp AT TIME ZONE 'UTC')`,
+    },
+    // A run is in the group when ONE of its cost rows carries both the cost name and
+    // the effective audience (one predicate: two independent EXISTS would over-match).
+    memberMatch: {
+      cost_name: `EXISTS (SELECT 1 FROM runs_costs rc WHERE rc.run_id = r.id AND rc.cost_name = {k}
+        AND COALESCE(rc.audience_id, r.audience_id) IS NOT DISTINCT FROM {key:audience_id})`,
+      audience_id: `TRUE`,
+    },
+  },
 ];
 
 const COLUMN_TYPES: Record<string, string> = {
@@ -148,7 +165,12 @@ async function repairTable(sql: Sql, spec: RollupSpec, limit: number): Promise<M
     const lower = spec.bucket.lower.replaceAll("{b}", b);
     const upper = spec.bucket.upper.replaceAll("{b}", b);
     const runMatch = spec.keys
-      .map((c, i) => spec.memberMatch?.[c]?.replaceAll("{k}", param(c, i)) ?? `r.${c} IS NOT DISTINCT FROM ${param(c, i)}`)
+      .map((c, i) => {
+        const m = spec.memberMatch?.[c];
+        if (m === undefined) return `r.${c} IS NOT DISTINCT FROM ${param(c, i)}`;
+        // `{key:<col>}` = another key's parameter (a predicate tying two keys to one cost row).
+        return spec.keys.reduce((acc, kc, ki) => acc.replaceAll(`{key:${kc}}`, param(kc, ki)), m.replaceAll("{k}", param(c, i)));
+      })
       .join(" AND ");
     try {
       await sql.begin(async (tx) => {

@@ -132,6 +132,14 @@ const cases: Array<[string, Record<string, string>]> = [
   ["campaign, filtered by service", { groupBy: "campaignId", serviceName: "workflow" }],
   ["campaign family", { groupBy: "serviceName,campaignId", campaignIds: `${C1},${C2}` }],
   ["one campaign", { groupBy: "taskName,campaignId", campaignId: C2 }],
+  // Bounds (the past half of a split read): a day the bound cuts through is read
+  // live only when its excluded part holds a run.
+  ["org usage, past half (startedBefore = a UTC day end)", { groupBy: "serviceName,taskName,campaignId", startedBefore: "2026-10-04T23:59:59.999999Z" }],
+  ["org usage, today half (startedAfter = a UTC midnight)", { groupBy: "serviceName,taskName,campaignId", startedAfter: "2026-10-05T00:00:00.000Z" }],
+  ["startedBefore cutting through a day with runs on both sides", { groupBy: "serviceName,taskName,campaignId", startedBefore: "2026-10-02T04:00:00.250Z" }],
+  ["startedAfter cutting through a day with runs on both sides", { groupBy: "serviceName,taskName", startedAfter: "2026-10-03T12:25:00.000Z" }],
+  ["both bounds inside one stale day", { groupBy: "serviceName,taskName,campaignId", startedAfter: "2026-10-03T12:10:00.000Z", startedBefore: "2026-10-03T12:35:00.000Z" }],
+  ["both bounds, filtered", { groupBy: "campaignId", serviceName: "workflow", startedAfter: "2026-10-01T23:00:00.000Z", startedBefore: "2026-10-07T19:00:00.000Z" }],
 ];
 
 describe("GET /v1/stats/costs from the org-task rollup", () => {
@@ -151,9 +159,8 @@ describe("GET /v1/stats/costs from the org-task rollup", () => {
     expect(fast.body.groups).toHaveLength(2);
   });
 
-  it("a bound or a filter the rollup does not carry keeps the live query", async () => {
+  it("a filter the rollup does not carry keeps the live query", async () => {
     for (const q of [
-      { groupBy: "serviceName,taskName,campaignId", startedAfter: "2026-10-03T00:00:00.000Z" },
       { groupBy: "serviceName,taskName", brandId: BRAND },
       { groupBy: "serviceName,taskName", featureSlug: "nope" },
     ]) {
@@ -182,6 +189,11 @@ describe("GET /v1/stats/costs from the org-task rollup", () => {
       const { fast, live } = await both({ groupBy: "serviceName" });
       expect(fast.body.groups.map((g: any) => g.dimensions.serviceName)).toContain("ghost-service");
       expect(live.body.groups.map((g: any) => g.dimensions.serviceName)).not.toContain("ghost-service");
+      // A bounded read is served too; a day outside the bounds is not.
+      const bounded = await both({ groupBy: "serviceName", startedBefore: "2026-01-01T23:59:59.999999Z" });
+      expect(bounded.fast.body.groups.map((g: any) => g.dimensions.serviceName)).toContain("ghost-service");
+      const after = await both({ groupBy: "serviceName", startedAfter: "2026-01-02T00:00:00.000Z" });
+      expect(after.fast.body.groups.map((g: any) => g.dimensions.serviceName)).not.toContain("ghost-service");
     } finally {
       await rawSql`DELETE FROM stats_rollup_org_task WHERE service_name = 'ghost-service'`;
     }

@@ -21,6 +21,8 @@
 //                                       audienceId (per-audience spend).
 //   cost_name_day    (migration 0053) — GET /v1/stats/costs grouped by
 //                                       costName (brand spend breakdown).
+//   cost_name_audience_day (migration 0099) — GET /v1/stats/costs grouped by
+//                                       costName AND audienceId (offer-sourcing evidence).
 //   root_cost        (migration 0054) — GET /internal/stats/task-outcomes
 //                                       (whole-subtree cost of top-level runs).
 //   run_day          (migration 0054) — GET /public/stats/runs (runs per UTC
@@ -41,7 +43,7 @@
 // Run manually AFTER the deploy that ships the migration (never on boot: it
 // aggregates the whole ledger). Safe to re-run at any time.
 //
-//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|task_day|task_units|campaign_cost_items|audience_day|cost_name_day|root_cost|subtree_cost|subtree_cost_items|run_day|no_campaign_day|consumption_day|campaign_entry]
+//   RUNS_SERVICE_DATABASE_URL=postgres://... npx tsx scripts/rebuild-stats-rollup.ts [feature_workflow|campaign_day|cost_day|org_hour|org_task|task_day|task_units|campaign_cost_items|audience_day|cost_name_day|cost_name_audience_day|root_cost|subtree_cost|subtree_cost_items|run_day|no_campaign_day|consumption_day|campaign_entry]
 //
 // Writes QUEUE (never fail) for well under a second while it clears the rollup
 // and exports a snapshot under a SHARE ROW EXCLUSIVE lock; the aggregate then
@@ -56,7 +58,7 @@ import { rebuildOrgTaskRollup } from "../src/services/stats-rollup-org-task.js";
 import { rebuildTaskDayRollup } from "../src/services/stats-rollup-task-day.js";
 import { rebuildTaskUnitsRollup } from "../src/services/stats-rollup-task-units.js";
 import { rebuildCampaignCostItemsRollup } from "../src/services/stats-rollup-campaign-cost-items.js";
-import { rebuildAudienceDayRollup, rebuildCostNameDayRollup } from "../src/services/stats-rollup-brand.js";
+import { rebuildAudienceDayRollup, rebuildCostNameAudienceDayRollup, rebuildCostNameDayRollup } from "../src/services/stats-rollup-brand.js";
 import { rebuildRootCostRollup } from "../src/services/stats-rollup-root-cost.js";
 import { rebuildSubtreeCostItemsRollup, rebuildSubtreeCostRollup } from "../src/services/stats-rollup-subtree-cost.js";
 import { rebuildRunDayRollup } from "../src/services/stats-rollup-run-day.js";
@@ -76,8 +78,8 @@ if (which === "campaign_entry") {
   process.exit(0);
 }
 
-const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup, task_day: rebuildTaskDayRollup, task_units: rebuildTaskUnitsRollup, campaign_cost_items: rebuildCampaignCostItemsRollup, audience_day: rebuildAudienceDayRollup, cost_name_day: rebuildCostNameDayRollup, root_cost: rebuildRootCostRollup, subtree_cost: rebuildSubtreeCostRollup, subtree_cost_items: rebuildSubtreeCostItemsRollup, run_day: rebuildRunDayRollup, no_campaign_day: rebuildNoCampaignDayRollup, consumption_day: rebuildConsumptionDayRollup }[which];
-if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task, task_day, task_units, campaign_cost_items, audience_day, cost_name_day, root_cost, subtree_cost, subtree_cost_items, run_day, no_campaign_day, consumption_day or campaign_entry.`);
+const rebuild = { feature_workflow: rebuildStatsRollup, campaign_day: rebuildCampaignDayRollup, cost_day: rebuildCostDayRollup, org_hour: rebuildOrgHourRollup, org_task: rebuildOrgTaskRollup, task_day: rebuildTaskDayRollup, task_units: rebuildTaskUnitsRollup, campaign_cost_items: rebuildCampaignCostItemsRollup, audience_day: rebuildAudienceDayRollup, cost_name_day: rebuildCostNameDayRollup, cost_name_audience_day: rebuildCostNameAudienceDayRollup, root_cost: rebuildRootCostRollup, subtree_cost: rebuildSubtreeCostRollup, subtree_cost_items: rebuildSubtreeCostItemsRollup, run_day: rebuildRunDayRollup, no_campaign_day: rebuildNoCampaignDayRollup, consumption_day: rebuildConsumptionDayRollup }[which];
+if (!rebuild) throw new Error(`Unknown rollup '${which}'. Expected feature_workflow, campaign_day, cost_day, org_hour, org_task, task_day, task_units, campaign_cost_items, audience_day, cost_name_day, cost_name_audience_day, root_cost, subtree_cost, subtree_cost_items, run_day, no_campaign_day, consumption_day or campaign_entry.`);
 
 const t0 = Date.now();
 const result = await rebuild(url);
