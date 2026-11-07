@@ -215,19 +215,23 @@ router.post("/internal/cost-reprices/apply", requireInternalAuth, async (req, re
       if (Number(t.events_written) !== Number(t.cost_count)) {
         throw new Error(`reprice wrote ${t.events_written} events for ${t.cost_count} rows`);
       }
-      const [left] = (await tx.execute(sql`
-        SELECT COUNT(*)::int AS n FROM runs_costs rc JOIN runs r ON r.id = rc.run_id WHERE ${repriceWhere(f)}
-      `)) as any[];
-      return { totals: shapeTotals(t), remaining: Number(left.n) };
+      return { totals: shapeTotals(t) };
     });
+    // Counted AFTER commit: inside the transaction it held the org's rollup-row locks
+    // (org_actual_totals is one row per org) for the ~20-40 s of the scan, blocking
+    // that org's live cost writes (prod 2026-11-07).
+    const [left] = (await db.execute(sql`
+      SELECT COUNT(*)::int AS n FROM runs_costs rc JOIN runs r ON r.id = rc.run_id WHERE ${repriceWhere(f)}
+    `)) as any[];
+    const remaining = Number(left.n);
 
     console.log(
-      `[runs-service] cost-reprices/apply: org=${f.orgId} cost=${f.costName} ${f.fromUnitCostInUsdCents}->${f.toUnitCostInUsdCents} rows=${result.totals.costCount} gross ${result.totals.grossBeforeInUsdCents}->${result.totals.grossAfterInUsdCents} remaining=${result.remaining} by=${repricedBy}`
+      `[runs-service] cost-reprices/apply: org=${f.orgId} cost=${f.costName} ${f.fromUnitCostInUsdCents}->${f.toUnitCostInUsdCents} rows=${result.totals.costCount} gross ${result.totals.grossBeforeInUsdCents}->${result.totals.grossAfterInUsdCents} remaining=${remaining} by=${repricedBy}`
     );
     res.json({
       orgId: f.orgId,
       repricedCostCount: result.totals.costCount,
-      remainingCostCount: result.remaining,
+      remainingCostCount: remaining,
       ...result.totals,
     });
   } catch (err) {
