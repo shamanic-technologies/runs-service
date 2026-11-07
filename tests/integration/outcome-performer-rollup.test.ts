@@ -8,7 +8,7 @@ import { db } from "../../src/db/index.js";
 import { PERFORMER_ROLLUP_NAME, rebuildPerformerDayRollup } from "../../src/services/outcome-performers.js";
 
 // LEDGER-LOAD-1107-RUNS: GET /internal/stats/outcome-performers from stats_rollup_performer_day
-// (migration 0105). Through every write that moves an entry (declare, relabel / redate / performer
+// (migration 0106). Through every write that moves an entry (declare, relabel / redate / performer
 // change, void, reversal, a run's tags moving, a run deleted), the rollup body == the live body.
 
 const app = createTestApp();

@@ -200,11 +200,11 @@ export async function readPerformerStats(
 
 const fx6 = (v: string | null) => new Decimal(v ?? "0").toFixed(6);
 
-/** Readiness stamp of the 0105 rollup (set by its migration on a fresh database, else by the rebuild). */
+/** Readiness stamp of the 0106 rollup (set by its migration on a fresh database, else by the rebuild). */
 export const PERFORMER_ROLLUP_NAME = "performer_day";
 
 /**
- * LEDGER-LOAD-1107-RUNS: the same groups and totals from stats_rollup_performer_day (migration 0105,
+ * LEDGER-LOAD-1107-RUNS: the same groups and totals from stats_rollup_performer_day (migration 0106,
  * one row per entry day x outcome x the run's tags x effective performer, signed), when stamped.
  * Same dimension expressions, same HAVING / ORDER BY / LIMIT as the live read: the rows are the
  * live read's, byte for byte (guard: tests/integration/outcome-performer-rollup.test.ts).
@@ -267,7 +267,7 @@ async function readPerformerStatsFromRollup(
   );
 }
 
-/** Rebuild the 0105 rollup from run_outcomes + reversals (scripts/rebuild-stats-rollup.ts performer_day). */
+/** Rebuild the 0106 rollup from run_outcomes + reversals (scripts/rebuild-stats-rollup.ts performer_day). */
 export async function rebuildPerformerDayRollup(url: string) {
   const { rebuildRollup } = await import("./stats-rollup.js");
   const KEYS = "day, outcome_key, organization_id, brand_ids, campaign_id, feature_slug, service_name, task_name, performer_kind, performer_basis, performer_workflow_slug, performer_name";
