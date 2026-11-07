@@ -220,6 +220,21 @@ dashboard budget, and the ledger only grows. So the total is KEPT.
 - `POST /internal/transfer-brand` now also moves `runs_costs.organization_id`
   with the run, so `org-usage-total` (0029's denormalized org) follows the move.
 
+## Org lifetime platform spend — kept on write, read in O(1) (migration 0105, LEDGER-LOAD-1107-SPEND)
+
+`GET /internal/org-usage-total` (billing, every authorize) and the usage hint after every cost write/update
+(`fetchOrgPlatformSpent` in `routes/runs.ts`) both re-summed the org's whole platform-projected history: prod
+2026-11-07, 3,650 calls / 10 min at 784-869 ms = 38 % of runs-service statement time (~5 busy backends).
+
+- **`org_projected_totals`** (org -> n_rows, gross, net = COALESCE(net, gross)): `is_platform_projected` rows keyed on
+  `runs_costs.organization_id` (0029), NULL org counted nowhere = the live SUM exactly. AFTER row trigger on runs_costs
+  (insert, delete, update of status/cost_source/organization_id/amounts) adds OLD/NEW deltas with an atomic upsert in
+  the write's own transaction: never stale, exact under concurrency (no other row is read, unlike 0035).
+- **Read** `services/org-projected-totals.ts` `readOrgProjectedTotal`: stamp + row in ONE statement; unstamped = the
+  live SUM. Routes render with `Decimal(...).toFixed(10)`: byte-identical (prod check: 236/236 orgs equal, 594 ms -> 0.05 ms).
+- **Readiness** stamp `org_projected`; run `scripts/rebuild-stats-rollup.ts org_projected` after the deploy (~4 s
+  aggregate). TRUNCATE in global-setup. Guard: `tests/integration/org-projected-totals.test.ts`.
+
 ## Campaign spend vs no-campaign spend (migration 0045)
 
 Owner 2026-10-13: a customer is charged only what its campaigns spend ("à la Google

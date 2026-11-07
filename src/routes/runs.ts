@@ -13,6 +13,7 @@ import {
   UpstreamError,
 } from "../services/cost-resolver.js";
 import { notifyUsage } from "../services/billing.js";
+import { readOrgProjectedTotal } from "../services/org-projected-totals.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import {
   parseRunListInclude,
@@ -82,18 +83,11 @@ function runCostRowsSql(runId: SQL) {
 // column + idx_runs_costs_org_projected partial index).
 // ---------------------------------------------------------------------------
 async function fetchOrgPlatformSpent(orgId: string): Promise<string> {
-  // Reads the denormalized runs_costs.organization_id (frozen at write, migration
-  // 0029) — index scan over idx_runs_costs_org_projected, no join, no full-table
-  // scan. Byte-identical to the old runs-join (a run's projected costs all carry
-  // its org). SAFE only after the out-of-band backfill (expand -> backfill -> swap).
-  const result = await db.execute(sql`
-    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0)::text AS spent_cents
-      FROM runs_costs rc
-     WHERE rc.organization_id = ${orgId}
-       AND rc.is_platform_projected
-  `);
-  const rows = result as any[];
-  return new Decimal(rows[0]?.spent_cents ?? 0).toFixed(10);
+  // O(1) from org_projected_totals once stamped (migration 0105, LEDGER-LOAD-1107-SPEND):
+  // the live SUM re-read the org's whole history after EVERY cost write (2,556 calls /
+  // 10 min at 784 ms each in prod). Unstamped = the live SUM, same value.
+  const total = await readOrgProjectedTotal(db, orgId);
+  return new Decimal(total.spentCents).toFixed(10);
 }
 
 // ---------------------------------------------------------------------------
