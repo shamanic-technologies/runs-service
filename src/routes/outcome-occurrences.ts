@@ -1251,6 +1251,7 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
       })),
       abnormal: totals.abnormal.map((g) => ({ ...g, cost: wireMoney(g.cost) })),
       parallel: totals.parallel.map((g) => ({ ...g, cost: wireMoney(g.cost), unpooled: wireMoney(g.unpooled) })),
+      producedElsewhere: totals.producedElsewhere,
       pipes: (await readPipeCosts(totals.since, totals.until, (await fetchAllocationInputs()).stepStates)).map((p) => ({
         ...p,
         cost: wireMoney(p.cost),

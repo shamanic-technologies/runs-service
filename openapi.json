@@ -8706,6 +8706,31 @@
             },
             "description": "Allocation v5: the routed spend priced in the other state family (interest vs visit)."
           },
+          "producedElsewhere": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimensions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "description": "factory (always: another_factory = the client's CRM, team or site, or before our first touch | no_proof = no proof it was ours) + the requested dimensions (outcomeKey = the lead state; day = its reach day). Only org, brand, outcome and day carry values (a reach has no run)."
+                },
+                "occurrences": {
+                  "type": "integer",
+                  "description": "Units of the lead state reached that way, one per lead x brand x state."
+                }
+              },
+              "required": [
+                "dimensions",
+                "occurrences"
+              ]
+            },
+            "description": "LEDGER-OTHER-FACTORY-1107: lead-state Units another factory produced. None of our cost, in no unit cost: the TOTAL Units of an outcome = produced[].occurrences + these; cost per Unit divides produced[] only."
+          },
           "pipes": {
             "type": "array",
             "items": {
@@ -8782,6 +8807,7 @@
           "scope",
           "abnormal",
           "parallel",
+          "producedElsewhere",
           "pipes"
         ]
       },
