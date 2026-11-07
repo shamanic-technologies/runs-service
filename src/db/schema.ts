@@ -302,6 +302,7 @@ export const runOutcomes = pgTable(
     ),
     index("idx_run_outcomes_subject").on(table.subjectService, table.subjectId, table.outcomeKey),
     index("idx_run_outcomes_key_declared").on(table.outcomeKey, table.declaredAt),
+    index("idx_run_outcomes_key_direction_id").on(table.outcomeKey, table.direction, table.id),
     index("idx_run_outcomes_declared").on(table.declaredAt),
     index("idx_run_outcomes_recorded").on(sql`(COALESCE(${table.recordedAt}, ${table.declaredAt}))`),
   ]

@@ -1499,24 +1499,32 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
         OFFSET 0
       ) c
     ),
+    -- Every production of each subject group, read once per member (index probes).
+    prods AS MATERIALIZED (
+      SELECT m.outcome_key, m.cs, m.cid, p.id, p.run_id, p.declared_at
+      FROM members m
+      CROSS JOIN LATERAL (
+        SELECT p.id, p.run_id, p.declared_at FROM run_outcomes p
+        WHERE p.direction = 'produced' AND p.subject_service = m.ms AND p.subject_id = m.mid AND p.outcome_key = m.outcome_key
+        OFFSET 0
+      ) p
+    ),
+    -- Each consumption's producer: the latest declared at or before it, else the
+    -- earliest later one, among those declared before the end of its UTC day; id
+    -- breaks ties. A hash/merge join + DISTINCT ON, never a per-consumption scan of
+    -- members (SOCIAL-OUTCOMES-1107: 3,172 consumptions x 2,039 members = 2.7 s of a
+    -- 1,000-row newsletter page, past the 30 s timeout under load).
     res AS MATERIALIZED (
-      SELECT c.*, p.id AS producer_id, p.run_id AS producer_run_id, p.declared_at AS producer_declared_at
+      SELECT DISTINCT ON (c.id, c.cs, c.cid)
+             c.*, p.id AS producer_id, p.run_id AS producer_run_id, p.declared_at AS producer_declared_at
       FROM cons c
-      LEFT JOIN LATERAL (
-        SELECT p.id, p.run_id, p.declared_at
-        FROM members m
-        CROSS JOIN LATERAL (
-          SELECT * FROM run_outcomes p
-          WHERE p.direction = 'produced' AND p.subject_service = m.ms AND p.subject_id = m.mid AND p.outcome_key = m.outcome_key
-          OFFSET 0
-        ) p
-        WHERE m.outcome_key = c.outcome_key AND m.cs = c.cs AND m.cid = c.cid
-          AND p.declared_at < (date_trunc('day', c.declared_at AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
-        ORDER BY (p.declared_at <= c.declared_at) DESC,
-                 CASE WHEN p.declared_at <= c.declared_at THEN -extract(epoch FROM p.declared_at) ELSE extract(epoch FROM p.declared_at) END,
-                 p.id
-        LIMIT 1
-      ) p ON TRUE
+      LEFT JOIN prods p
+        ON p.outcome_key = c.outcome_key AND p.cs = c.cs AND p.cid = c.cid
+       AND p.declared_at < (date_trunc('day', c.declared_at AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
+      ORDER BY c.id, c.cs, c.cid,
+               (p.declared_at <= c.declared_at) DESC,
+               CASE WHEN p.declared_at <= c.declared_at THEN -extract(epoch FROM p.declared_at) ELSE extract(epoch FROM p.declared_at) END,
+               p.id
     ),
     ranked AS MATERIALIZED (
       SELECT res.*, ROW_NUMBER() OVER (PARTITION BY res.producer_id ORDER BY res.declared_at, res.id) AS rn
@@ -2745,7 +2753,10 @@ async function anchorsWithStoredSpend(anchorIds: string[], exec: Exec): Promise<
         )
       )
   `)) as any[];
-  return new Set(rows.map((r) => r.anchor_id as string));
+  // Only the anchors asked for: the set feeds a uuid[] literal, where anything else
+  // (an undefined read as an empty element) is a malformed array, 22P02 (2026-11-07).
+  const asked = new Set(anchorIds);
+  return new Set(rows.map((r) => r.anchor_id as string).filter((id) => asked.has(id)));
 }
 
 /**
@@ -2936,9 +2947,16 @@ function consumptionOf(
 
 export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrences: OccurrenceWithCost[]; nextCursor: string | null }> {
   const where: SQL[] = [];
-  if (f.runIds?.length) where.push(sql`o.run_id = ANY(${`{${f.runIds.join(",")}}`}::uuid[])`);
-  if (f.subjectService) where.push(sql`o.subject_service = ${f.subjectService}`);
-  if (f.subjectIds?.length) where.push(sql`o.subject_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(f.subjectIds)}::jsonb))`);
+  // SOCIAL-OUTCOMES-1107: a run or subject list is the selective filter: its rows
+  // are read through their own index and sorted (a newsletter run = ~20k rows, a
+  // few ms), never found by walking the primary key in id order and filtering
+  // (74k rows skipped per 1,000-row page, 1-8 s per page under load).
+  const narrowed: SQL[] = [];
+  if (f.runIds?.length) narrowed.push(sql`run_id = ANY(${`{${f.runIds.join(",")}}`}::uuid[])`);
+  if (f.subjectIds?.length) {
+    narrowed.push(sql`subject_service = ${f.subjectService}`);
+    narrowed.push(sql`subject_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(f.subjectIds)}::jsonb))`);
+  } else if (f.subjectService) where.push(sql`o.subject_service = ${f.subjectService}`);
   if (f.outcomeKey) where.push(sql`o.outcome_key = ${normalizeOutcomeKey(f.outcomeKey)}`);
   if (f.direction) where.push(sql`o.direction = ${f.direction}`);
   if (f.declaredAfter) where.push(sql`o.declared_at >= ${f.declaredAfter}::timestamptz`);
@@ -2948,60 +2966,69 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
   else if (f.performerKind) where.push(sql`${EFFECTIVE_PERFORMER_KIND_SQL} = ${f.performerKind}`);
   if (f.cursor) where.push(sql`o.id > ${f.cursor}::uuid`);
   const whereSql = where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
-  const rows = (await statsDb.execute(sql`
-    SELECT o.id, o.run_id, r.organization_id, r.service_name, r.task_name, o.direction, o.outcome_key,
-           o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at,
-           COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id,
-           ${EFFECTIVE_PERFORMER_COLUMNS}
-    FROM run_outcomes o JOIN runs r ON r.id = o.run_id
-    ${whereSql}
-    ORDER BY o.id
-    LIMIT ${f.limit + 1}
-  `)) as any[];
-  const page = rows.slice(0, f.limit);
-  const consumedIds = page.filter((r) => r.direction === "consumed").map((r) => r.id as string);
-  const resolved = consumedIds.length > 0
-    ? await resolveConsumptions(sql`SELECT id FROM run_outcomes WHERE id = ANY(${`{${consumedIds.join(",")}}`}::uuid[])`)
-    : [];
-  const resolvedById = new Map(resolved.map((c) => [c.id, c]));
-  const anchors = [
-    ...new Set([
-      ...page.filter((r) => r.direction === "produced").map((r) => r.run_id as string),
-      ...resolved.filter((c) => c.producerRunId).map((c) => c.producerRunId!),
-    ]),
-  ];
   const inputs = await fetchAllocationInputs();
-  const sliced = anchors.length > 0
-    ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog(), inputs, statsDb, { storedSpend: true })
-    : new Map<string, { total: Money; slices: CostSlice[] }>();
-  const costs = new Map([...sliced].map(([id, c]) => [id, c.total]));
-  const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string), inputs);
-  return {
-    occurrences: page.map((r) => ({
-      id: r.id,
-      runId: r.run_id,
-      organizationId: r.organization_id ?? null,
-      serviceName: r.service_name,
-      taskName: r.task_name,
-      direction: r.direction,
-      outcomeKey: r.outcome_key,
-      subjectService: r.subject_service,
-      subjectId: r.subject_id,
-      quantity: new Decimal(r.quantity).toFixed(6),
-      declaredAt: new Date(r.declared_at).toISOString(),
-      recordedAt: new Date(r.recorded_at).toISOString(),
-      tags: {
-        brandIds: r.brand_ids ?? [],
-        campaignId: r.campaign_id ?? null,
-        workflowSlug: r.workflow_slug ?? null,
-        featureSlug: r.feature_slug ?? null,
-        audienceId: r.audience_id ?? null,
-      },
-      performer: effectivePerformerOf(r),
-      cost: r.direction === "produced" ? costs.get(r.id) ?? null : null,
-      costSlices: r.direction === "produced" ? sliced.get(r.id)?.slices ?? null : null,
-      consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs, consumingKeys.get(r.run_id) ?? []) : null,
-    })),
-    nextCursor: rows.length > f.limit ? page[page.length - 1].id : null,
-  };
+  // SOCIAL-OUTCOMES-1107: one page = up to ~8 statements (rows, resolution, stored
+  // spend, cost walk, loss shares, routes, consuming keys). At box load 30-45 a
+  // newsletter page's statements take 1-20 s each, so the stats pool's 30 s per
+  // statement 500'd the page; the read gets its own budget, under the 120 s
+  // features-service waits per call. A statement past it is a named 503 (route).
+  return statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '100s'`);
+    const rows = (await tx.execute(sql`
+      SELECT o.id, o.run_id, r.organization_id, r.service_name, r.task_name, o.direction, o.outcome_key,
+             o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at,
+             COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id,
+             ${EFFECTIVE_PERFORMER_COLUMNS}
+      FROM ${narrowed.length ? sql`(SELECT * FROM run_outcomes WHERE ${sql.join(narrowed, sql` AND `)} OFFSET 0)` : sql`run_outcomes`} o
+      JOIN runs r ON r.id = o.run_id
+      ${whereSql}
+      ORDER BY o.id
+      LIMIT ${f.limit + 1}
+    `)) as any[];
+    const page = rows.slice(0, f.limit);
+    const consumedIds = page.filter((r) => r.direction === "consumed").map((r) => r.id as string);
+    const resolved = consumedIds.length > 0
+      ? await resolveConsumptions(sql`SELECT id FROM run_outcomes WHERE id = ANY(${`{${consumedIds.join(",")}}`}::uuid[])`, tx)
+      : [];
+    const resolvedById = new Map(resolved.map((c) => [c.id, c]));
+    const anchors = [
+      ...new Set([
+        ...page.filter((r) => r.direction === "produced").map((r) => r.run_id as string),
+        ...resolved.filter((c) => c.producerRunId).map((c) => c.producerRunId!),
+      ]),
+    ];
+    const sliced = anchors.length > 0
+      ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog(), inputs, tx, { storedSpend: true })
+      : new Map<string, { total: Money; slices: CostSlice[] }>();
+    const costs = new Map([...sliced].map(([id, c]) => [id, c.total]));
+    const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string), inputs, tx);
+    return {
+      occurrences: page.map((r) => ({
+        id: r.id,
+        runId: r.run_id,
+        organizationId: r.organization_id ?? null,
+        serviceName: r.service_name,
+        taskName: r.task_name,
+        direction: r.direction,
+        outcomeKey: r.outcome_key,
+        subjectService: r.subject_service,
+        subjectId: r.subject_id,
+        quantity: new Decimal(r.quantity).toFixed(6),
+        declaredAt: new Date(r.declared_at).toISOString(),
+        recordedAt: new Date(r.recorded_at).toISOString(),
+        tags: {
+          brandIds: r.brand_ids ?? [],
+          campaignId: r.campaign_id ?? null,
+          workflowSlug: r.workflow_slug ?? null,
+          featureSlug: r.feature_slug ?? null,
+          audienceId: r.audience_id ?? null,
+        },
+        performer: effectivePerformerOf(r),
+        cost: r.direction === "produced" ? costs.get(r.id) ?? null : null,
+        costSlices: r.direction === "produced" ? sliced.get(r.id)?.slices ?? null : null,
+        consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs, consumingKeys.get(r.run_id) ?? []) : null,
+      })),
+      nextCursor: rows.length > f.limit ? page[page.length - 1].id : null,
+    };
+  });
 }
