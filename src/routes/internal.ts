@@ -8,6 +8,7 @@ import { logRunLifecycle } from "../services/bronze.js";
 import { transferBrand, movedUsage } from "../services/brand-transfer.js";
 import { correctFeatureSlug } from "../services/feature-slug-correction.js";
 import { lifecycleArchiveStats } from "../services/lifecycle-archive.js";
+import { readOrgProjectedTotal } from "../services/org-projected-totals.js";
 import {
   TransferBrandRequestSchema,
   BrandTransferMovedUsageQuerySchema,
@@ -292,30 +293,15 @@ router.get("/internal/org-usage-total", requireInternalAuth, async (req, res) =>
 
   const { org_id } = parsed.data;
 
-  // Inline aggregate using is_platform_projected generated col + partial index.
-  // spent_cents = GROSS (unchanged — existing consumers keep today's number).
-  // net_spent_cents = frozen NET (gross reduced by the discount that was in
-  // effect when each cost was written); COALESCE(net, total) so historical rows
-  // read net == gross. billing-service reads net_spent_cents for the spendable
-  // balance once it opts in; gross stays the default.
-  // Reads the denormalized runs_costs.organization_id (frozen at write, migration
-  // 0029) instead of joining runs. Serves as an index scan over idx_runs_costs_org_projected
-  // (partial covering, WHERE is_platform_projected) — no join, no full-table scan.
-  // SAFE only because the out-of-band backfill has populated organization_id on
-  // every pre-existing row (expand -> backfill -> swap). Byte-identical to the old
-  // runs-join: the denormalized org is the RUN's org, and a run's projected costs
-  // all carry its org, so the SUM is unchanged.
-  const result = await db.execute(sql`
-    SELECT COALESCE(SUM(rc.total_cost_in_usd_cents), 0) AS spent_cents,
-           COALESCE(SUM(COALESCE(rc.net_cost_in_usd_cents, rc.total_cost_in_usd_cents)), 0) AS net_spent_cents
-      FROM runs_costs rc
-     WHERE rc.organization_id = ${org_id}
-       AND rc.is_platform_projected
-  `);
-
-  const rows = result as any[];
-  const spentCents = rows[0]?.spent_cents ?? 0;
-  const netSpentCents = rows[0]?.net_spent_cents ?? 0;
+  // spent_cents = GROSS, net_spent_cents = frozen NET (COALESCE(net, total) per row),
+  // over runs_costs.is_platform_projected keyed on the denormalized cost org (0029).
+  // Served from org_projected_totals (migration 0105, LEDGER-LOAD-1107-SPEND), kept by
+  // trigger in each cost write's own transaction: never stale, one PK lookup. Until the
+  // `org_projected` stamp exists it is the live SUM over idx_runs_costs_org_projected
+  // (869 ms per call for the busiest orgs in prod, 2026-11-07). Same value either way.
+  const total = await readOrgProjectedTotal(db, org_id);
+  const spentCents = total.spentCents;
+  const netSpentCents = total.netSpentCents;
   const response = {
     org_id,
     spent_cents: new Decimal(spentCents).toFixed(10),
