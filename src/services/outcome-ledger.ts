@@ -60,6 +60,7 @@ import { Decimal } from "decimal.js";
 import { randomUUID } from "node:crypto";
 import { db, statsDb } from "../db/index.js";
 import { outcomeDeclarationEvents } from "../db/schema.js";
+import { pgErrorCode } from "../db/pg-error.js";
 import { fetchVendorCostCatalog, type VendorCostVersion } from "./vendor-costs.js";
 import { versionWindowsSql } from "../routes/vendor-costs.js";
 import type { SupportFunction } from "./support-marks.js";
@@ -569,6 +570,181 @@ export async function voidRunOutcomes(
     })
     .returning({ occurredAt: outcomeDeclarationEvents.occurredAt });
   return { status: "voided", voidedCount: rows.length, voidedAt: event.occurredAt.toISOString() };
+}
+
+// ---------------------------------------------------------------------------
+// Relabelling recorded occurrences to another outcome key (OUTCOME-RELABEL-1107)
+// ---------------------------------------------------------------------------
+
+export const MAX_RELABEL_SUBJECTS = 1000;
+
+export interface RelabelRequest {
+  fromKey: string;
+  toKey: string;
+  subjectService: string;
+  subjectIds: string[];
+  /** Absent = both directions. */
+  directions?: Direction[];
+  reason: string;
+  relabeledBy: string;
+}
+
+export interface KeyCounts {
+  produced: number;
+  consumed: number;
+}
+
+export interface RelabelCollision {
+  occurrenceId: string;
+  runId: string;
+  direction: Direction;
+  subjectId: string;
+  collidingOccurrenceId: string;
+}
+
+export interface RelabelPlan {
+  fromKey: string;
+  toKey: string;
+  subjectService: string;
+  /** Occurrences that move (or would move), id order. */
+  toMove: Array<{ occurrenceId: string; runId: string; direction: Direction; subjectId: string; declaredAt: string }>;
+  /** Stated subjects holding no occurrence of fromKey (already moved, or never declared under it). */
+  subjectsWithoutFromKey: string[];
+  /** Occurrences whose (run, direction, subject) already holds toKey: the move is refused while any is listed. */
+  collisions: RelabelCollision[];
+  runCount: number;
+  /** First UTC day a moved row can change (earliest run start / declaration among the subjects' rows of either key). */
+  affectedFromDay: string | null;
+  /** Fleet-wide occurrences per key and direction, before the move and after it (projected on a dry run). */
+  counts: { before: Record<string, KeyCounts>; after: Record<string, KeyCounts> };
+}
+
+async function fleetKeyCounts(keys: string[]): Promise<Record<string, KeyCounts>> {
+  const rows = (await db.execute(sql`
+    SELECT outcome_key, direction, count(*)::int AS n FROM run_outcomes
+    WHERE outcome_key = ANY(${`{${keys.join(",")}}`}::text[])
+    GROUP BY 1, 2
+  `)) as any[];
+  const out: Record<string, KeyCounts> = Object.fromEntries(keys.map((k) => [k, { produced: 0, consumed: 0 }]));
+  for (const r of rows) out[r.outcome_key][r.direction as Direction] = Number(r.n);
+  return out;
+}
+
+/**
+ * What a relabel of `fromKey` -> `toKey` on the stated subjects moves: every
+ * occurrence of those subjects under fromKey (both directions unless narrowed),
+ * on any run, and the occurrences it would collide with. Reads only.
+ */
+export async function planRelabel(req: RelabelRequest): Promise<RelabelPlan> {
+  const fromKey = normalizeOutcomeKey(req.fromKey);
+  const toKey = normalizeOutcomeKey(req.toKey);
+  const subjectIds = [...new Set(req.subjectIds)];
+  const directions = req.directions && req.directions.length > 0 ? [...new Set(req.directions)] : (["produced", "consumed"] as Direction[]);
+  const ids = sql.join(subjectIds.map((x) => sql`${x}`), sql`, `);
+  const dirs = `{${directions.join(",")}}`;
+  const rows = (await db.execute(sql`
+    SELECT o.id, o.run_id, o.direction, o.subject_id, o.declared_at, c.id AS colliding_id
+    FROM run_outcomes o
+    LEFT JOIN run_outcomes c
+      ON c.run_id = o.run_id AND c.direction = o.direction AND c.outcome_key = ${toKey}
+     AND c.subject_service = o.subject_service AND c.subject_id = o.subject_id
+    WHERE o.subject_service = ${req.subjectService} AND o.subject_id IN (${ids})
+      AND o.outcome_key = ${fromKey} AND o.direction = ANY(${dirs}::text[])
+    ORDER BY o.id
+  `)) as any[];
+  const [first] = (await db.execute(sql`
+    SELECT to_char(MIN(LEAST(o.declared_at, r.started_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day
+    FROM run_outcomes o JOIN runs r ON r.id = o.run_id
+    WHERE o.subject_service = ${req.subjectService} AND o.subject_id IN (${ids})
+      AND o.outcome_key IN (${fromKey}, ${toKey})
+  `)) as any[];
+  const before = await fleetKeyCounts([fromKey, toKey]);
+  const toMove = rows.map((r) => ({
+    occurrenceId: r.id as string,
+    runId: r.run_id as string,
+    direction: r.direction as Direction,
+    subjectId: r.subject_id as string,
+    declaredAt: new Date(r.declared_at).toISOString(),
+  }));
+  const after: Record<string, KeyCounts> = JSON.parse(JSON.stringify(before));
+  for (const m of toMove) {
+    after[fromKey][m.direction] -= 1;
+    after[toKey][m.direction] += 1;
+  }
+  const seen = new Set(rows.map((r) => r.subject_id as string));
+  return {
+    fromKey,
+    toKey,
+    subjectService: req.subjectService,
+    toMove,
+    subjectsWithoutFromKey: subjectIds.filter((x) => !seen.has(x)),
+    collisions: rows
+      .filter((r) => r.colliding_id)
+      .map((r) => ({ occurrenceId: r.id, runId: r.run_id, direction: r.direction, subjectId: r.subject_id, collidingOccurrenceId: r.colliding_id })),
+    runCount: new Set(rows.map((r) => r.run_id as string)).size,
+    affectedFromDay: first?.day ?? null,
+    counts: { before, after },
+  };
+}
+
+export class RelabelCollisionError extends Error {
+  constructor(public readonly plan: RelabelPlan) {
+    super(`relabel_collision: ${plan.collisions.length} occurrence(s) already hold ${plan.toKey} for the same run, direction and subject`);
+  }
+}
+
+/**
+ * Moves the planned occurrences to `toKey`: one bronze `outcomes.relabeled` event
+ * per run (reason, relabeledBy, from/to keys, affectedFromDay, each item's id with
+ * its new AND previous key), all in one transaction; the projection updates silver
+ * in place (same id, run, subject, quantity, time, performer). Never a delete.
+ * Refused whole on any collision. The refresher recomputes every stored day from
+ * affectedFromDay (staleComputedDays), so every per-day figure keyed on the outcome
+ * follows. Idempotent: a replay finds nothing under fromKey and writes nothing.
+ */
+export async function applyRelabel(req: RelabelRequest, sourceService: string | null): Promise<RelabelPlan & { relabeledAt: string | null }> {
+  const plan = await planRelabel(req);
+  if (plan.collisions.length > 0) throw new RelabelCollisionError(plan);
+  if (plan.toMove.length === 0) return { ...plan, counts: { before: plan.counts.before, after: plan.counts.before }, relabeledAt: null };
+  const byRun = new Map<string, RelabelPlan["toMove"]>();
+  for (const m of plan.toMove) byRun.set(m.runId, [...(byRun.get(m.runId) ?? []), m]);
+  let relabeledAt: string | null = null;
+  // A run that took the target key after the plan read collides in the projection
+  // (run_outcomes' unique key): the whole move rolls back, re-planned to name it.
+  await db.transaction(async (tx) => {
+    for (const [runId, items] of byRun) {
+      const [event] = await tx
+        .insert(outcomeDeclarationEvents)
+        .values({
+          runId,
+          eventType: "outcomes.relabeled",
+          sourceService,
+          payload: {
+            allocationVersion: ALLOCATION_VERSION,
+            reason: req.reason,
+            relabeledBy: req.relabeledBy,
+            fromKey: plan.fromKey,
+            toKey: plan.toKey,
+            affectedFromDay: plan.affectedFromDay,
+            items: items.map((m) => ({
+              id: m.occurrenceId,
+              direction: m.direction,
+              subject_service: plan.subjectService,
+              subject_id: m.subjectId,
+              outcome_key: plan.toKey,
+              previous_outcome_key: plan.fromKey,
+            })),
+          },
+        })
+        .returning({ occurredAt: outcomeDeclarationEvents.occurredAt });
+      relabeledAt = event.occurredAt.toISOString();
+    }
+  }).catch(async (err) => {
+    if (pgErrorCode(err) !== "23505") throw err;
+    const raced = await planRelabel(req);
+    throw new RelabelCollisionError(raced.collisions.length > 0 ? raced : plan);
+  });
+  return { ...plan, counts: { before: plan.counts.before, after: await fleetKeyCounts([plan.fromKey, plan.toKey]) }, relabeledAt };
 }
 
 // ---------------------------------------------------------------------------
@@ -2218,8 +2394,8 @@ const CURRENT_DAY_SQL = sql`outcome_costs AND consumed_sources AND support_split
  *    land from the run's start; a consumption counts on its effective day and ranks
  *    the later reuses of its producer;
  *  - a support mark (moves every day from its run's start);
- *  - a declaration taken back or a support mark undone (from the first day its
- *    rows could have touched, stated on the event);
+ *  - a declaration taken back, relabelled to another outcome key, or a support
+ *    mark undone (from the first day its rows could have touched, stated on the event);
  *  - SPEND landing on a past day after it was computed: a late incurred cost
  *    (0048, dated in the past) or a hold materialized days after it was taken
  *    (3,255 in the week to 2026-10-24): the day's ledger itself moved.
@@ -2259,7 +2435,7 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   }
   const voids = (await db.execute(sql`
     SELECT payload->>'affectedFromDay' AS from_day, MAX(occurred_at) AS occurred_at FROM outcome_declaration_events
-    WHERE event_type IN ('outcomes.voided', 'outcomes.voided_scoped', 'run.support_unmarked') AND occurred_at > ${oldest}::timestamptz
+    WHERE event_type IN ('outcomes.voided', 'outcomes.voided_scoped', 'outcomes.relabeled', 'run.support_unmarked') AND occurred_at > ${oldest}::timestamptz
     GROUP BY 1
   `)) as any[];
   for (const v of voids) {

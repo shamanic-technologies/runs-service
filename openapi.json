@@ -4400,7 +4400,7 @@
                 "outcomeKey": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_]{1,63}$",
-                  "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+                  "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, threads_post_published, x_post_published, linkedin_post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
                   "example": "email_checked"
                 },
                 "subjectService": {
@@ -4449,7 +4449,7 @@
           "outcomeKey": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9_]{1,63}$",
-            "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+            "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, threads_post_published, x_post_published, linkedin_post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
             "example": "email_checked"
           },
           "subjectService": {
@@ -4576,6 +4576,265 @@
         "required": [
           "reason",
           "voidedBy"
+        ]
+      },
+      "RelabelOutcomesResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "relabeled",
+              "nothing_to_relabel"
+            ],
+            "description": "preview = dry run, nothing written; relabeled = moved by this call; nothing_to_relabel = no occurrence of fromKey left on these subjects (a replay), nothing written."
+          },
+          "fromKey": {
+            "type": "string"
+          },
+          "toKey": {
+            "type": "string"
+          },
+          "subjectService": {
+            "type": "string"
+          },
+          "movedCount": {
+            "type": "integer",
+            "description": "Occurrences that move (preview) or moved (apply)."
+          },
+          "runCount": {
+            "type": "integer",
+            "description": "Runs those occurrences sit on (one bronze event per run on apply)."
+          },
+          "occurrences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "occurrenceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "runId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "produced",
+                    "consumed"
+                  ]
+                },
+                "subjectId": {
+                  "type": "string"
+                },
+                "declaredAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "occurrenceId",
+                "runId",
+                "direction",
+                "subjectId",
+                "declaredAt"
+              ]
+            },
+            "description": "Each occurrence that moves, id order."
+          },
+          "subjectsWithoutFromKey": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Stated subjects holding no occurrence of fromKey (already moved, or never declared under it)."
+          },
+          "collisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "occurrenceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "runId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "produced",
+                    "consumed"
+                  ]
+                },
+                "subjectId": {
+                  "type": "string"
+                },
+                "collidingOccurrenceId": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "required": [
+                "occurrenceId",
+                "runId",
+                "direction",
+                "subjectId",
+                "collidingOccurrenceId"
+              ]
+            },
+            "description": "Occurrences whose run already holds toKey for the same direction and subject: the apply is refused (409 relabel_collision) while any is listed."
+          },
+          "affectedFromDay": {
+            "type": "string",
+            "nullable": true,
+            "description": "First UTC day the move can change (earliest run start or declaration among these subjects' rows of either key): every stored ledger day from it is recomputed by the refresher."
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "produced": {
+                      "type": "integer"
+                    },
+                    "consumed": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "produced",
+                    "consumed"
+                  ]
+                }
+              },
+              "after": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "produced": {
+                      "type": "integer"
+                    },
+                    "consumed": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "produced",
+                    "consumed"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "before",
+              "after"
+            ],
+            "description": "Fleet-wide occurrences per key (fromKey, toKey) and direction: before the move and after it (projected on a preview, re-read on apply)."
+          },
+          "relabeledAt": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time",
+            "description": "Apply only: the bronze events' instant (null when nothing moved)."
+          }
+        },
+        "required": [
+          "status",
+          "fromKey",
+          "toKey",
+          "subjectService",
+          "movedCount",
+          "runCount",
+          "occurrences",
+          "subjectsWithoutFromKey",
+          "collisions",
+          "affectedFromDay",
+          "counts"
+        ]
+      },
+      "RelabelOutcomesRequest": {
+        "type": "object",
+        "properties": {
+          "fromKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The outcome key the occurrences carry today (may be a key the catalogue no longer holds).",
+            "example": "post_published"
+          },
+          "toKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The outcome key they move to: must be a features-service catalogue step (GET /public/catalogue/steps), like any declaration (400 unknown_outcome_key; 502 when the catalogue cannot be read).",
+            "example": "threads_post_published"
+          },
+          "subjectService": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The service owning the subjects (subject_service of the occurrences).",
+            "example": "meta-service"
+          },
+          "subjectIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "minItems": 1,
+            "maxItems": 1000,
+            "description": "The subjects whose occurrences move (<= 1000). Every occurrence of fromKey on these subjects moves, on any run.",
+            "example": [
+              "<threads publication id>"
+            ]
+          },
+          "directions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "produced",
+                "consumed"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 2,
+            "description": "Narrow to these directions (absent = both)."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Why (kept in the bronze log).",
+            "example": "post_published retired: an outcome is the WHAT as fine as possible (owner 2026-11-07)"
+          },
+          "relabeledBy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Who decided it (a person, a ticket, a release).",
+            "example": "features-service DELETE-POST-PUBLISHED-1107"
+          }
+        },
+        "required": [
+          "fromKey",
+          "toKey",
+          "subjectService",
+          "subjectIds",
+          "reason",
+          "relabeledBy"
         ]
       },
       "DeclareOutcomesBatchResponse": {
@@ -4730,7 +4989,7 @@
                       "outcomeKey": {
                         "type": "string",
                         "pattern": "^[a-z][a-z0-9_]{1,63}$",
-                        "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+                        "description": "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, threads_post_published, x_post_published, linkedin_post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
                         "example": "email_checked"
                       },
                       "subjectService": {
@@ -15217,6 +15476,136 @@
           },
           "409": {
             "description": "run_org_mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/outcome-occurrences/relabel/preview": {
+      "post": {
+        "summary": "Dry run: which occurrences a relabel would move (staff)",
+        "description": "Moves recorded outcome occurrences from one outcome key to another, never deleting one (OUTCOME-RELABEL-1107: a retired coarse key such as post_published goes to its network's fine key, threads_post_published / x_post_published / linkedin_post_published, per subject). Scope: every occurrence of fromKey whose (subjectService, subjectId) is listed, on any run, both directions unless `directions` narrows it. Each occurrence keeps its id, run, subject, quantity, declaration time and performer. History kept the ledger way: one bronze `outcomes.relabeled` event per run (reason, relabeledBy, fromKey, toKey, affectedFromDay, each item with its new AND previous key), projected onto silver run_outcomes. Every derived figure keyed on the outcome follows: the refresher marks every stored ledger day from affectedFromDay stale and recomputes it (outcome cost days, pipe units, coverage, loss shares), and the ledger reads list those days in daysMissing / daysStale until then; the per-occurrence read moves at once. Refused whole (409 relabel_collision, nothing written) when a run already holds toKey for the same direction and subject. Idempotent: a replay is 200 nothing_to_relabel. Staff door: x-api-key only (x-service-name optional, stored as the event's source service). Writes nothing: lists what would move, the collisions, and the per-key counts before / projected after. Example body: {\"fromKey\":\"post_published\",\"toKey\":\"threads_post_published\",\"subjectService\":\"meta-service\",\"subjectIds\":[\"<id>\"],\"reason\":\"post_published retired\",\"relabeledBy\":\"DELETE-POST-PUBLISHED-1107\"}.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelabelOutcomesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dry run (status preview)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelabelOutcomesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (fromKey = toKey included), or unknown_outcome_key (toKey not in the catalogue)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/outcome-occurrences/relabel": {
+      "post": {
+        "summary": "Relabel recorded occurrences to another outcome key (staff)",
+        "description": "Moves recorded outcome occurrences from one outcome key to another, never deleting one (OUTCOME-RELABEL-1107: a retired coarse key such as post_published goes to its network's fine key, threads_post_published / x_post_published / linkedin_post_published, per subject). Scope: every occurrence of fromKey whose (subjectService, subjectId) is listed, on any run, both directions unless `directions` narrows it. Each occurrence keeps its id, run, subject, quantity, declaration time and performer. History kept the ledger way: one bronze `outcomes.relabeled` event per run (reason, relabeledBy, fromKey, toKey, affectedFromDay, each item with its new AND previous key), projected onto silver run_outcomes. Every derived figure keyed on the outcome follows: the refresher marks every stored ledger day from affectedFromDay stale and recomputes it (outcome cost days, pipe units, coverage, loss shares), and the ledger reads list those days in daysMissing / daysStale until then; the per-occurrence read moves at once. Refused whole (409 relabel_collision, nothing written) when a run already holds toKey for the same direction and subject. Idempotent: a replay is 200 nothing_to_relabel. Staff door: x-api-key only (x-service-name optional, stored as the event's source service). Same body as the preview; run it first. Example body: {\"fromKey\":\"post_published\",\"toKey\":\"threads_post_published\",\"subjectService\":\"meta-service\",\"subjectIds\":[\"<id>\"],\"reason\":\"post_published retired\",\"relabeledBy\":\"DELETE-POST-PUBLISHED-1107\"}.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelabelOutcomesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Nothing left to move (status nothing_to_relabel, a replay)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelabelOutcomesResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Moved (status relabeled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelabelOutcomesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (fromKey = toKey included), or unknown_outcome_key (toKey not in the catalogue)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "relabel_collision: details = the full plan, collisions listed; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)",
             "content": {
               "application/json": {
                 "schema": {
