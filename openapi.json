@@ -1689,6 +1689,308 @@
           "refundedBy"
         ]
       },
+      "RepricePreviewResponse": {
+        "type": "object",
+        "properties": {
+          "costCount": {
+            "type": "number",
+            "description": "Charged cost rows in the set."
+          },
+          "runCount": {
+            "type": "number",
+            "description": "Distinct runs those rows belong to."
+          },
+          "quantityTotal": {
+            "type": "string"
+          },
+          "grossBeforeInUsdCents": {
+            "type": "string",
+            "description": "Gross of the set as written today. 10-decimal string."
+          },
+          "grossAfterInUsdCents": {
+            "type": "string",
+            "description": "Gross of the set once re-priced (what apply writes). 10-decimal string."
+          },
+          "netBeforeInUsdCents": {
+            "type": "string"
+          },
+          "netAfterInUsdCents": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "costsTruncated": {
+            "type": "boolean",
+            "description": "True when more rows match than the listing cap. The TOTALS always cover the full set."
+          },
+          "costsListLimit": {
+            "type": "number"
+          },
+          "costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepriceMatchedCost"
+            }
+          }
+        },
+        "required": [
+          "costCount",
+          "runCount",
+          "quantityTotal",
+          "grossBeforeInUsdCents",
+          "grossAfterInUsdCents",
+          "netBeforeInUsdCents",
+          "netAfterInUsdCents",
+          "orgId",
+          "costsTruncated",
+          "costsListLimit",
+          "costs"
+        ]
+      },
+      "RepriceMatchedCost": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "costName": {
+            "type": "string"
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "taskName": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "unitCostBeforeInUsdCents": {
+            "type": "string"
+          },
+          "unitCostAfterInUsdCents": {
+            "type": "string"
+          },
+          "totalCostBeforeInUsdCents": {
+            "type": "string"
+          },
+          "totalCostAfterInUsdCents": {
+            "type": "string"
+          },
+          "netCostBeforeInUsdCents": {
+            "type": "string"
+          },
+          "netCostAfterInUsdCents": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "runId",
+          "costName",
+          "serviceName",
+          "taskName",
+          "quantity",
+          "unitCostBeforeInUsdCents",
+          "unitCostAfterInUsdCents",
+          "totalCostBeforeInUsdCents",
+          "totalCostAfterInUsdCents",
+          "netCostBeforeInUsdCents",
+          "netCostAfterInUsdCents",
+          "createdAt"
+        ]
+      },
+      "RepricePreviewRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Org whose charged rows are re-priced (the RUN's org). Required: a re-price always belongs to one org."
+          },
+          "costName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact cost name. Required: one re-price = one cost name."
+          },
+          "fromUnitCostInUsdCents": {
+            "type": "string",
+            "pattern": "^\\d{1,6}(\\.\\d{1,10})?$",
+            "description": "The unit price the rows were written at (exact match). Required: only rows still at this price match, so a re-apply matches nothing.",
+            "example": "1.1923620000"
+          },
+          "toUnitCostInUsdCents": {
+            "type": "string",
+            "pattern": "^\\d{1,6}(\\.\\d{1,10})?$",
+            "description": "The unit price the rows are re-priced to. Gross = quantity x this price; net follows with each row's own frozen usage discount.",
+            "example": "0.1650000000"
+          },
+          "createdAfter": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive lower bound on the cost row's created_at."
+          },
+          "createdBefore": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive upper bound on the cost row's created_at."
+          },
+          "serviceName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to costs whose run has this service name."
+          },
+          "taskName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to costs whose run has this task name."
+          }
+        },
+        "required": [
+          "orgId",
+          "costName",
+          "fromUnitCostInUsdCents",
+          "toUnitCostInUsdCents"
+        ]
+      },
+      "RepriceApplyResponse": {
+        "type": "object",
+        "properties": {
+          "costCount": {
+            "type": "number",
+            "description": "Charged cost rows in the set."
+          },
+          "runCount": {
+            "type": "number",
+            "description": "Distinct runs those rows belong to."
+          },
+          "quantityTotal": {
+            "type": "string"
+          },
+          "grossBeforeInUsdCents": {
+            "type": "string",
+            "description": "Gross of the set as written today. 10-decimal string."
+          },
+          "grossAfterInUsdCents": {
+            "type": "string",
+            "description": "Gross of the set once re-priced (what apply writes). 10-decimal string."
+          },
+          "netBeforeInUsdCents": {
+            "type": "string"
+          },
+          "netAfterInUsdCents": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "repricedCostCount": {
+            "type": "number",
+            "description": "Rows re-priced by THIS call (the totals cover exactly these rows). Zero on a re-apply."
+          },
+          "remainingCostCount": {
+            "type": "number",
+            "description": "Rows of the set still at the old price after this call. Re-call apply until 0."
+          }
+        },
+        "required": [
+          "costCount",
+          "runCount",
+          "quantityTotal",
+          "grossBeforeInUsdCents",
+          "grossAfterInUsdCents",
+          "netBeforeInUsdCents",
+          "netAfterInUsdCents",
+          "orgId",
+          "repricedCostCount",
+          "remainingCostCount"
+        ]
+      },
+      "RepriceApplyRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Org whose charged rows are re-priced (the RUN's org). Required: a re-price always belongs to one org."
+          },
+          "costName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact cost name. Required: one re-price = one cost name."
+          },
+          "fromUnitCostInUsdCents": {
+            "type": "string",
+            "pattern": "^\\d{1,6}(\\.\\d{1,10})?$",
+            "description": "The unit price the rows were written at (exact match). Required: only rows still at this price match, so a re-apply matches nothing.",
+            "example": "1.1923620000"
+          },
+          "toUnitCostInUsdCents": {
+            "type": "string",
+            "pattern": "^\\d{1,6}(\\.\\d{1,10})?$",
+            "description": "The unit price the rows are re-priced to. Gross = quantity x this price; net follows with each row's own frozen usage discount.",
+            "example": "0.1650000000"
+          },
+          "createdAfter": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive lower bound on the cost row's created_at."
+          },
+          "createdBefore": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive upper bound on the cost row's created_at."
+          },
+          "serviceName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to costs whose run has this service name."
+          },
+          "taskName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to costs whose run has this task name."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 500,
+            "description": "Why the rows are re-priced. Recorded in the bronze audit (`cost.repriced`)."
+          },
+          "repricedBy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Who authorized the re-price (staff email / session). Recorded in the bronze audit."
+          },
+          "maxCosts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000,
+            "description": "Rows re-priced by this call, oldest first (default and max 5000). A larger set is applied in successive calls until remainingCostCount is 0."
+          }
+        },
+        "required": [
+          "orgId",
+          "costName",
+          "fromUnitCostInUsdCents",
+          "toUnitCostInUsdCents",
+          "reason",
+          "repricedBy"
+        ]
+      },
       "IncurredCostsPreviewResponse": {
         "type": "object",
         "properties": {
@@ -12236,6 +12538,96 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/cost-reprices/preview": {
+      "post": {
+        "summary": "Preview a re-price of charged cost rows (writes nothing)",
+        "description": "Rows of one org and one cost name, status='actual', cost_source='platform', still at fromUnitCostInUsdCents (optional created_at window, service, task). Returns gross and net BEFORE and AFTER over the FULL set, plus a listing capped at 500. Apply re-prices exactly this set.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepricePreviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matched rows + before/after totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepricePreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/cost-reprices/apply": {
+      "post": {
+        "summary": "Re-price charged cost rows to a stated unit price",
+        "description": "Writes one append-only `cost.repriced` bronze event per row (old and new unit, gross, net, reason, repricedBy) in one transaction; the projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepriceApplyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Re-price applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepriceApplyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

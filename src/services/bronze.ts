@@ -23,7 +23,7 @@ export type RunLifecycleEventType =
   | "run.failed"
   | "run.org_deleted"
   | "run.feature_slug_corrected";
-export type CostLifecycleEventType = "cost.added" | "cost.materialized" | "cost.cancelled" | "cost.refunded";
+export type CostLifecycleEventType = "cost.added" | "cost.materialized" | "cost.cancelled" | "cost.refunded" | "cost.repriced";
 
 export type Identity = {
   orgId?: string | null;

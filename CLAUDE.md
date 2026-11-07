@@ -21,6 +21,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/schemas.ts` — Zod schemas (source of truth for validation + OpenAPI)
 - `src/routes/runs.ts` — CRUD routes for runs and costs (run-tree reads on `readDb`, see "Run creation never queues behind run-tree reads"; a campaign's running runs: "A campaign's running runs")
 - `src/routes/refunds.ts` — staff cost-refund action (preview + apply). See "Refunded costs".
+- `src/routes/reprices.ts` — staff re-price of charged cost rows (preview + apply). See "Re-priced costs".
 - `src/routes/incurred-costs.ts` — late declaration of never-charged past spend (preview + apply). See "Incurred, never-charged costs".
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
@@ -918,6 +919,21 @@ cheaper on the incurred basis).
   locks). Apply 422s with the per-item list if any item is invalid, writing nothing.
 - Guard: `tests/integration/incurred-costs.test.ts` (charge reads byte-equal before /
   after, refunded columns + cost-day rows on the stated days, rollup vs live).
+
+## Re-priced costs — a charged row written at a wrong price (migration 0102, NEWSLETTER-COST-1107)
+
+`POST /internal/cost-reprices/preview` then `/apply` (`src/routes/reprices.ts`, internal key). First use: costs-service's refresh froze
+`postmark-email-send` at 1.1923620000 cents 2026-10-17 -> 11-07; owner chose to re-price OUR org's rows to the price served for it.
+- **Set** (one where-clause for both): ONE run org, ONE cost name, `status='actual'`, `cost_source='platform'`, unit price EXACTLY
+  `fromUnitCostInUsdCents`, optional created_at window / service / task. A moved row no longer carries the old price: re-apply = 0.
+- **Amounts in Postgres**: gross = round(quantity x new unit, 10), net = round(gross x (1 - the row's frozen `usage_discount_pct`), 10),
+  a NULL net stays NULL. Preview serves before/after over the FULL set (listing capped at 500).
+- **Apply**: oldest first, <= 5000 rows per call (`maxCosts`), re-call until `remainingCostCount` = 0. One statement: rows locked
+  `FOR UPDATE`, one `cost.repriced` bronze event per row (old + new unit/gross/net, reason, repricedBy). The projection moves
+  unit/total/net only while the row is still `actual` AT the old price (a replay moves nothing). Every rollup trigger fires on
+  UPDATE of total/net; stored outcome-ledger days from the row's run start onward re-stale (`staleComputedDays`).
+- No billing notify (billing re-derives from `org-usage-total`). Never a hand UPDATE: this IS the audited path.
+  Guard: `tests/integration/cost-reprices.test.ts`.
 
 ## Outcome occurrences — the production-cost ledger (migration 0057, COST-ACCOUNTING-1023)
 

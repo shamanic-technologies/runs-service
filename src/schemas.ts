@@ -1287,6 +1287,114 @@ registry.registerPath({
   },
 });
 
+// --- Re-priced costs (staff re-price of already-written charged rows) ---
+//
+// A charged cost row written at a price that was WRONG (a frozen catalogue price,
+// NEWSLETTER-COST-1107) is re-priced to a stated unit price. Same shape as the
+// refund action: preview and apply take the SAME filter and select the SAME set.
+// The selection always names the ONE cost name and the OLD unit price, so a row
+// already moved never matches again (idempotent) and a row written at any other
+// price is never touched. See CLAUDE.md "Re-priced costs".
+
+export const REPRICE_PREVIEW_LIST_LIMIT = 500;
+export const REPRICE_APPLY_MAX_COSTS = 5000;
+
+const UnitPriceSchema = z
+  .string()
+  .regex(/^\d{1,6}(\.\d{1,10})?$/, "a non-negative decimal with at most 10 decimals");
+
+export const RepriceFilterSchema = z.object({
+  orgId: z.string().uuid().openapi({ description: "Org whose charged rows are re-priced (the RUN's org). Required: a re-price always belongs to one org." }),
+  costName: z.string().min(1).openapi({ description: "Exact cost name. Required: one re-price = one cost name." }),
+  fromUnitCostInUsdCents: UnitPriceSchema.openapi({ description: "The unit price the rows were written at (exact match). Required: only rows still at this price match, so a re-apply matches nothing.", example: "1.1923620000" }),
+  toUnitCostInUsdCents: UnitPriceSchema.openapi({ description: "The unit price the rows are re-priced to. Gross = quantity x this price; net follows with each row's own frozen usage discount.", example: "0.1650000000" }),
+  createdAfter: z.string().datetime().optional().openapi({ description: "Inclusive lower bound on the cost row's created_at." }),
+  createdBefore: z.string().datetime().optional().openapi({ description: "Exclusive upper bound on the cost row's created_at." }),
+  serviceName: z.string().min(1).optional().openapi({ description: "Restrict to costs whose run has this service name." }),
+  taskName: z.string().min(1).optional().openapi({ description: "Restrict to costs whose run has this task name." }),
+});
+
+export type RepriceFilter = z.infer<typeof RepriceFilterSchema>;
+
+export const RepricePreviewRequestSchema = RepriceFilterSchema.openapi("RepricePreviewRequest");
+
+export const RepriceApplyRequestSchema = RepriceFilterSchema.extend({
+  reason: z.string().trim().min(3).max(500).openapi({ description: "Why the rows are re-priced. Recorded in the bronze audit (`cost.repriced`)." }),
+  repricedBy: z.string().trim().min(1).max(200).openapi({ description: "Who authorized the re-price (staff email / session). Recorded in the bronze audit." }),
+  maxCosts: z.number().int().min(1).max(REPRICE_APPLY_MAX_COSTS).optional().openapi({ description: `Rows re-priced by this call, oldest first (default and max ${REPRICE_APPLY_MAX_COSTS}). A larger set is applied in successive calls until remainingCostCount is 0.` }),
+}).openapi("RepriceApplyRequest");
+
+export const RepriceTotalsSchema = z.object({
+  costCount: z.number().openapi({ description: "Charged cost rows in the set." }),
+  runCount: z.number().openapi({ description: "Distinct runs those rows belong to." }),
+  quantityTotal: z.string(),
+  grossBeforeInUsdCents: z.string().openapi({ description: "Gross of the set as written today. 10-decimal string." }),
+  grossAfterInUsdCents: z.string().openapi({ description: "Gross of the set once re-priced (what apply writes). 10-decimal string." }),
+  netBeforeInUsdCents: z.string(),
+  netAfterInUsdCents: z.string(),
+});
+
+export const RepriceMatchedCostSchema = z
+  .object({
+    id: z.string().uuid(),
+    runId: z.string().uuid(),
+    costName: z.string(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    quantity: z.string(),
+    unitCostBeforeInUsdCents: z.string(),
+    unitCostAfterInUsdCents: z.string(),
+    totalCostBeforeInUsdCents: z.string(),
+    totalCostAfterInUsdCents: z.string(),
+    netCostBeforeInUsdCents: z.string(),
+    netCostAfterInUsdCents: z.string(),
+    createdAt: z.string().datetime(),
+  })
+  .openapi("RepriceMatchedCost");
+
+export const RepricePreviewResponseSchema = RepriceTotalsSchema.extend({
+  orgId: z.string().uuid(),
+  costsTruncated: z.boolean().openapi({ description: "True when more rows match than the listing cap. The TOTALS always cover the full set." }),
+  costsListLimit: z.number(),
+  costs: z.array(RepriceMatchedCostSchema),
+}).openapi("RepricePreviewResponse");
+
+export const RepriceApplyResponseSchema = RepriceTotalsSchema.extend({
+  orgId: z.string().uuid(),
+  repricedCostCount: z.number().openapi({ description: "Rows re-priced by THIS call (the totals cover exactly these rows). Zero on a re-apply." }),
+  remainingCostCount: z.number().openapi({ description: "Rows of the set still at the old price after this call. Re-call apply until 0." }),
+}).openapi("RepriceApplyResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/cost-reprices/preview",
+  summary: "Preview a re-price of charged cost rows (writes nothing)",
+  description:
+    "Rows of one org and one cost name, status='actual', cost_source='platform', still at fromUnitCostInUsdCents (optional created_at window, service, task). Returns gross and net BEFORE and AFTER over the FULL set, plus a listing capped at 500. Apply re-prices exactly this set.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: RepricePreviewRequestSchema } } } },
+  responses: {
+    200: { description: "Matched rows + before/after totals", content: { "application/json": { schema: RepricePreviewResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/cost-reprices/apply",
+  summary: "Re-price charged cost rows to a stated unit price",
+  description:
+    "Writes one append-only `cost.repriced` bronze event per row (old and new unit, gross, net, reason, repricedBy) in one transaction; the projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: RepriceApplyRequestSchema } } } },
+  responses: {
+    200: { description: "Re-price applied", content: { "application/json": { schema: RepriceApplyResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Incurred, never-charged costs (late declaration of past spend) ---
 //
 // A cost that REALLY happened at the provider, that the platform decided never to
