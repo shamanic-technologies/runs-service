@@ -10,7 +10,7 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { OUTCOME_PERFORMER_KINDS, MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema } from "../schemas.js";
+import { OUTCOME_PERFORMER_KINDS, MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema, RelabelOutcomesRequestSchema } from "../schemas.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -19,6 +19,10 @@ import {
   RunOutcomesVoidedError,
   isRunOutcomesVoided,
   voidRunOutcomes,
+  planRelabel,
+  applyRelabel,
+  RelabelCollisionError,
+  type RelabelPlan,
   hasDeclaredOnRun,
   addDays,
   normalizeOutcomeKey,
@@ -349,6 +353,69 @@ router.post("/v1/platform-runs/subject-equivalences", requirePlatformAuth, async
 });
 router.post("/v1/runs/:id/outcomes/void", requireApiKey, (req, res) => handleVoid(req, res, true));
 router.post("/v1/platform-runs/:id/outcomes/void", requirePlatformAuth, (req, res) => handleVoid(req, res, false));
+
+// ---------------------------------------------------------------------------
+// Relabel recorded occurrences to another outcome key (OUTCOME-RELABEL-1107):
+// staff door, dry run + apply. Rules: services/outcome-ledger.ts (applyRelabel).
+// ---------------------------------------------------------------------------
+
+const wireRelabel = (status: "preview" | "relabeled" | "nothing_to_relabel", plan: RelabelPlan, relabeledAt?: string | null) => ({
+  status,
+  fromKey: plan.fromKey,
+  toKey: plan.toKey,
+  subjectService: plan.subjectService,
+  movedCount: plan.toMove.length,
+  runCount: plan.runCount,
+  occurrences: plan.toMove,
+  subjectsWithoutFromKey: plan.subjectsWithoutFromKey,
+  collisions: plan.collisions,
+  affectedFromDay: plan.affectedFromDay,
+  counts: plan.counts,
+  ...(relabeledAt !== undefined && { relabeledAt }),
+});
+
+const staffRelabel = (apply: boolean) => async (req: Request, res: Response) => {
+  try {
+    const parsed = RelabelOutcomesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    const body = parsed.data;
+    // The target is a catalogue step like any declaration; the source may be a retired key.
+    const unknown = await unknownOutcomeKeys([normalizeOutcomeKey(body.toKey)]);
+    if (unknown.length > 0) {
+      res.status(400).json({
+        error: "unknown_outcome_key",
+        details: { unknownKeys: unknown, catalogue: "features-service GET /public/catalogue/steps (rows[].key)" },
+      });
+      return;
+    }
+    if (!apply) {
+      res.json(wireRelabel("preview", await planRelabel(body)));
+      return;
+    }
+    const source = (req.headers["x-service-name"] as string | undefined)?.trim() || null;
+    const out = await applyRelabel(body, source);
+    const moved = out.relabeledAt !== null;
+    res.status(moved ? 201 : 200).json(wireRelabel(moved ? "relabeled" : "nothing_to_relabel", out, out.relabeledAt));
+  } catch (err) {
+    if (err instanceof RelabelCollisionError) {
+      res.status(409).json({ error: "relabel_collision", message: err.message, details: wireRelabel("preview", err.plan) });
+      return;
+    }
+    if (err instanceof OutcomeCatalogueError) {
+      console.error("[Runs Service] outcome catalogue unreadable, relabel refused:", err.message);
+      res.status(502).json({ error: `outcome_catalogue_unavailable: ${err.message}` });
+      return;
+    }
+    console.error("[Runs Service] relabel failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+router.post("/internal/outcome-occurrences/relabel/preview", requireInternalAuth, staffRelabel(false));
+router.post("/internal/outcome-occurrences/relabel", requireInternalAuth, staffRelabel(true));
 
 // ---------------------------------------------------------------------------
 // Support marks (migrations 0062 + 0064): staff door (any service) and owner door

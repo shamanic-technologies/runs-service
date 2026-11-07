@@ -2714,7 +2714,7 @@ export const OutcomeOccurrenceInputSchema = z
   .object({
     outcomeKey: z.string().regex(OUTCOME_KEY_RE).openapi({
       description:
-        "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
+        "Outcome (step) key from the features-service catalogue (`GET /public/catalogue/steps`): lead_identified, email_found, phone_found, email_checked, lead_found, company_researched, message_written, message_sent, audience_built, creative_made, threads_post_published, x_post_published, linkedin_post_published, ad_shown, conversation (= Positive reply), meeting_booked… Checked against that catalogue on every call: an unknown key is a 400 `unknown_outcome_key`, an unreadable catalogue a 502. Legacy `email_sent` is accepted and stored as `message_sent`.",
       example: "email_checked",
     }),
     subjectService: z.string().regex(SUBJECT_SERVICE_RE).openapi({
@@ -2920,6 +2920,62 @@ for (const [path, auth] of [
       403: { description: "not_run_owner: whole-run void by a service that does not own the run; not_run_declarer: scoped void by a non-owner that declared nothing on the run", content: { "application/json": { schema: ErrorSchema } } },
       404: { description: "Run not found", content: { "application/json": { schema: ErrorSchema } } },
       409: { description: "run_org_mismatch", content: { "application/json": { schema: ErrorSchema } } },
+    },
+  });
+}
+
+// --- Relabelling recorded occurrences to another outcome key (OUTCOME-RELABEL-1107) ---
+
+export const RelabelOutcomesRequestSchema = z
+  .object({
+    fromKey: z.string().trim().min(1).max(128).openapi({ description: "The outcome key the occurrences carry today (may be a key the catalogue no longer holds).", example: "post_published" }),
+    toKey: z.string().trim().min(1).max(128).openapi({ description: "The outcome key they move to: must be a features-service catalogue step (GET /public/catalogue/steps), like any declaration (400 unknown_outcome_key; 502 when the catalogue cannot be read).", example: "threads_post_published" }),
+    subjectService: z.string().trim().min(1).max(128).openapi({ description: "The service owning the subjects (subject_service of the occurrences).", example: "meta-service" }),
+    subjectIds: z.array(z.string().trim().min(1).max(512)).min(1).max(1000).openapi({ description: "The subjects whose occurrences move (<= 1000). Every occurrence of fromKey on these subjects moves, on any run.", example: ["<threads publication id>"] }),
+    directions: z.array(z.enum(["produced", "consumed"])).min(1).max(2).optional().openapi({ description: "Narrow to these directions (absent = both)." }),
+    reason: z.string().trim().min(1).max(2000).openapi({ description: "Why (kept in the bronze log).", example: "post_published retired: an outcome is the WHAT as fine as possible (owner 2026-11-07)" }),
+    relabeledBy: z.string().trim().min(1).max(256).openapi({ description: "Who decided it (a person, a ticket, a release).", example: "features-service DELETE-POST-PUBLISHED-1107" }),
+  })
+  .refine((b) => b.fromKey !== b.toKey, { message: "fromKey and toKey must differ", path: ["toKey"] })
+  .openapi("RelabelOutcomesRequest");
+
+const RelabelKeyCountsSchema = z.record(z.string(), z.object({ produced: z.number().int(), consumed: z.number().int() }));
+
+export const RelabelOutcomesResponseSchema = z
+  .object({
+    status: z.enum(["preview", "relabeled", "nothing_to_relabel"]).openapi({ description: "preview = dry run, nothing written; relabeled = moved by this call; nothing_to_relabel = no occurrence of fromKey left on these subjects (a replay), nothing written." }),
+    fromKey: z.string(),
+    toKey: z.string(),
+    subjectService: z.string(),
+    movedCount: z.number().int().openapi({ description: "Occurrences that move (preview) or moved (apply)." }),
+    runCount: z.number().int().openapi({ description: "Runs those occurrences sit on (one bronze event per run on apply)." }),
+    occurrences: z.array(z.object({ occurrenceId: z.string().uuid(), runId: z.string().uuid(), direction: z.enum(["produced", "consumed"]), subjectId: z.string(), declaredAt: z.string().datetime() })).openapi({ description: "Each occurrence that moves, id order." }),
+    subjectsWithoutFromKey: z.array(z.string()).openapi({ description: "Stated subjects holding no occurrence of fromKey (already moved, or never declared under it)." }),
+    collisions: z.array(z.object({ occurrenceId: z.string().uuid(), runId: z.string().uuid(), direction: z.enum(["produced", "consumed"]), subjectId: z.string(), collidingOccurrenceId: z.string().uuid() })).openapi({ description: "Occurrences whose run already holds toKey for the same direction and subject: the apply is refused (409 relabel_collision) while any is listed." }),
+    affectedFromDay: z.string().nullable().openapi({ description: "First UTC day the move can change (earliest run start or declaration among these subjects' rows of either key): every stored ledger day from it is recomputed by the refresher." }),
+    counts: z.object({ before: RelabelKeyCountsSchema, after: RelabelKeyCountsSchema }).openapi({ description: "Fleet-wide occurrences per key (fromKey, toKey) and direction: before the move and after it (projected on a preview, re-read on apply)." }),
+    relabeledAt: z.string().datetime().nullable().optional().openapi({ description: "Apply only: the bronze events' instant (null when nothing moved)." }),
+  })
+  .openapi("RelabelOutcomesResponse");
+
+const RELABEL_DOCTRINE =
+  "Moves recorded outcome occurrences from one outcome key to another, never deleting one (OUTCOME-RELABEL-1107: a retired coarse key such as post_published goes to its network's fine key, threads_post_published / x_post_published / linkedin_post_published, per subject). Scope: every occurrence of fromKey whose (subjectService, subjectId) is listed, on any run, both directions unless `directions` narrows it. Each occurrence keeps its id, run, subject, quantity, declaration time and performer. History kept the ledger way: one bronze `outcomes.relabeled` event per run (reason, relabeledBy, fromKey, toKey, affectedFromDay, each item with its new AND previous key), projected onto silver run_outcomes. Every derived figure keyed on the outcome follows: the refresher marks every stored ledger day from affectedFromDay stale and recomputes it (outcome cost days, pipe units, coverage, loss shares), and the ledger reads list those days in daysMissing / daysStale until then; the per-occurrence read moves at once. Refused whole (409 relabel_collision, nothing written) when a run already holds toKey for the same direction and subject. Idempotent: a replay is 200 nothing_to_relabel.";
+
+for (const step of ["preview", "apply"] as const) {
+  registry.registerPath({
+    method: "post",
+    path: step === "preview" ? "/internal/outcome-occurrences/relabel/preview" : "/internal/outcome-occurrences/relabel",
+    summary: step === "preview" ? "Dry run: which occurrences a relabel would move (staff)" : "Relabel recorded occurrences to another outcome key (staff)",
+    description: `${RELABEL_DOCTRINE} Staff door: x-api-key only (x-service-name optional, stored as the event's source service). ${step === "preview" ? "Writes nothing: lists what would move, the collisions, and the per-key counts before / projected after." : "Same body as the preview; run it first."} Example body: {\"fromKey\":\"post_published\",\"toKey\":\"threads_post_published\",\"subjectService\":\"meta-service\",\"subjectIds\":[\"<id>\"],\"reason\":\"post_published retired\",\"relabeledBy\":\"DELETE-POST-PUBLISHED-1107\"}.`,
+    security: [{ apiKey: [] }],
+    request: { body: { content: { "application/json": { schema: RelabelOutcomesRequestSchema } } } },
+    responses: {
+      200: { description: step === "preview" ? "Dry run (status preview)" : "Nothing left to move (status nothing_to_relabel, a replay)", content: { "application/json": { schema: RelabelOutcomesResponseSchema } } },
+      ...(step === "apply" && { 201: { description: "Moved (status relabeled)", content: { "application/json": { schema: RelabelOutcomesResponseSchema } } } }),
+      400: { description: "Invalid body (fromKey = toKey included), or unknown_outcome_key (toKey not in the catalogue)", content: { "application/json": { schema: ValidationErrorSchema } } },
+      401: { description: "Unauthorized" },
+      ...(step === "apply" && { 409: { description: "relabel_collision: details = the full plan, collisions listed; nothing written", content: { "application/json": { schema: ValidationErrorSchema } } } }),
+      502: { description: "outcome_catalogue_unavailable: features-service's step catalogue could not be read (nothing written, retry)", content: { "application/json": { schema: ErrorSchema } } },
     },
   });
 }
