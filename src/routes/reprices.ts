@@ -13,16 +13,30 @@
 // carries the old price, so a re-apply matches nothing and no amount moves twice.
 // Apply re-prices at most REPRICE_APPLY_MAX_COSTS rows per call (oldest first);
 // a larger set is applied in successive calls until `remainingCostCount` is 0.
+//
+// SHORT TRANSACTIONS (REPRICE-LOCK-1107). Every re-priced row fires ~20 rollup
+// triggers (org_actual_totals, run_subtree_costs of its ancestors, campaign /
+// cost-name / day / audience rollups). Each trigger UPDATE row-locks a SHARED
+// rollup row until COMMIT, so a 1000-row transaction (~2 min in prod 2026-11-07)
+// made every other service's cost / run write touching the same org, campaign,
+// ancestor or day wait on `Lock: transactionid` behind it (run PATCHes timed out
+// at 10 s). So: the call picks its ids with a lock-free read, then re-prices them
+// REPRICE_APPLY_TX_COSTS at a time, one short transaction each, re-checking the
+// full predicate under the row lock (a row re-priced in between is skipped, so
+// no amount moves twice). A cut call (deploy, crash) rolls back only the open
+// chunk; committed chunks no longer match, so a re-call resumes where it stopped.
 
 import { Router } from "express";
 import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db } from "../db/index.js";
+import { uuidArray } from "../db/uuid-array.js";
 import { requireInternalAuth } from "../middleware/auth.js";
 import {
   RepricePreviewRequestSchema,
   RepriceApplyRequestSchema,
   REPRICE_APPLY_MAX_COSTS,
+  REPRICE_APPLY_TX_COSTS,
   REPRICE_PREVIEW_LIST_LIMIT,
 } from "../schemas.js";
 import type { RepriceFilter } from "../schemas.js";
@@ -52,7 +66,7 @@ function repriceWhere(f: RepriceFilter) {
  * JS float): gross = round(quantity x new unit, 10), net = round(gross x (1 -
  * frozen usage discount), 10), a NULL net (pre-0028 row) stays NULL.
  */
-function matchedSql(f: RepriceFilter, limit?: number, lock = false) {
+function matchedSql(f: RepriceFilter, limit?: number, lock = false, ids?: string[]) {
   return sql`
     SELECT rc.id AS cost_id, rc.run_id, rc.cost_name, rc.quantity::text AS quantity,
            rc.unit_cost_in_usd_cents::text AS unit_before,
@@ -71,6 +85,7 @@ function matchedSql(f: RepriceFilter, limit?: number, lock = false) {
       FROM runs_costs rc
       JOIN runs r ON r.id = rc.run_id
      WHERE ${repriceWhere(f)}
+       ${ids === undefined ? sql`` : sql`AND rc.id = ANY(${uuidArray(ids)})`}
      ORDER BY rc.created_at ASC, rc.id ASC
      ${limit === undefined ? sql`` : sql`LIMIT ${limit}`}
      ${lock ? sql`FOR UPDATE OF rc` : sql``}
@@ -150,6 +165,88 @@ router.post("/internal/cost-reprices/preview", requireInternalAuth, async (req, 
   }
 });
 
+/** Test-only probe, called inside each chunk transaction after its writes ("written")
+ * and after its commit ("committed"). Never set in production. */
+type RepriceTestHook = (phase: "written" | "committed", chunkIndex: number) => Promise<void>;
+let repriceTestHook: RepriceTestHook | null = null;
+export function setRepriceTestHookForTests(h: RepriceTestHook | null) {
+  repriceTestHook = h;
+}
+
+const LOCK_RETRIES = 5;
+
+/**
+ * Re-price ONE chunk of picked ids in its own short transaction: lock the rows
+ * (predicate re-checked under the lock), one bronze `cost.repriced` per row, the
+ * projection trigger moves silver and the rollups. `lock_timeout` bounds how long
+ * this transaction may itself wait while already holding rollup-row locks (a
+ * waiting holder is what chains other writers behind it); on timeout the chunk
+ * rolls back whole and is retried.
+ */
+async function applyChunk(f: RepriceFilter, chunk: string[], reason: string, repricedBy: string, chunkIndex: number) {
+  for (let attempt = 1; ; attempt++) {
+    const t0 = Date.now();
+    try {
+      const rows = await db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+        const written = (await tx.execute(sql`
+          WITH b AS MATERIALIZED (${matchedSql(f, undefined, true, chunk)}),
+          ins AS (
+            INSERT INTO cost_lifecycle_events (run_id, cost_id, event_type, payload, identity)
+            SELECT b.run_id, b.cost_id, 'cost.repriced',
+                   jsonb_build_object(
+                     'costName', b.cost_name,
+                     'quantity', b.quantity,
+                     'fromUnitCostInUsdCents', b.unit_before,
+                     'newUnitCostInUsdCents', b.unit_after,
+                     'fromTotalCostInUsdCents', b.total_before,
+                     'newTotalCostInUsdCents', b.total_after,
+                     'fromNetCostInUsdCents', b.net_before_raw,
+                     'newNetCostInUsdCents', b.net_after_raw,
+                     'usageDiscountPct', b.usage_discount_pct,
+                     'reason', ${reason}::text,
+                     'repricedBy', ${repricedBy}::text
+                   ),
+                   jsonb_build_object(
+                     'orgId', ${f.orgId}::text,
+                     'userId', b.user_id,
+                     'brandIds', to_jsonb(b.brand_ids),
+                     'campaignId', b.campaign_id,
+                     'workflowSlug', b.workflow_slug,
+                     'featureSlug', b.feature_slug,
+                     'goal', b.goal,
+                     'brandProfileId', b.brand_profile_id,
+                     'audienceId', b.audience_id,
+                     'workflowContext', b.workflow_context
+                   )
+              FROM b
+             ORDER BY b.created_at, b.cost_id
+            RETURNING cost_id
+          )
+          SELECT b.run_id, b.quantity, b.total_before, b.total_after, b.net_before, b.net_after_raw,
+                 (SELECT COUNT(*) FROM ins)::int AS events_written
+            FROM b
+        `)) as any[];
+        if (written.length > 0 && Number(written[0].events_written) !== written.length) {
+          throw new Error(`reprice wrote ${written[0].events_written} events for ${written.length} rows`);
+        }
+        await repriceTestHook?.("written", chunkIndex);
+        return written;
+      });
+      return { rows, ms: Date.now() - t0 };
+    } catch (err) {
+      const e = err as { code?: string; cause?: { code?: string } };
+      const code = e.code ?? e.cause?.code;
+      if (code === "55P03" && attempt < LOCK_RETRIES) {
+        console.warn(`[runs-service] cost-reprices/apply: chunk ${chunkIndex} lock_timeout, retry ${attempt}/${LOCK_RETRIES - 1}`);
+        await new Promise((r) => setTimeout(r, 250 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // POST /internal/cost-reprices/apply — re-price the previewed set, oldest first.
 router.post("/internal/cost-reprices/apply", requireInternalAuth, async (req, res) => {
   const parsed = RepriceApplyRequestSchema.safeParse(req.body);
@@ -163,60 +260,50 @@ router.post("/internal/cost-reprices/apply", requireInternalAuth, async (req, re
     return;
   }
   const limit = maxCosts ?? REPRICE_APPLY_MAX_COSTS;
+  // Rows already committed by this call when it fails: those chunks stay applied
+  // (a re-call resumes after them), so the error log says how far it got.
+  let progress: { costCount: number } = { costCount: 0 };
   try {
-    // ONE transaction: lock the batch, freeze its before/after totals, then one
-    // bronze event per row (INSERT ... SELECT, the projection trigger moves silver).
-    // Any failure rolls the whole batch back: no partial money write.
-    const result = await db.transaction(async (tx) => {
-      const [t] = (await tx.execute(sql`
-        WITH b AS MATERIALIZED (${matchedSql(f, limit, true)}),
-        ins AS (
-          INSERT INTO cost_lifecycle_events (run_id, cost_id, event_type, payload, identity)
-          SELECT b.run_id, b.cost_id, 'cost.repriced',
-                 jsonb_build_object(
-                   'costName', b.cost_name,
-                   'quantity', b.quantity,
-                   'fromUnitCostInUsdCents', b.unit_before,
-                   'newUnitCostInUsdCents', b.unit_after,
-                   'fromTotalCostInUsdCents', b.total_before,
-                   'newTotalCostInUsdCents', b.total_after,
-                   'fromNetCostInUsdCents', b.net_before_raw,
-                   'newNetCostInUsdCents', b.net_after_raw,
-                   'usageDiscountPct', b.usage_discount_pct,
-                   'reason', ${reason}::text,
-                   'repricedBy', ${repricedBy}::text
-                 ),
-                 jsonb_build_object(
-                   'orgId', ${f.orgId}::text,
-                   'userId', b.user_id,
-                   'brandIds', to_jsonb(b.brand_ids),
-                   'campaignId', b.campaign_id,
-                   'workflowSlug', b.workflow_slug,
-                   'featureSlug', b.feature_slug,
-                   'goal', b.goal,
-                   'brandProfileId', b.brand_profile_id,
-                   'audienceId', b.audience_id,
-                   'workflowContext', b.workflow_context
-                 )
-            FROM b
-           ORDER BY b.created_at, b.cost_id
-          RETURNING 1
-        )
-        SELECT COUNT(*)::int AS cost_count,
-               COUNT(DISTINCT run_id)::int AS run_count,
-               COALESCE(SUM(quantity::numeric), 0)::text AS quantity_total,
-               COALESCE(SUM(total_before::numeric), 0)::text AS gross_before,
-               COALESCE(SUM(total_after::numeric), 0)::text AS gross_after,
-               COALESCE(SUM(net_before::numeric), 0)::text AS net_before,
-               COALESCE(SUM(COALESCE(net_after_raw, total_after)::numeric), 0)::text AS net_after,
-               (SELECT COUNT(*) FROM ins)::int AS events_written
-          FROM b
-      `)) as any[];
-      if (Number(t.events_written) !== Number(t.cost_count)) {
-        throw new Error(`reprice wrote ${t.events_written} events for ${t.cost_count} rows`);
+    // Lock-free pick of this call's rows (the scan is the slow part: it holds no
+    // lock, so it blocks no writer). Re-priced below in short chunks.
+    const picked = (await db.execute(sql`
+      SELECT rc.id FROM runs_costs rc JOIN runs r ON r.id = rc.run_id
+       WHERE ${repriceWhere(f)}
+       ORDER BY rc.created_at ASC, rc.id ASC
+       LIMIT ${limit}
+    `)) as any[];
+    const ids: string[] = picked.map((r) => r.id);
+    const sums = { costCount: 0, runIds: new Set<string>(), quantity: new Decimal(0), grossBefore: new Decimal(0), grossAfter: new Decimal(0), netBefore: new Decimal(0), netAfter: new Decimal(0) };
+    let maxTransactionMs = 0;
+    let transactionCount = 0;
+    progress = sums;
+    for (let i = 0; i < ids.length; i += REPRICE_APPLY_TX_COSTS) {
+      const chunk = ids.slice(i, i + REPRICE_APPLY_TX_COSTS);
+      const { rows, ms } = await applyChunk(f, chunk, reason, repricedBy, transactionCount);
+      transactionCount += 1;
+      maxTransactionMs = Math.max(maxTransactionMs, ms);
+      for (const r of rows) {
+        sums.costCount += 1;
+        sums.runIds.add(r.run_id);
+        sums.quantity = sums.quantity.plus(r.quantity);
+        sums.grossBefore = sums.grossBefore.plus(r.total_before);
+        sums.grossAfter = sums.grossAfter.plus(r.total_after);
+        sums.netBefore = sums.netBefore.plus(r.net_before);
+        sums.netAfter = sums.netAfter.plus(r.net_after_raw ?? r.total_after);
       }
-      return { totals: shapeTotals(t) };
-    });
+      await repriceTestHook?.("committed", transactionCount - 1);
+    }
+    const result = {
+      totals: {
+        costCount: sums.costCount,
+        runCount: sums.runIds.size,
+        quantityTotal: sums.quantity.toFixed(6),
+        grossBeforeInUsdCents: sums.grossBefore.toFixed(10),
+        grossAfterInUsdCents: sums.grossAfter.toFixed(10),
+        netBeforeInUsdCents: sums.netBefore.toFixed(10),
+        netAfterInUsdCents: sums.netAfter.toFixed(10),
+      },
+    };
     // Counted AFTER commit: inside the transaction it held the org's rollup-row locks
     // (org_actual_totals is one row per org) for the ~20-40 s of the scan, blocking
     // that org's live cost writes (prod 2026-11-07).
@@ -226,16 +313,21 @@ router.post("/internal/cost-reprices/apply", requireInternalAuth, async (req, re
     const remaining = Number(left.n);
 
     console.log(
-      `[runs-service] cost-reprices/apply: org=${f.orgId} cost=${f.costName} ${f.fromUnitCostInUsdCents}->${f.toUnitCostInUsdCents} rows=${result.totals.costCount} gross ${result.totals.grossBeforeInUsdCents}->${result.totals.grossAfterInUsdCents} remaining=${remaining} by=${repricedBy}`
+      `[runs-service] cost-reprices/apply: org=${f.orgId} cost=${f.costName} ${f.fromUnitCostInUsdCents}->${f.toUnitCostInUsdCents} rows=${result.totals.costCount} gross ${result.totals.grossBeforeInUsdCents}->${result.totals.grossAfterInUsdCents} remaining=${remaining} txs=${transactionCount} maxTxMs=${maxTransactionMs} by=${repricedBy}`
     );
     res.json({
       orgId: f.orgId,
       repricedCostCount: result.totals.costCount,
       remainingCostCount: remaining,
+      transactionCount,
+      maxTransactionMs,
       ...result.totals,
     });
   } catch (err) {
-    console.error("[runs-service] Error in POST /internal/cost-reprices/apply:", err);
+    console.error(
+      `[runs-service] Error in POST /internal/cost-reprices/apply (org=${f.orgId} cost=${f.costName}, ${progress.costCount} rows committed by this call before the error; re-call resumes):`,
+      err
+    );
     res.status(500).json({ error: "Internal server error" });
   }
 });

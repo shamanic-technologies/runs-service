@@ -1903,6 +1903,14 @@
           "remainingCostCount": {
             "type": "number",
             "description": "Rows of the set still at the old price after this call. Re-call apply until 0."
+          },
+          "transactionCount": {
+            "type": "number",
+            "description": "Short transactions this call committed (at most 20 rows each)."
+          },
+          "maxTransactionMs": {
+            "type": "number",
+            "description": "Longest of those transactions, in ms (how long this call held shared rollup-row locks at once)."
           }
         },
         "required": [
@@ -1915,7 +1923,9 @@
           "netAfterInUsdCents",
           "orgId",
           "repricedCostCount",
-          "remainingCostCount"
+          "remainingCostCount",
+          "transactionCount",
+          "maxTransactionMs"
         ]
       },
       "RepriceApplyRequest": {
@@ -12800,7 +12810,7 @@
     "/internal/cost-reprices/apply": {
       "post": {
         "summary": "Re-price charged cost rows to a stated unit price",
-        "description": "Writes one append-only `cost.repriced` bronze event per row (old and new unit, gross, net, reason, repricedBy) in one transaction; the projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.",
+        "description": "Writes one append-only `cost.repriced` bronze event per row (old and new unit, gross, net, reason, repricedBy), 20 rows per short transaction so other writers never queue behind it; a cut call keeps its committed chunks and a re-call resumes. The projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.",
         "security": [
           {
             "apiKey": []
