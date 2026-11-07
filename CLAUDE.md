@@ -928,8 +928,12 @@ cheaper on the incurred basis).
   `fromUnitCostInUsdCents`, optional created_at window / service / task. A moved row no longer carries the old price: re-apply = 0.
 - **Amounts in Postgres**: gross = round(quantity x new unit, 10), net = round(gross x (1 - the row's frozen `usage_discount_pct`), 10),
   a NULL net stays NULL. Preview serves before/after over the FULL set (listing capped at 500).
-- **Apply**: oldest first, <= 5000 rows per call (`maxCosts`), re-call until `remainingCostCount` = 0. One statement: rows locked
-  `FOR UPDATE`, one `cost.repriced` bronze event per row (old + new unit/gross/net, reason, repricedBy). The projection moves
+- **Apply**: oldest first, <= 5000 rows per call (`maxCosts`), re-call until `remainingCostCount` = 0. **Short transactions
+  (REPRICE-LOCK-1107)**: ids picked by a lock-free read, then `REPRICE_APPLY_TX_COSTS` (20) rows per transaction, predicate re-checked
+  under `FOR UPDATE`, `lock_timeout 2s` + retry. Each row's ~20 rollup triggers row-lock SHARED rollup rows (org totals, ancestors'
+  subtree costs, campaign/day) until commit: one 1000-row transaction held them ~2 min (prod 2026-11-07) and other services' cost/run
+  writes queued on `Lock: transactionid` (run PATCH 10 s timeouts). A cut call keeps committed chunks; a re-call resumes.
+  Per chunk: one `cost.repriced` bronze event per row (old + new unit/gross/net, reason, repricedBy). The projection moves
   unit/total/net only while the row is still `actual` AT the old price (a replay moves nothing). Every rollup trigger fires on
   UPDATE of total/net; stored outcome-ledger days from the row's run start onward re-stale (`staleComputedDays`).
 - No billing notify (billing re-derives from `org-usage-total`). Never a hand UPDATE: this IS the audited path.

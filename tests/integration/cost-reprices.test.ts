@@ -5,6 +5,8 @@ import { db, sql as rawSql } from "../../src/db/index.js";
 import { runsCosts, costLifecycleEvents } from "../../src/db/schema.js";
 import { createTestApp, getAuthHeaders, getInternalAuthHeaders } from "../helpers/test-app.js";
 import { staleComputedDays } from "../../src/services/outcome-ledger.js";
+import { setRepriceTestHookForTests } from "../../src/routes/reprices.js";
+import { REPRICE_APPLY_TX_COSTS } from "../../src/schemas.js";
 import { cleanTestData, insertTestRun, insertTestRunCost, closeDb } from "../helpers/test-db.js";
 
 // NEWSLETTER-COST-1107: costs-service froze `postmark-email-send` at 1.1923620000
@@ -249,5 +251,113 @@ describe("POST /internal/cost-reprices/{preview,apply} (NEWSLETTER-COST-1107)", 
     expect(stale.has("2026-10-20")).toBe(true);
     expect(stale.has("2026-10-22")).toBe(true);
     expect(stale.has("2026-10-19")).toBe(false);
+  });
+
+  // REPRICE-LOCK-1107: one 1000-row transaction held shared rollup rows (org totals,
+  // ancestors' subtree costs, campaign/day rollups) ~2 min in prod, and every other
+  // service's cost/run write on the same org queued behind it.
+  describe("short transactions (REPRICE-LOCK-1107)", () => {
+    const N = REPRICE_APPLY_TX_COSTS * 2 + 5; // two full chunks + a partial one
+
+    async function seedMany() {
+      const run = await insertTestRun({ organizationId: ORG_ID, serviceName: "postmark-service", taskName: "email-send", startedAt: new Date("2026-10-20T10:00:00Z") });
+      const ids: string[] = [];
+      for (let i = 0; i < N; i++) {
+        const c = await insertTestRunCost({
+          runId: run.id, costName: COST, quantity: "1", unitCostInUsdCents: FROZEN, totalCostInUsdCents: FROZEN, netCostInUsdCents: FROZEN,
+          status: "actual", createdAt: new Date(Date.UTC(2026, 9, 20, 10, 0, i)),
+        });
+        ids.push(c.id);
+      }
+      // An UNRELATED run of the same org: its cost writes share only the org-level
+      // rollup rows with the re-price (org_actual_totals, org day rollups).
+      const other = await insertTestRun({ organizationId: ORG_ID, serviceName: "crm-service", taskName: "posthog-sync", startedAt: new Date("2026-10-20T11:00:00Z") });
+      await insertTestRunCost({ runId: other.id, costName: "posthog-sync", quantity: "1", unitCostInUsdCents: "0.5", totalCostInUsdCents: "0.5", netCostInUsdCents: "0.5", status: "actual" });
+      return { ids, otherRunId: other.id };
+    }
+
+    /** A live writer's cost insert on the unrelated run, allowed to wait at most 500 ms. */
+    async function concurrentWrite(otherRunId: string): Promise<"ok" | "blocked"> {
+      try {
+        await rawSql.begin(async (tx) => {
+          await tx`SET LOCAL lock_timeout = '500ms'`;
+          await tx`
+            INSERT INTO runs_costs (run_id, cost_name, quantity, unit_cost_in_usd_cents, total_cost_in_usd_cents, net_cost_in_usd_cents, status, cost_source, organization_id, run_started_at)
+            VALUES (${otherRunId}, 'posthog-sync', 1, 0.5, 0.5, 0.5, 'actual', 'platform', ${ORG_ID}, '2026-10-20T11:00:00Z')`;
+        });
+        return "ok";
+      } catch (err: any) {
+        if (err.code === "55P03") return "blocked";
+        throw err;
+      }
+    }
+
+    afterAll(() => setRepriceTestHookForTests(null));
+
+    it("re-prices in transactions of at most REPRICE_APPLY_TX_COSTS rows, and an unrelated write of the same org never waits between them", async () => {
+      const { ids, otherRunId } = await seedMany();
+      const seen: Record<string, "ok" | "blocked"> = {};
+      setRepriceTestHookForTests(async (phase, i) => {
+        if (i === 0) seen[phase] = await concurrentWrite(otherRunId);
+      });
+      const res = await request(app).post("/internal/cost-reprices/apply").set(internal).send(applyBody);
+      setRepriceTestHookForTests(null);
+      expect(res.status).toBe(200);
+      expect(res.body.repricedCostCount).toBe(N);
+      expect(res.body.remainingCostCount).toBe(0);
+      expect(res.body.transactionCount).toBe(3);
+      expect(res.body.maxTransactionMs).toBeGreaterThanOrEqual(0);
+      // The probe is sensitive: while a chunk is open, the org rollup row is locked
+      // (the old single transaction held it for the WHOLE call) ...
+      expect(seen.written).toBe("blocked");
+      // ... and once the chunk commits, the same write goes straight through.
+      expect(seen.committed).toBe("ok");
+
+      // exactly one event per row, every row at the new price
+      const events = await db.select().from(costLifecycleEvents).where(and(eq(costLifecycleEvents.eventType, "cost.repriced"), inArray(costLifecycleEvents.costId, ids)));
+      expect(events.length).toBe(N);
+      const rows = await rowsById(ids);
+      for (const id of ids) expect(rows.get(id)!.totalCostInUsdCents).toBe(REAL);
+      expect(res.body.grossAfterInUsdCents).toBe((0.165 * N).toFixed(10));
+    });
+
+    it("a call cut mid-way keeps its committed chunks, rolls back the open one, and a re-call resumes without moving any row twice", async () => {
+      const { ids } = await seedMany();
+      setRepriceTestHookForTests(async (phase, i) => {
+        if (phase === "written" && i === 1) throw new Error("simulated deploy cut");
+      });
+      const cut = await request(app).post("/internal/cost-reprices/apply").set(internal).send(applyBody);
+      setRepriceTestHookForTests(null);
+      expect(cut.status).toBe(500);
+      const mid = await request(app).post("/internal/cost-reprices/preview").set(internal).send(filter);
+      expect(mid.body.costCount).toBe(N - REPRICE_APPLY_TX_COSTS); // chunk 0 committed, chunk 1 rolled back
+
+      const resumed = await request(app).post("/internal/cost-reprices/apply").set(internal).send(applyBody);
+      expect(resumed.status).toBe(200);
+      expect(resumed.body.repricedCostCount).toBe(N - REPRICE_APPLY_TX_COSTS);
+      expect(resumed.body.remainingCostCount).toBe(0);
+      const events = await db.select().from(costLifecycleEvents).where(and(eq(costLifecycleEvents.eventType, "cost.repriced"), inArray(costLifecycleEvents.costId, ids)));
+      expect(events.length).toBe(N);
+      expect(new Set(events.map((e) => e.costId)).size).toBe(N);
+    });
+
+    it("a row re-priced by a concurrent call between pick and lock is skipped, never moved twice", async () => {
+      const { ids } = await seedMany();
+      // A parallel apply re-prices the whole set while this call is between chunks.
+      let parallel: any = null;
+      setRepriceTestHookForTests(async (phase, i) => {
+        if (phase === "committed" && i === 0) {
+          setRepriceTestHookForTests(null);
+          parallel = await request(app).post("/internal/cost-reprices/apply").set(internal).send(applyBody);
+        }
+      });
+      const res = await request(app).post("/internal/cost-reprices/apply").set(internal).send(applyBody);
+      setRepriceTestHookForTests(null);
+      expect(res.status).toBe(200);
+      expect(parallel.body.repricedCostCount).toBe(N - REPRICE_APPLY_TX_COSTS);
+      expect(res.body.repricedCostCount).toBe(REPRICE_APPLY_TX_COSTS);
+      const events = await db.select().from(costLifecycleEvents).where(and(eq(costLifecycleEvents.eventType, "cost.repriced"), inArray(costLifecycleEvents.costId, ids)));
+      expect(events.length).toBe(N);
+    });
   });
 });

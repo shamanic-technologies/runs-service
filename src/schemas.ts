@@ -1298,6 +1298,10 @@ registry.registerPath({
 
 export const REPRICE_PREVIEW_LIST_LIMIT = 500;
 export const REPRICE_APPLY_MAX_COSTS = 5000;
+/** Rows re-priced per TRANSACTION inside one apply call (REPRICE-LOCK-1107): each row's
+ * ~20 rollup triggers row-lock shared rollup rows until commit, so a transaction stays
+ * a few seconds at most (~100 ms/row on the loaded prod box -> ~2 s). */
+export const REPRICE_APPLY_TX_COSTS = 20;
 
 const UnitPriceSchema = z
   .string()
@@ -1363,6 +1367,8 @@ export const RepriceApplyResponseSchema = RepriceTotalsSchema.extend({
   orgId: z.string().uuid(),
   repricedCostCount: z.number().openapi({ description: "Rows re-priced by THIS call (the totals cover exactly these rows). Zero on a re-apply." }),
   remainingCostCount: z.number().openapi({ description: "Rows of the set still at the old price after this call. Re-call apply until 0." }),
+  transactionCount: z.number().openapi({ description: `Short transactions this call committed (at most ${REPRICE_APPLY_TX_COSTS} rows each).` }),
+  maxTransactionMs: z.number().openapi({ description: "Longest of those transactions, in ms (how long this call held shared rollup-row locks at once)." }),
 }).openapi("RepriceApplyResponse");
 
 registry.registerPath({
@@ -1385,7 +1391,7 @@ registry.registerPath({
   path: "/internal/cost-reprices/apply",
   summary: "Re-price charged cost rows to a stated unit price",
   description:
-    "Writes one append-only `cost.repriced` bronze event per row (old and new unit, gross, net, reason, repricedBy) in one transaction; the projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.",
+    `Writes one append-only \`cost.repriced\` bronze event per row (old and new unit, gross, net, reason, repricedBy), ${REPRICE_APPLY_TX_COSTS} rows per short transaction so other writers never queue behind it; a cut call keeps its committed chunks and a re-call resumes. The projection moves the row's money columns and every rollup follows. Oldest rows first, at most maxCosts (<= 5000) per call: re-call until remainingCostCount is 0. Idempotent: a re-priced row no longer carries fromUnitCostInUsdCents, so it never matches again.`,
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: RepriceApplyRequestSchema } } } },
   responses: {
