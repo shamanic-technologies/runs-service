@@ -206,6 +206,8 @@ describe("GET /internal/brands/:brandId/ledger (+ /runs): the books of one brand
     const before = await request(app).get(`/internal/brands/${B1}/ledger`).set(getInternalAuthHeaders());
     // A send declared now on a run charged yesterday (instantly's later steps): yesterday's stored figures predate it.
     const late = await insertTestRun({ organizationId: ORG, serviceName: "svc", taskName: "late-send", status: "completed", brandIds: ["brand-p4-ledger-3"], startedAt: new Date(`${YESTERDAY}T02:00:00Z`) });
+    // Charged yesterday (a spend-free run's declaration moves only its declaration day, LEDGER-STALE-1107).
+    await insertTestRunCost({ runId: late.id, costName: "tok", quantity: "1", unitCostInUsdCents: "5", totalCostInUsdCents: new Decimal(5).toFixed(10), status: "actual", createdAt: new Date(`${YESTERDAY}T02:00:01Z`) });
     await declare(late.id, { produced: [occ("email_found", "p9")] });
     clearBrandLedgerCache();
     const after = await request(app).get(`/internal/brands/${B1}/ledger`).set(getInternalAuthHeaders());
