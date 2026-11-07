@@ -10,6 +10,7 @@ import runOutcomesRoutes from "../../src/routes/run-outcomes.js";
 import platformRunsRoutes from "../../src/routes/platform-runs.js";
 import internalRoutes from "../../src/routes/internal.js";
 import refundRoutes from "../../src/routes/refunds.js";
+import repriceRoutes from "../../src/routes/reprices.js";
 import incurredCostRoutes from "../../src/routes/incurred-costs.js";
 import eventsRoutes from "../../src/routes/events.js";
 import noCampaignSpendRoutes from "../../src/routes/no-campaign-spend.js";
@@ -46,6 +47,7 @@ export function createTestApp() {
   app.use(platformRunsRoutes);
   app.use(internalRoutes);
   app.use(refundRoutes);
+  app.use(repriceRoutes);
   app.use(incurredCostRoutes);
   app.use(vendorCostRoutes);
   app.use(eventsRoutes);

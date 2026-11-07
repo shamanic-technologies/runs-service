@@ -2506,6 +2506,23 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
     const computedAt = computed.get(c.day);
     if (computedAt && computedAt < at) out.add(c.day);
   }
+  // A re-priced cost (cost.repriced, migration 0102) moves the money of a row already
+  // on a stored day: stale its day AND its run's start day (a produced declaration
+  // re-anchors the run's costs from its start), any day before the re-price.
+  const repriced = (await db.execute(sql`
+    WITH e AS MATERIALIZED (
+      SELECT cost_id, occurred_at FROM cost_lifecycle_events
+      WHERE event_type = 'cost.repriced' AND occurred_at > ${oldest}::timestamptz
+    )
+    SELECT to_char(LEAST(rc.created_at, COALESCE(rc.run_started_at, rc.created_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+           MAX(e.occurred_at) AS occurred_at
+    FROM e CROSS JOIN LATERAL (SELECT created_at, run_started_at FROM runs_costs WHERE id = e.cost_id OFFSET 0) rc
+    GROUP BY 1
+  `)) as any[];
+  for (const c of repriced) {
+    const at = new Date(c.occurred_at);
+    for (const [day, computedAt] of computed) if (day >= c.day && computedAt < at) out.add(day);
+  }
   return out;
 }
 
