@@ -1903,8 +1903,10 @@ export interface OutcomeCostRow {
    * parallel_cost / parallel_none (the routed spend priced in the OTHER state family:
    * a lead state's price is produced_cost + parallel_cost of its key, never summed across keys).
    */
-  kind: "produced_count" | "produced_cost" | "consumed" | "none" | "abnormal" | "parallel_cost" | "parallel_none";
+  kind: "produced_count" | "produced_cost" | "consumed" | "none" | "abnormal" | "parallel_cost" | "parallel_none" | "produced_elsewhere";
   outcomeKey: string | null;
+  /** kind 'produced_elsewhere' only (0104): a lead state another factory reached ('another_factory') or with no proof of ours ('no_proof'). */
+  factory: "another_factory" | "no_proof" | null;
   consumedOutcomeKey: string | null;
   organizationId: string | null;
   costOrganizationId: string | null;
@@ -2028,6 +2030,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     ownerServiceName: r.owner_service_name ?? null,
     lossLine: r.loss_line ?? null,
     pipeTarget: r.pipe_target ?? null,
+    factory: r.factory ?? null,
     sourceOrganizationId: null,
     sourceTags: null,
     runStartDay: r.run_start_day ?? null,
@@ -2065,6 +2068,22 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   `)) as any[];
   for (const r of reached) {
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
+  }
+  // LEDGER-OTHER-FACTORY-1107 (owner 2026-11-07: the TOTAL Units per outcome, every source): the reaches of
+  // another factory (or with no proof of ours) that day, one Unit per lead x brand x state, in their own kind:
+  // none of our cost, in no unit cost (our cost per outcome divides produced_count only).
+  const elsewhere = (await tx.execute(sql`
+    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids,
+           CASE WHEN caused_by_outreach IS FALSE THEN 'another_factory' ELSE 'no_proof' END AS factory, COUNT(*)::text AS n
+    FROM lead_state_reaches
+    WHERE removed_at IS NULL
+      AND caused_by_outreach IS NOT TRUE
+      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3, 4
+  `)) as any[];
+  for (const r of elsewhere) {
+    outcomeCosts.push({ ...blank("produced_elsewhere", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
   }
   // LEDGER-REVERSAL-1107: an occurrence counts +1 on the day it was declared and, once its declaring
   // service reversed it, -1 on the reversal's day (a counter-entry under the same tags): a range
@@ -2248,11 +2267,11 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
           brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
           gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
           source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target
+          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target, factory
         )
         SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
                x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt
+               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt, x.fy
         FROM jsonb_to_recordset(${JSON.stringify(
           d.outcomeCosts.map((o) => ({
             kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -2264,13 +2283,13 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
             swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
             sf: o.supportFunction,
             rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
-            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget,
+            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget, fy: o.factory,
           })),
         )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                         n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
                         rg numeric, rn numeric, rv numeric, rup numeric,
                         sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                        aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text)
+                        aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text, fy text)
       `);
     }
     if (d.orgs.length > 0) {
@@ -2316,9 +2335,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, other_factories, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, other_factories = true, stale = false
     `);
   });
 }
@@ -2718,7 +2737,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units, our_factory FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units, our_factory, other_factories FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -2738,7 +2757,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   for (const day of noLossShares) out.add(day);
   // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
   // Same for days computed before only OUR reaches counted (0084, OUR-FACTORY-OUTCOMES-1027).
-  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units || !r.our_factory).map((r) => r.day as string));
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units || !r.our_factory || !r.other_factories).map((r) => r.day as string));
   for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers

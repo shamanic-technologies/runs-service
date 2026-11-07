@@ -729,6 +729,13 @@
       "when": 1784275600000,
       "tag": "0103_outcome_reversal",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1784275700000,
+      "tag": "0104_other_factory_units",
+      "breakpoints": true
     }
   ]
 }
