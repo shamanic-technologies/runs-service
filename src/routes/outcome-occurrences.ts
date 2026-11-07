@@ -10,7 +10,8 @@ import { sql } from "drizzle-orm";
 import { Decimal } from "decimal.js";
 import { db, statsDb } from "../db/index.js";
 import { requireApiKey, requireInternalAuth, requirePlatformAuth } from "../middleware/auth.js";
-import { OUTCOME_PERFORMER_KINDS, MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema, RelabelOutcomesRequestSchema } from "../schemas.js";
+import { OUTCOME_PERFORMER_KINDS, MarkRunsSupportRequestSchema, OwnerMarkRunsSupportRequestSchema, UnmarkRunsSupportRequestSchema, OwnerUnmarkRunsSupportRequestSchema, DeclareOutcomesBatchRequestSchema, DeclareRunOutcomesRequestSchema, OUTCOME_UUID_RE, VoidRunOutcomesRequestSchema, StateSubjectEquivalencesRequestSchema, RelabelOutcomesRequestSchema, ReverseOutcomesRequestSchema } from "../schemas.js";
+import { ReversalRefusedError, reverseOccurrences } from "../services/outcome-reversals.js";
 import {
   ALLOCATION_RULE,
   ALLOCATION_VERSION,
@@ -348,6 +349,32 @@ router.post("/v1/platform-runs/subject-equivalences", requirePlatformAuth, async
       return;
     }
     console.error("[Runs Service] subject equivalences failed:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+// LEDGER-REVERSAL-1107: the declaring service reverses produced occurrences whose fact no longer
+// stands (a counter-entry dated reversedAt, never a delete). Rules: services/outcome-reversals.ts.
+router.post("/v1/platform-runs/outcomes/reversals", requirePlatformAuth, async (req: Request, res: Response) => {
+  try {
+    const parsed = ReverseOutcomesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    const out = await reverseOccurrences(parsed.data.reversals, parsed.data.reversedBy, req.platformServiceName!.trim(), req.orgId as string | undefined);
+    const reversedCount = out.filter((o) => o.status === "reversed").length;
+    res.status(reversedCount > 0 ? 201 : 200).json({
+      allocationVersion: ALLOCATION_VERSION,
+      reversedCount,
+      alreadyReversedCount: out.length - reversedCount,
+      reversals: out,
+    });
+  } catch (err) {
+    if (err instanceof ReversalRefusedError) {
+      res.status(err.notDeclarer ? 403 : 422).json({ error: err.message, details: { refusals: err.refusals } });
+      return;
+    }
+    console.error("[Runs Service] reverse outcomes failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
