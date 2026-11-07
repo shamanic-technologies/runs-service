@@ -2804,6 +2804,8 @@ export async function refreshLedgerDays(
   maxDays = Infinity,
   firstDay?: string,
   budgetMs = TICK_BUDGET_MS,
+  /** Recent days only: the paced backfill owns the past days while it runs. */
+  recentOnly = false,
 ): Promise<{ computed: string[]; failed: string[]; pastDaysDue: number }> {
   const started = Date.now();
   await ensurePoolLines();
@@ -2815,7 +2817,9 @@ export async function refreshLedgerDays(
   if (sync.changed + sync.removed > 0) {
     console.log(`[Runs Service] lead states synced: ${sync.upserted} reaches, ${sync.changed} new or changed, ${sync.removed} removed`);
   }
-  const days = (await daysToCompute(now, firstDay, true)).slice(0, maxDays);
+  const due = await daysToCompute(now, firstDay, true);
+  const recentDays = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(utcDay(now), -i)));
+  const days = (recentOnly ? due.filter((d) => recentDays.has(d)) : due).slice(0, maxDays);
   const computed: string[] = [];
   const failed: string[] = [];
   for (const day of days) {
@@ -2836,9 +2840,8 @@ export async function refreshLedgerDays(
     }
   }
   // Past days this tick left (missing, stale, older column set): the paced backfill takes them.
-  const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(utcDay(now), -i)));
   const done = new Set(computed);
-  const pastDaysDue = days.filter((d) => !recent.has(d) && !done.has(d)).length;
+  const pastDaysDue = due.filter((d) => !recentDays.has(d) && !done.has(d)).length;
   return { computed, failed, pastDaysDue };
 }
 
@@ -2848,35 +2851,57 @@ let tickWaiting = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Started after app.listen(): first tick ~60 s after boot, then every 15 min, one at a time. */
-export function startCostLedgerRefresh(): NodeJS.Timeout {
-  const tick = async () => {
-    if (refreshing && !backfillState?.running) return;
-    // The paced backfill holds the lock one day at a time: the tick waits for that day, never skips.
-    tickWaiting = true;
-    while (refreshing) await sleep(5_000);
-    tickWaiting = false;
-    refreshing = true;
-    let pastDaysDue = 0;
-    try {
-      ({ pastDaysDue } = await refreshLedgerDays());
-    } catch (err) {
-      console.error("[Runs Service] cost ledger refresh failed (retried next tick):", err);
-    } finally {
-      refreshing = false;
-    }
-    // LEDGER-STALE-1107: past days a fact moved (a back-dated declaration, a void, a relabel)
-    // are recomputed on their own, paced to the box: the tick's budget goes to the recent
-    // days, so without this the history waited for a human to start the backfill.
-    if (pastDaysDue > 0 && !backfillState?.running) {
-      console.log(`[Runs Service] cost ledger: ${pastDaysDue} past days due, paced backfill started`);
-      startLedgerBackfill();
-    }
+/**
+ * One refresher tick: the recent days (all due days while no backfill runs), then the
+ * paced backfill started for the past days left. Exported for tests.
+ */
+export async function runLedgerTick(): Promise<void> {
+  if (refreshing && !backfillState?.running) return;
+  // The paced backfill holds the lock one day at a time: the tick waits for that day, never skips.
+  tickWaiting = true;
+  while (refreshing) await sleep(5_000);
+  tickWaiting = false;
+  refreshing = true;
+  let pastDaysDue = 0;
+  try {
+    // While the backfill runs it owns the past days: the tick keeps to the recent ones, so a
+    // past day the tick took (~3-7 min on the loaded box) never pushes the tick past its
+    // interval (NEWSLETTER-COST-1107-LEDGER-STALE).
+    ({ pastDaysDue } = await refreshLedgerDays(new Date(), Infinity, undefined, TICK_BUDGET_MS, !!backfillState?.running));
+  } catch (err) {
+    console.error("[Runs Service] cost ledger refresh failed (retried next tick):", err);
+  } finally {
+    refreshing = false;
+  }
+  // LEDGER-STALE-1107: past days a fact moved (a back-dated declaration, a void, a relabel,
+  // a re-price) are recomputed on their own, paced to the box.
+  if (pastDaysDue > 0 && !backfillState?.running) {
+    console.log(`[Runs Service] cost ledger: ${pastDaysDue} past days due, paced backfill started`);
+    startLedgerBackfill();
+  }
+}
+
+/**
+ * Started after app.listen(): first tick ~60 s after boot, then the next one
+ * REFRESH_INTERVAL_MS after the previous one ENDS. A fixed interval starved the
+ * backfill: on the loaded box a tick (3 recent days at 2-5 min each, + a stale past day)
+ * ran past 15 min, the next one was already waiting when it ended, and the backfill
+ * (which yields to a waiting tick) computed 1 past day in an hour while 276 stayed stale
+ * after the newsletter re-price (NEWSLETTER-COST-1107-LEDGER-STALE, 2026-11-07). The gap
+ * between ticks is the backfill's window.
+ */
+export function startCostLedgerRefresh(): { stop: () => void } {
+  let timer: NodeJS.Timeout;
+  let stopped = false;
+  const loop = async (delay: number) => {
+    timer = setTimeout(async () => {
+      await runLedgerTick();
+      if (!stopped) void loop(REFRESH_INTERVAL_MS);
+    }, delay);
+    timer.unref();
   };
-  setTimeout(() => void tick(), FIRST_TICK_MS).unref();
-  const timer = setInterval(() => void tick(), REFRESH_INTERVAL_MS);
-  timer.unref();
-  return timer;
+  void loop(FIRST_TICK_MS);
+  return { stop: () => { stopped = true; clearTimeout(timer); } };
 }
 
 // ---------------------------------------------------------------------------
