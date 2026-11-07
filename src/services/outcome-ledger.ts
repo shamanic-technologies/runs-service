@@ -1793,7 +1793,10 @@ async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promis
 /** Standard (production) cost of each producing occurrence named, live (rule 1-3). */
 async function standardCostsOf(consumptions: ResolvedConsumption[], versions: VendorCostVersion[], inputs: AllocationInputs, exec: Exec = statsDb): Promise<Map<string, Money>> {
   const anchors = [...new Set(consumptions.filter((c) => c.producerRunId).map((c) => c.producerRunId!))];
-  return occurrenceCosts(anchors, versions, inputs, exec);
+  // Read by producer occurrence id only (BOX-LOAD-1107-RUNS): price those, not every occurrence of their runs.
+  const only = consumptions.filter((c) => c.producerId).map((c) => c.producerId!);
+  const slices = await occurrenceCostSlices(anchors, versions, inputs, exec, { only });
+  return new Map([...slices].map(([id, c]) => [id, c.total]));
 }
 
 const ZERO = (): Money => ({ gross: fx(0), net: fx(0), vendor: fx(0), unpricedGross: fx(0) });
@@ -3129,17 +3132,6 @@ async function anchorsWithStoredSpend(anchorIds: string[], exec: Exec): Promise<
   return new Set(rows.map((r) => r.anchor_id as string).filter((id) => asked.has(id)));
 }
 
-/**
- * Per produced occurrence of `anchorIds`: its v1 share of its run's subtree cost
- * (descendants that declare their own produced occurrences are THEIR anchors and
- * excluded with their subtrees), summed over its (UTC day, org) groups — the same
- * groups the stored days split, so Σ occurrences of a day = that day's allocated.
- */
-export async function occurrenceCosts(anchorIds: string[], versions: VendorCostVersion[], inputs: AllocationInputs, exec: Exec = statsDb): Promise<Map<string, Money>> {
-  const slices = await occurrenceCostSlices(anchorIds, versions, inputs, exec);
-  return new Map([...slices].map(([id, c]) => [id, c.total]));
-}
-
 export interface CostSlice {
   /** UTC day of the cost rows. */
   day: string;
@@ -3154,9 +3146,18 @@ export async function occurrenceCostSlices(
   versions: VendorCostVersion[],
   inputs: AllocationInputs,
   exec: Exec = statsDb,
-  opts: { storedSpend?: boolean } = {},
+  opts: { storedSpend?: boolean; only?: string[] } = {},
 ): Promise<Map<string, { total: Money; slices: CostSlice[] }>> {
   if (anchorIds.length === 0) return new Map();
+  // BOX-LOAD-1107-RUNS: `only` = the occurrences the caller serves (a page's produced
+  // rows + its consumptions' producers). Each share is still computed over EVERY
+  // occurrence of its anchor / pool (the windows run before the filter, in the
+  // MATERIALIZED CTEs), so a served figure is byte-identical; only the occurrences
+  // nobody asked for are no longer priced, routed and shipped back. A newsletter run
+  // holds ~20k Units: each 1000-row page priced all 20k of them, then kept 1000.
+  const onlyIds = opts.only ? [...new Set(opts.only)] : null;
+  if (onlyIds && onlyIds.length === 0) return new Map();
+  const onlySql = (col: SQL) => (onlyIds ? sql`AND ${col} = ANY(${`{${onlyIds.join(",")}}`}::uuid[])` : sql``);
   const vj = vendorJoinSql("b");
   const spendStored = opts.storedSpend ? await anchorsWithStoredSpend(anchorIds, exec) : new Set<string>();
   const walked = anchorIds.filter((id) => !spendStored.has(id));
@@ -3201,6 +3202,7 @@ export async function occurrenceCostSlices(
       ${shareSql("gross")}::text AS gross, ${shareSql("net")}::text AS net,
       ${shareSql("vendor")}::text AS vendor, ${shareSql("unpriced")}::text AS unpriced
     FROM o LEFT JOIN g ON g.anchor_id = o.anchor_id
+    WHERE TRUE ${onlySql(sql`o.id`)}
     ORDER BY o.id, g.day, g.org_key NULLS FIRST
   `)) as any[];
   // Rule 4b: each occurrence's share of the loss pool of (its declaration's UTC
@@ -3216,14 +3218,14 @@ export async function occurrenceCostSlices(
       ON c.day = (o.declared_at AT TIME ZONE 'UTC')::date AND c.allocation_version = ${ALLOCATION_VERSION} AND c.loss_occurrences
     JOIN cost_loss_occurrence_days s
       ON s.allocation_version = ${ALLOCATION_VERSION} AND s.occurrence_id = o.id AND s.day = c.day
-    WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[])
+    WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[]) ${onlySql(sql`o.id`)}
   `)) as any[];
   const live = (await exec.execute(sql`
     WITH lo AS MATERIALIZED (
       SELECT o.id, (o.declared_at AT TIME ZONE 'UTC')::date AS day, r.org_key, r.pool_key, r.campaign_id
       FROM run_outcomes o
       CROSS JOIN LATERAL (SELECT organization_id::text AS org_key, ${poolKeySql("")} AS pool_key, campaign_id FROM runs WHERE id = o.run_id OFFSET 0) r
-      WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[])
+      WHERE o.direction = 'produced' AND o.run_id = ANY(${`{${anchorIds.join(",")}}`}::uuid[]) ${onlySql(sql`o.id`)}
         AND NOT EXISTS (SELECT 1 FROM cost_ledger_computed_days c
                         WHERE c.day = (o.declared_at AT TIME ZONE 'UTC')::date AND c.allocation_version = ${ALLOCATION_VERSION} AND c.loss_occurrences)
     ),
@@ -3370,7 +3372,13 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
       ]),
     ];
     const sliced = anchors.length > 0
-      ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog(), inputs, tx, { storedSpend: true })
+      ? await occurrenceCostSlices(anchors, await fetchVendorCostCatalog(), inputs, tx, {
+          storedSpend: true,
+          only: [
+            ...page.filter((r) => r.direction === "produced").map((r) => r.id as string),
+            ...resolved.filter((c) => c.producerId).map((c) => c.producerId!),
+          ],
+        })
       : new Map<string, { total: Money; slices: CostSlice[] }>();
     const costs = new Map([...sliced].map(([id, c]) => [id, c.total]));
     const consumingKeys = await anchorKeysOf(page.filter((r) => r.direction === "consumed").map((r) => r.run_id as string), inputs, tx);

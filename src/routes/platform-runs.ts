@@ -18,6 +18,7 @@ import {
   newCostId,
   type Identity,
 } from "../services/bronze.js";
+import type { BronzeWriter } from "../services/bronze.js";
 import { costAttribution, requestAttribution } from "../services/attribution.js";
 import {
   resolveUsageDiscount,
@@ -126,7 +127,9 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
     };
 
     try {
-      const created = await db.transaction(async (tx) => {
+      // Write, then read back after COMMIT (BronzeWriter, BOX-LOAD-1107-RUNS): the run.created
+      // insert alone is one autocommit statement; a support mark rides the same transaction.
+      const writeCreated = async (tx: BronzeWriter) => {
         await logRunLifecycle(tx, {
           runId: id,
           eventType: "run.created",
@@ -137,9 +140,11 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
         });
         // A support run (COST-SUPPORT-1024-RUNS) is marked in the same transaction: never an instant unmarked.
         if (support) await tx.insert(outcomeDeclarationEvents).values(supportMarkEvent(id, { ...support, markedBy: serviceName }));
-        const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-        return silver;
-      });
+      };
+      if (support) await db.transaction(writeCreated);
+      else await writeCreated(db);
+      // Trigger project_run_lifecycle_to_silver created the silver row with the insert: read it back.
+      const [created] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
       res.status(201).json(created);
     } catch (err: any) {
       if (pgErrorCode(err) === "23505" && idempotencyKey) {
@@ -229,7 +234,9 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
       itemsToCreate.push({ item, costId: newCostId(), total, net });
     }
 
-    const newRows = await db.transaction(async (tx) => {
+    // Several rows are written atomically; a lone row is one autocommit statement. Read back
+    // after COMMIT (BronzeWriter, BOX-LOAD-1107-RUNS).
+    const writeCosts = async (tx: BronzeWriter) => {
       for (const { item, costId, total, net } of itemsToCreate) {
         const unitCost = costMap.get(item.costName)!;
         const attribution = costAttribution(item, req, run);
@@ -269,12 +276,12 @@ router.post("/v1/platform-runs/:id/costs", requirePlatformAuth, async (req, res)
           idempotencyKey: item.idempotencyKey ?? null,
         });
       }
-      if (itemsToCreate.length === 0) return [] as any[];
-      return await tx
-        .select()
-        .from(runsCosts)
-        .where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
-    });
+    };
+    if (itemsToCreate.length > 1) await db.transaction(writeCosts);
+    else await writeCosts(db);
+    const newRows: any[] = itemsToCreate.length === 0
+      ? []
+      : await db.select().from(runsCosts).where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
 
     const newRowsById = new Map<string, any>(newRows.map((r: any) => [r.id, r]));
     const inserted: any[] = [];
@@ -324,35 +331,32 @@ router.patch("/v1/platform-runs/:id", requirePlatformAuth, async (req, res) => {
     const { status } = parsed.data;
     const eventType = status === "completed" ? "run.completed" : "run.failed";
 
-    const updated = await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-      if (!existing) return null;
-      await logRunLifecycle(tx, {
-        runId: id,
-        eventType,
-        payload: { from: existing.status, to: status },
-        identity: {
-          orgId: existing.organizationId,
-          userId: existing.userId,
-          brandIds: existing.brandIds,
-          campaignId: existing.campaignId,
-          workflowSlug: existing.workflowSlug,
-          featureSlug: existing.featureSlug,
-          goal: existing.goal,
-          brandProfileId: existing.brandProfileId,
-          audienceId: existing.audienceId,
-          workflowContext: existing.workflowContext,
-        },
-        sourceService: req.platformServiceName ?? null,
-      });
-      const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-      return row;
-    });
-
-    if (!updated) {
+    // No transaction (BronzeWriter, BOX-LOAD-1107-RUNS): the read takes no lock either way, the event is
+    // one autocommit statement, the row is read back after COMMIT.
+    const [existing] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!existing) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
+    await logRunLifecycle(db, {
+      runId: id,
+      eventType,
+      payload: { from: existing.status, to: status },
+      identity: {
+        orgId: existing.organizationId,
+        userId: existing.userId,
+        brandIds: existing.brandIds,
+        campaignId: existing.campaignId,
+        workflowSlug: existing.workflowSlug,
+        featureSlug: existing.featureSlug,
+        goal: existing.goal,
+        brandProfileId: existing.brandProfileId,
+        audienceId: existing.audienceId,
+        workflowContext: existing.workflowContext,
+      },
+      sourceService: req.platformServiceName ?? null,
+    });
+    const [updated] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     res.json(updated);
   } catch (err) {
     console.error("[runs-service] Error updating platform run:", err);
