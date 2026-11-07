@@ -234,7 +234,9 @@ dashboard budget, and the ledger only grows. So the total is KEPT.
 - **Read** `services/org-projected-totals.ts` `readOrgProjectedTotal`: stamp + row in ONE statement; unstamped = the
   live SUM. Routes render with `Decimal(...).toFixed(10)`: byte-identical (prod check: 236/236 orgs equal, 594 ms -> 0.05 ms).
 - **Readiness** stamp `org_projected`; run `scripts/rebuild-stats-rollup.ts org_projected` after the deploy (~4 s
-  aggregate). TRUNCATE in global-setup. Guard: `tests/integration/org-projected-totals.test.ts`.
+  aggregate). Every snapshot rebuild holds `pg_advisory_lock(hashtext('stats_rollup_rebuild:<name>'))` on its B
+  session: two overlapping rebuilds both cleared then both added the aggregate (every org's figure 2x for ~1 min,
+  2026-11-07 18:33 UTC). TRUNCATE in global-setup. Guard: `tests/integration/org-projected-totals.test.ts`.
 
 ## Campaign spend vs no-campaign spend (migration 0045)
 
