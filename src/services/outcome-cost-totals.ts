@@ -244,6 +244,11 @@ export interface OutcomeCostTotals {
   abnormal: Array<{ dimensions: Record<string, string | null>; runs: string; cost: Money }>;
   /** v5: the routed spend priced in the OTHER state family (never summed with produced across keys). */
   parallel: Array<{ dimensions: Record<string, string | null>; cost: Money; unpooled: Money }>;
+  /**
+   * LEDGER-OTHER-FACTORY-1107: Units of a lead state another factory produced (dimensions carry `factory`:
+   * 'another_factory' | 'no_proof'). None of our cost; TOTAL Units of an outcome = produced + these.
+   */
+  producedElsewhere: Array<{ dimensions: Record<string, string | null>; occurrences: number }>;
 }
 
 /**
@@ -327,12 +332,22 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
     baseSql(["parallel_cost", "parallel_none"], byBrand, f, since, until, "outcome_key", sourced, startDays, false),
   );
 
+  const elsewhereDims = [{ name: "factory", expr: "x.factory" }, ...dims];
+  const elsewhere = await grouped(
+    "producedElsewhere",
+    elsewhereDims,
+    sql`SUM(x.n)::text AS n`,
+    baseSql(["produced_elsewhere"], byBrand, f, since, until, "outcome_key", sourced, startDays, false),
+  );
+
   const computed = (await statsDb.execute(sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day, support_split FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND outcome_costs AND day BETWEEN ${since}::date AND ${until}::date
       -- a day stored before the state ladder (0078) holds the old state inputs: missing until recomputed;
       -- one stored before 0084 still counts another factory's reaches as our units (OUR-FACTORY-OUTCOMES-1027)
       AND state_ladder AND state_inputs AND our_factory
+      -- one stored before 0104 lacks another factory's Units of the total (LEDGER-OTHER-FACTORY-1107)
+      AND other_factories
       AND (consumed_sources OR NOT ${sourced})
       AND (start_days OR NOT ${startDays})
   `)) as any[];
@@ -399,6 +414,10 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
     }),
     abnormal: abnormal.map((r) => ({ dimensions: dimensionsOf(r, abnormalDims.map((d) => d.name)), runs: fx(r.n), cost: moneyOf(r) })),
     parallel: parallel.map((r) => ({ dimensions: dimensionsOf(r, names), cost: moneyOf(r), unpooled: moneyOf(r, "u_") })),
+    producedElsewhere: elsewhere.map((r) => ({
+      dimensions: dimensionsOf(r, elsewhereDims.map((d) => d.name)),
+      occurrences: new Decimal(r.n ?? 0).toNumber(),
+    })),
   };
 }
 

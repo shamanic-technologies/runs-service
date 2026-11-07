@@ -1082,6 +1082,12 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   our pipe is FREE-ISSUE material ($0, no input row); "already reached" (abnormal) still reads every reach. A whose-win change stamps
   `changed_at` and stales the reach's own day. Days stored before (`cost_ledger_computed_days.our_factory`) recompute with the ladder
   ones; only outcome-costs lists them missing. Prod 2026-10-27 since 2026-02: interested 274 -> 72, booked 79 -> 11, paid 25 -> 5.
+- **Another factory's Units count in the TOTAL (migration 0104, LEDGER-OTHER-FACTORY-1107; owner 2026-11-07: « ON VEUT LE TOTAL ET
+  LES STATS PAR OUTCOME ... INDEPENDAMMENT DES SOURCES »)**: a reach with `caused_by_outreach` false (`another_factory`) or null
+  (`no_proof`) is stored as kind `produced_elsewhere` (column `factory`), one Unit per lead x brand x state on its reach day, $0, in
+  no unit cost; outcome-costs serves it as `producedElsewhere[]` (TOTAL = produced + these, $ each on produced only). Days stored
+  before it (`cost_ledger_computed_days.other_factories`) recompute with the ladder ones; only outcome-costs lists them missing.
+  Guard: `tests/integration/ledger-other-factory-units.test.ts`.
 - Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
   `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
   visit priced apart, a moved reach stales the day).

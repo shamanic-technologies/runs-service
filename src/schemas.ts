@@ -3780,6 +3780,12 @@ export const OutcomeCostTotalsResponseSchema = z
         unpooled: ProductionCostSchema.openapi({ description: "The same, for leads that never reached the state when no lead of the pipe reached it that day (not spread)." }),
       }),
     ).openapi({ description: "Allocation v5: the routed spend priced in the other state family (interest vs visit)." }),
+    producedElsewhere: z.array(
+      z.object({
+        dimensions: OutcomeCostDimensionsSchema.openapi({ description: "factory (always: another_factory = the client's CRM, team or site, or before our first touch | no_proof = no proof it was ours) + the requested dimensions (outcomeKey = the lead state; day = its reach day). Only org, brand, outcome and day carry values (a reach has no run)." }),
+        occurrences: z.number().int().openapi({ description: "Units of the lead state reached that way, one per lead x brand x state." }),
+      }),
+    ).openapi({ description: "LEDGER-OTHER-FACTORY-1107: lead-state Units another factory produced. None of our cost, in no unit cost: the TOTAL Units of an outcome = produced[].occurrences + these; cost per Unit divides produced[] only." }),
     pipes: z.array(
       z.object({
         featureSlug: z.string(),
