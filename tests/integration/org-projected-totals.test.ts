@@ -136,4 +136,14 @@ describe("org_projected_totals (GET /internal/org-usage-total)", () => {
     expect(after.spent_cents).toBe(before.spent_cents);
     expect(after.net_spent_cents).toBe(before.net_spent_cents);
   });
+
+  it("two overlapping rebuilds never double the figures", async () => {
+    const r = await run();
+    await cost(r.id, "5.0000000000", { status: "actual" });
+    const before = await expectMatchesLedger(ORG_ID);
+    const url = process.env.RUNS_SERVICE_DATABASE_URL!;
+    await Promise.all([rebuildOrgProjectedRollup(url), rebuildOrgProjectedRollup(url), rebuildOrgProjectedRollup(url)]);
+    const after = await expectMatchesLedger(ORG_ID);
+    expect(after.spent_cents).toBe(before.spent_cents);
+  });
 });

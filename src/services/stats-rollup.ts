@@ -160,6 +160,12 @@ export async function rebuildRollup(
   const a = postgres(url, { max: 1, connect_timeout: 10, max_lifetime: null, connection: { jit: "off" } });
   const b = postgres(url, { max: 1, connect_timeout: 10, max_lifetime: null, connection: { jit: "off" } });
   try {
+    // One rebuild of a given rollup at a time. Two overlapping runs both clear the
+    // rollup before either merges, then BOTH add a full aggregate: every figure
+    // doubled (org_projected in prod, 2026-11-07 18:33 UTC). Session-level lock on
+    // B, held through C, released when B's connection ends (finally below); a
+    // second run waits here, then clears and rebuilds from scratch.
+    await b`SELECT pg_advisory_lock(hashtext(${`stats_rollup_rebuild:${spec.name}`}))`;
     await a`BEGIN ISOLATION LEVEL READ COMMITTED`;
     const lockedAt = Date.now();
     let lockedMs = 0;
