@@ -27,6 +27,7 @@ import {
   readPublicCostsFromRollup,
 } from "../services/stats-rollup.js";
 import { RUN_DAY_ROLLUP_NAME } from "../services/stats-rollup-run-day.js";
+import { breakCostTiesByDimensions } from "../services/stats-group-order.js";
 import { readPublicVendorMonthly, type PublicVendorMonth } from "./vendor-costs.js";
 import { VendorCostCatalogError } from "../services/vendor-costs.js";
 import {
@@ -666,7 +667,7 @@ router.get("/v1/stats/costs", requireApiKey, async (req, res) => {
       groups = regroupByDynasty(groups, "workflowDynastySlug", "workflowSlug", slugMap);
     }
 
-    res.json({ groups });
+    res.json({ groups: breakCostTiesByDimensions(groups) });
   } catch (err) {
     console.error("[Runs Service] Error in GET /v1/stats/costs:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -1591,7 +1592,7 @@ function handlePublicCosts(req: any, res: any) {
         groups = regroupByDynasty(groups, groupBy, actualGroupBy, slugMap);
       }
 
-      res.json({ groups });
+      res.json({ groups: breakCostTiesByDimensions(groups) });
     } catch (err) {
       console.error("[Runs Service] Error in GET /v1/stats/public/costs:", err);
       res.status(500).json({ error: "Internal server error" });

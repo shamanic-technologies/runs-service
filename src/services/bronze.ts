@@ -17,6 +17,18 @@ import { runLifecycleEvents, costLifecycleEvents } from "../db/schema.js";
 
 export type Tx = Parameters<Parameters<typeof import("../db/index.js").db.transaction>[0]>[0];
 
+/**
+ * Anything that can insert: a transaction, or the pool itself for a LONE write
+ * (one autocommit statement). BOX-LOAD-1107-RUNS: the projection triggers behind a
+ * bronze insert row-lock shared rollup rows (today's run-day counter, the
+ * feature/workflow and campaign-day groups) until COMMIT. A route that also reads
+ * its row back inside the transaction keeps those locks across two more round
+ * trips while the busy event loop gets to them, and every other writer of the
+ * same rows queues (`Lock: transactionid`, ~45 % of insert samples, 2026-11-07).
+ * Write alone (or the writes that must be atomic, together), read back after.
+ */
+export type BronzeWriter = Pick<Tx, "insert">;
+
 export type RunLifecycleEventType =
   | "run.created"
   | "run.completed"
@@ -48,7 +60,7 @@ type LogRunArgs = {
   correlationId?: string | null;
 };
 
-export async function logRunLifecycle(tx: Tx, args: LogRunArgs): Promise<void> {
+export async function logRunLifecycle(tx: BronzeWriter, args: LogRunArgs): Promise<void> {
   await tx.insert(runLifecycleEvents).values({
     runId: args.runId,
     eventType: args.eventType,
@@ -70,7 +82,7 @@ type LogCostArgs = {
   correlationId?: string | null;
 };
 
-export async function logCostLifecycle(tx: Tx, args: LogCostArgs): Promise<void> {
+export async function logCostLifecycle(tx: BronzeWriter, args: LogCostArgs): Promise<void> {
   await tx.insert(costLifecycleEvents).values({
     runId: args.runId,
     costId: args.costId ?? null,
