@@ -114,6 +114,8 @@ export interface RollupRebuildSpec {
   name: string;
   /** The rollup's own tables, cleared under the lock. */
   tables: string[];
+  /** Tables whose writers feed the rollup, write-locked while it is cleared (default runs + runs_costs). */
+  lockTables?: string[];
   /** Further stamps un-set under the lock and set with `name` (a basis that
    *  only a rebuild makes exact). */
   alsoStamps?: string[];
@@ -163,7 +165,7 @@ export async function rebuildRollup(
     let lockedMs = 0;
     try {
       await a`SET LOCAL lock_timeout = '10s'`;
-      await a`LOCK TABLE runs, runs_costs IN SHARE ROW EXCLUSIVE MODE`;
+      await a.unsafe(`LOCK TABLE ${(spec.lockTables ?? ["runs", "runs_costs"]).join(", ")} IN SHARE ROW EXCLUSIVE MODE`);
       for (const stamp of [spec.name, ...(spec.alsoStamps ?? [])]) await a`DELETE FROM stats_rollups WHERE name = ${stamp}`;
       for (const table of spec.tables) await a.unsafe(`DELETE FROM ${table}`);
       const [{ snapshot }] = await a`SELECT pg_export_snapshot() AS snapshot`;

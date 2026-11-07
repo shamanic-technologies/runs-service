@@ -39,6 +39,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/stats-rollup-cost-day.ts` + `src/services/run-campaign-entries.ts` — margin rollup rebuild + entry-run projection backfill (migration 0040). See "Dashboard v2 reads".
 - `src/routes/outcome-occurrences.ts` + `src/services/outcome-ledger.ts` (+ `src/services/ledger-reconciliation.ts`, "Ledger reconciliation") — outcome occurrences declared on runs, cost per occurrence, the to-the-cent ledger check and the coverage series (migration 0057). See "Outcome occurrences — the production-cost ledger". Totals read: `src/services/outcome-cost-totals.ts` (0058), see "Outcome ledger as totals". Take-back by the owning service (0059): "Taking a declaration back".
 - `src/services/support-marks.ts` — support marks (which support function a run serves), doors + selection. See "Support spend, named and reported apart".
+- `src/services/ledger-day-cache.ts` — per-day cached partials of the stored ledger reads. See "Ledger reads answer from cached stored days".
 - `src/services/lead-states.ts` — allocation v5 inputs (catalogue lead states, pipe targets, lead-service first reaches -> `lead_state_reaches`). See "Lead states — allocation v5".
 - `src/middleware/auth.ts` — API key authentication middleware
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
@@ -1065,6 +1066,45 @@ concept, a value-based joint-cost split.
   CONSUMED read matched nothing and scanned all 1.2M rows). Consumption resolution joins the subject group's productions
   once (`prods` + `DISTINCT ON`), never a per-consumption scan of `members` (2.7 s of a 1000-row page). Guard:
   `tests/integration/outcome-occurrences-newsletter.test.ts`.
+
+## Ledger reads answer from cached stored days (LEDGER-LOAD-1107-RUNS)
+
+`GET /internal/stats/outcome-costs` (every figure features-service serves since LEDGER-ONLY-1107) and the `pipes[]`
+it carries (also on ledger-check) read the stored days through `src/services/ledger-day-cache.ts`: per read key
+(groupBy + filters) and per stored day, the section sums of that day are kept in process, labelled with the day's
+VERSION (`cost_ledger_computed_days.computed_at` + the `consumed_sources` / `start_days` flags). A read lists its
+range's versions (one small indexed read) and re-reads ONLY the days whose version changed, in one repeatable-read
+transaction with those versions (120 s budget for a cold fill). Live it re-scanned every day each call: brand
+f4d73dab 7-33 s, a small campaign 16-32 s, the fleet 16-19 s on the loaded box (2026-11-07).
+- **Exact by construction**: a stored day changes ONLY through `storeLedgerDay` (rows + computed_at in ONE
+  transaction). A day with no stored version is never cached. Partials merge in `ExactDecimal` (precision 200), a
+  SUM stays NULL when every partial is NULL, group ORDER comes from Postgres (`orderLikePostgres`: the database
+  collation, never a JS comparator), the 5000-group cap and the no-dimension all-NULL row behave as the live SQL.
+  daysMissing / daysStale / supportDaysMissing are computed live on every read, as before.
+- **Anything else that writes `outcome_cost_days` / `pipe_unit_days` must bump the day's `computed_at` in the same
+  transaction**, or the cache keeps the old rows (pinned by a test).
+- Kill switch `LEDGER_READ_CACHE=off` (live path, unchanged); LRU cap `LEDGER_READ_CACHE_MAX_ROWS` (600k rows).
+- Guard: `tests/integration/ledger-day-cache.test.ts` (cached body == live body byte for byte, cold and warm, 12
+  groupings incl. collation traps; a re-stored day is re-read, the others are not).
+
+## Outcome performers from a rollup (migration 0106, LEDGER-LOAD-1107-RUNS)
+
+`GET /internal/stats/outcome-performers` reads `stats_rollup_performer_day` once stamped `performer_day`: one row per
+(UTC day of the ENTRY, outcome, the run's org / brand_ids array / campaign / feature / service / task, effective
+performer kind / basis / workflow / name), `n` = signed entries (+1 a produced occurrence on its declaration day, -1 its
+reversal on the reversal day), `quantity` signed. ~24k rows for 616k occurrences; live it joined every occurrence of
+the window to `runs` (24-30 s then a 500 on the fleet 399-day read, 2026-11-07).
+- **Triggers**: run_outcomes AFTER INSERT / UPDATE / DELETE statement-level (transition tables; an update moves the
+  occurrence AND its reversal entry), BEFORE DELETE row-level for a deleted occurrence's reversal (the cascade later
+  cannot see the occurrence); run_outcome_reversals AFTER INSERT / UPDATE / DELETE; runs AFTER UPDATE OF the key
+  columns (row, WHEN distinct) and BEFORE DELETE (a run's entries out while its occurrences are visible; the cascaded
+  deletes then find no run and skip). Upserts in key order (no deadlock between two writers of the same groups).
+- **Read** (`readPerformerStatsFromRollup`): stamp + rows + totals in ONE repeatable-read transaction; same dimension
+  expressions, HAVING, ORDER BY, LIMIT as live; unstamped = live. Kill switch `PERFORMER_ROLLUP=off`.
+- **Readiness**: run `scripts/rebuild-stats-rollup.ts performer_day` after the deploy (prod: inside the container
+  against `dist/`; it locks runs + run_outcomes + run_outcome_reversals briefly: `RollupRebuildSpec.lockTables`).
+  TRUNCATE in global-setup. Guard: `tests/integration/outcome-performer-rollup.test.ts` (rollup == live through
+  declare, relabel, redate, performer change, reversal, run move, void, run delete, concurrency, rebuild).
 
 ## Lead states — allocation v5 (migration 0076, LEAD-STATES-1024-RUNS)
 

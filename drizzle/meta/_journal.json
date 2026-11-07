@@ -743,6 +743,13 @@
       "when": 1784275800000,
       "tag": "0105_org_projected_totals",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1784275900000,
+      "tag": "0106_stats_rollup_performer_day",
+      "breakpoints": true
     }
   ]
 }
