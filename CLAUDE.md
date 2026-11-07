@@ -1159,6 +1159,23 @@ subjectService, subjectIds (<= 1000), directions?, reason, relabeledBy}`: every 
 - Derived figures: the event re-stales every stored day >= affectedFromDay like a void (`staleComputedDays`), so outcome_cost_days,
   pipe units, coverage and loss shares recompute; `pool_lines` is not keyed on the outcome. Guard: `tests/integration/outcome-relabel.test.ts`.
 
+## Reversing a Unit whose fact no longer stands — `POST /v1/platform-runs/outcomes/reversals` (migration 0103, LEDGER-REVERSAL-1107)
+
+A declared Unit stays on the ledger after the fact behind it is taken back (prod 2026-11-07: 3 paid_client Units of brand
+75d7e3e8 whose sale was withdrawn). Every dashboard figure reads this ledger, so the DECLARING service states a reversing entry.
+- **Counter-entry, never a delete**: body `{reversedBy, reversals: [{runId, outcomeKey, subjectService, subjectId, reversedAt?, reason}]}`
+  (produced direction, <= 1000, all or nothing). One bronze `outcomes.reversed` per run -> silver `run_outcome_reversals` (one row per
+  occurrence, FK cascade on run_outcomes so a void takes it along). The occurrence row, its cost, its consumptions stay.
+- **Counts**: +1 on the declaration day, -1 on the reversal's UTC day under the same tags: the day statement's `produced_count`
+  (UNION ALL arm, `HAVING` drops a group netting zero) and `/internal/stats/outcome-performers` (window inside each arm). A range ending
+  before the reversal reads the Unit (the past as it was), one covering it does not. `/internal/outcome-occurrences` serves `reversal`.
+- **Money: none moves** (owner-delegated call): the spend that made the Unit stays where v6 put it; over a range covering the reversal the
+  standing Units carry it (normal spoilage). Allocation rule unchanged (v6). Staleness: exactly the reversal's day (`staleComputedDays`).
+- **Who**: the service named on the occurrence's `outcomes.declared` event (else the run's service): anyone else 403
+  `not_occurrence_declarer`; not found / x-org-id mismatch / reversedAt outside [declaration, now] = 422 `invalid_reversals`. Replay =
+  200 `already_reversed`, the first reversal stands (row locks: two racing calls write once). Final: a fact that comes back is a NEW Unit.
+- Guard: `tests/integration/outcome-reversal.test.ts`.
+
 ## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)
 
 Owner 2026-10-23: every spending service re-reads its own history and declares the outcomes on the past runs that paid for them
