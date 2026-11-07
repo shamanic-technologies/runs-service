@@ -3263,6 +3263,7 @@ registry.registerPath({
     400: { description: "No filter, or invalid filter", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "costs-service vendor catalogue unavailable", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "outcome_occurrences_timeout: a statement passed the read's 100 s budget (loaded box), retry later", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

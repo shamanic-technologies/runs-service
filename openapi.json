@@ -16273,6 +16273,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "outcome_occurrences_timeout: a statement passed the read's 100 s budget (loaded box), retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
