@@ -1159,6 +1159,20 @@ several keys and consumed their own, a cost loop) takes back the run's WHOLE dec
   on the same run; a non-owner with no declaration there = 403 `not_run_declarer`; whole-run void unchanged (owner only, 403 `not_run_owner`).
 - Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
 
+## Relabelling an outcome key — `POST /internal/outcome-occurrences/relabel{,/preview}` (migration 0101, OUTCOME-RELABEL-1107)
+
+A catalogue key retired for finer ones (owner 2026-11-07: `post_published` -> `threads_/x_/linkedin_post_published`, an outcome is
+the WHAT as fine as possible) moves its recorded occurrences, never deletes them. Staff door (x-api-key), body `{fromKey, toKey,
+subjectService, subjectIds (<= 1000), directions?, reason, relabeledBy}`: every occurrence of fromKey on the listed subjects, any run.
+- toKey must be a catalogue step (400 `unknown_outcome_key`, 502 unreadable); fromKey may be retired. `/preview` writes nothing and
+  lists the moves, `collisions`, `subjectsWithoutFromKey`, fleet `counts.before/after` per key x direction (after projected).
+- Apply: one bronze `outcomes.relabeled` event per run (items: id, new + previous key, reason, relabeledBy, `affectedFromDay` = earliest
+  run start / declaration of the subjects' rows of EITHER key), one transaction; the projection updates `outcome_key` in place (same
+  id, quantity, time, performer). A (run, direction, toKey, subject) already present = 409 `relabel_collision` with the plan, nothing
+  written (a racing one fails the unique key and re-plans). Replay = 200 `nothing_to_relabel`.
+- Derived figures: the event re-stales every stored day >= affectedFromDay like a void (`staleComputedDays`), so outcome_cost_days,
+  pipe units, coverage and loss shares recompute; `pool_lines` is not keyed on the outcome. Guard: `tests/integration/outcome-relabel.test.ts`.
+
 ## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)
 
 Owner 2026-10-23: every spending service re-reads its own history and declares the outcomes on the past runs that paid for them
