@@ -3032,6 +3032,77 @@ for (const [path, auth] of [
   });
 }
 
+// --- Reversing a produced occurrence: a counter-entry, never a delete (LEDGER-REVERSAL-1107) ---
+
+export const ReverseOutcomesRequestSchema = z
+  .object({
+    reversals: z
+      .array(
+        z.object({
+          runId: z.string().regex(UUID_STRING_RE).openapi({ description: "The run that declared the occurrence." }),
+          outcomeKey: z.string().trim().min(1).max(128).openapi({ description: "Its outcome key (as recorded; `email_sent` reads as `message_sent`).", example: "paid_client" }),
+          subjectService: z.string().trim().min(1).max(128).openapi({ example: "lead-service" }),
+          subjectId: z.string().trim().min(1).max(512).openapi({ example: "<lead id>" }),
+          reversedAt: z.string().datetime({ offset: true }).optional().openapi({ description: "When the fact behind the Unit stopped standing (e.g. the sale's withdrawal time). Between the occurrence's declaration and now; absent = now. Every count drops by the Unit from this instant's UTC day on." }),
+          reason: z.string().trim().min(1).max(2000).openapi({ description: "Why it no longer stands (kept in the bronze log and served on the occurrence).", example: "sale withdrawn by the client team" }),
+        }),
+      )
+      .min(1)
+      .max(1000)
+      .refine(
+        (items) => new Set(items.map((i) => `${i.runId.toLowerCase()}|${i.outcomeKey}|${i.subjectService}|${i.subjectId}`)).size === items.length,
+        { message: "each occurrence at most once per call" },
+      ),
+    reversedBy: z.string().trim().min(1).max(256).openapi({ description: "Who decided it (a sweep, a person, a ticket).", example: "lead-service outcome-fact-declarations" }),
+  })
+  .openapi("ReverseOutcomesRequest");
+
+export const ReverseOutcomesResponseSchema = z
+  .object({
+    allocationVersion: z.number().int(),
+    reversedCount: z.number().int().openapi({ description: "Occurrences reversed by this call." }),
+    alreadyReversedCount: z.number().int().openapi({ description: "Occurrences already reversed (a replay): nothing written for them, the stored reversal is served." }),
+    reversals: z.array(
+      z.object({
+        occurrenceId: z.string().uuid(),
+        runId: z.string().uuid(),
+        outcomeKey: z.string(),
+        subjectService: z.string(),
+        subjectId: z.string(),
+        declaredAt: z.string().datetime(),
+        reversedAt: z.string().datetime().openapi({ description: "The stored reversal's effective time (the first one stated, on a replay)." }),
+        recordedAt: z.string().datetime(),
+        reason: z.string(),
+        reversedBy: z.string(),
+        status: z.enum(["reversed", "already_reversed"]),
+      }),
+    ),
+  })
+  .openapi("ReverseOutcomesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/v1/platform-runs/outcomes/reversals",
+  summary: "Reverse produced outcome occurrences whose fact no longer stands (declaring service only)",
+  description:
+    "LEDGER-REVERSAL-1107. A Unit stays on the ledger after the fact behind it is taken back (a sale withdrawn): the service that DECLARED the occurrence states a REVERSING ENTRY, dated `reversedAt` (absent = now), with a reason. Industrial accounting: a counter-entry, history kept, the occurrence is never deleted. " +
+    "Counts: every count this service serves subtracts the Unit ON ITS REVERSAL'S UTC DAY: /internal/stats/outcome-costs `produced[].occurrences` (stored days: +1 on the declaration day, -1 on the reversal day, under the declaring run's tags), /internal/stats/outcome-performers (`count`, same rule), so a range ending before the reversal still reads the Unit and a range covering it does not; the refresher recomputes exactly the reversal's day (it reads in daysMissing until then). /internal/outcome-occurrences keeps listing the occurrence with its `reversal`. " +
+    "Money: none moves. The spend that made the Unit stays where the allocation put it; over a range covering the reversal it is carried by the Units that stand (normal spoilage). Consumptions of it are unchanged. Allocation rule unchanged (v6). " +
+    "Who: only the service that declared the occurrence (x-service-name = the declaring service of its `outcomes.declared` event, else the run's service): anyone else = 403 `not_occurrence_declarer`, nothing written. All or nothing: an occurrence not found on that run (produced direction), x-org-id not the run's org, or reversedAt before the declaration / in the future = 422 `invalid_reversals` with the list, nothing written. " +
+    "Idempotent: an occurrence already reversed answers `already_reversed` with the stored reversal (its first reversedAt stands), nothing written. Final: a fact that comes back is a NEW Unit, declared again (on another run). " +
+    "Example body: {\"reversedBy\":\"lead-service\",\"reversals\":[{\"runId\":\"<outcome-recording run>\",\"outcomeKey\":\"paid_client\",\"subjectService\":\"lead-service\",\"subjectId\":\"<lead id>\",\"reversedAt\":\"2026-11-05T18:30:14Z\",\"reason\":\"sale withdrawn\"}]}. Auth: x-api-key + x-service-name (the declaring service); x-org-id optional (when given, every run must be that org's).",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: ReverseOutcomesRequestSchema } } } },
+  responses: {
+    201: { description: "At least one occurrence reversed by this call", content: { "application/json": { schema: ReverseOutcomesResponseSchema } } },
+    200: { description: "Every occurrence was already reversed (replay, nothing written)", content: { "application/json": { schema: ReverseOutcomesResponseSchema } } },
+    400: { description: "Invalid body (an occurrence twice in one call included), or missing x-service-name", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    403: { description: "not_occurrence_declarer: at least one occurrence was declared by another service; details.refusals lists them; nothing written", content: { "application/json": { schema: ValidationErrorSchema } } },
+    422: { description: "invalid_reversals: details.refusals (occurrence_not_found, run_org_mismatch, invalid_reversed_at); nothing written", content: { "application/json": { schema: ValidationErrorSchema } } },
+  },
+});
+
 // --- Relabelling recorded occurrences to another outcome key (OUTCOME-RELABEL-1107) ---
 
 export const RelabelOutcomesRequestSchema = z
@@ -3372,6 +3443,15 @@ export const OutcomeOccurrenceWithCostSchema = z
       })
       .openapi({ description: "The declaring run's tags (for a produced occurrence: the production tags). Offer = the campaign's (campaign-service). Any customer scope is an exact sum of occurrences over these tags." }),
     performer: EffectivePerformerSchema.nullable().openapi({ description: "OUTCOME-PERFORMER-1106: WHO performed it. Null = unknown (nothing stated and no workflow on the declaring run; always null for a consumed occurrence)." }),
+    reversal: z
+      .object({
+        reversedAt: z.string().datetime().openapi({ description: "When the fact stopped standing: every count drops by this occurrence from this instant's UTC day on." }),
+        recordedAt: z.string().datetime(),
+        reason: z.string(),
+        reversedBy: z.string(),
+      })
+      .nullable()
+      .openapi({ description: "LEDGER-REVERSAL-1107: the reversing entry its declaring service stated (POST /v1/platform-runs/outcomes/reversals). Null = it stands. A reversed occurrence keeps its row, its cost and its consumptions." }),
     cost: ProductionCostSchema.nullable().openapi({ description: "PRODUCED: what this occurrence cost to make (its standard cost), under allocation v1, as of now (a cost row written later on its run moves it). CONSUMED: null (see consumption)." }),
     costSlices: z
       .array(
@@ -3482,7 +3562,7 @@ registry.registerPath({
   path: "/internal/stats/outcome-performers",
   summary: "Produced outcome occurrences per WHO performed them (service-auth)",
   description:
-    "OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome). Counts PRODUCED occurrences whose effective declaration time falls in [since, until], grouped by the asked dimensions. The performer is the EFFECTIVE one: what the declaring service stated (POST /v1/runs/{id}/outcomes, /v1/platform-runs/{id}/outcomes, /v1/platform-runs/outcomes/batch: `produced[].performer`), else, for an occurrence declared on a run carrying a workflow, that script (kind script, basis run_workflow), else null (unknown, never guessed). `workflowSlug` therefore groups a script's whole output: what its runs declared AND what other services stated it performed. Counts only: cost allocation never reads the performer (cost per occurrence: /internal/outcome-occurrences). Live off the stored occurrences (no day storage, no staleness). > 5000 groups = 422 too_many_groups, never truncated.",
+    "OUTCOME-PERFORMER-1106 (owner 2026-11-06: provenance stored generically, per outcome). Counts PRODUCED occurrences whose effective declaration time falls in [since, until], grouped by the asked dimensions. The performer is the EFFECTIVE one: what the declaring service stated (POST /v1/runs/{id}/outcomes, /v1/platform-runs/{id}/outcomes, /v1/platform-runs/outcomes/batch: `produced[].performer`), else, for an occurrence declared on a run carrying a workflow, that script (kind script, basis run_workflow), else null (unknown, never guessed). `workflowSlug` therefore groups a script's whole output: what its runs declared AND what other services stated it performed. Counts only: cost allocation never reads the performer (cost per occurrence: /internal/outcome-occurrences). LEDGER-REVERSAL-1107: a REVERSED occurrence counts -1 on its reversal's UTC day (`day` = that day, same other dimensions), so a window covering the declaration and the reversal reads zero; a group netting zero is not listed. Live off the stored occurrences (no day storage, no staleness). > 5000 groups = 422 too_many_groups, never truncated.",
   security: [{ apiKey: [] }],
   request: { query: OutcomePerformerStatsQuerySchema },
   responses: {
@@ -3657,7 +3737,7 @@ export const OutcomeCostTotalsResponseSchema = z
     produced: z.array(
       z.object({
         dimensions: OutcomeCostDimensionsSchema.openapi({ description: "The requested dimensions except the source* ones (consumed section only)." }),
-        occurrences: z.number().int().openapi({ description: "Produced occurrences DECLARED in the range (day = their declaration's UTC day), under the declaring run's tags." }),
+        occurrences: z.number().int().openapi({ description: "Produced occurrences DECLARED in the range (day = their declaration's UTC day), under the declaring run's tags, MINUS those whose declaring service reversed them in the range (LEDGER-REVERSAL-1107: -1 on the reversal's UTC day, same tags; a single day can read negative)." }),
         quantity: z.string().openapi({ description: "Σ quantity of those occurrences (6 decimals)." }),
         cost: ProductionCostSchema.openapi({ description: "Σ own production cost (allocation v1 shares) of the spend in the range (day = the cost row's UTC day), under the declaring run's tags. = Σ costSlices of /internal/outcome-occurrences." }),
       }),

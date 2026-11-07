@@ -118,7 +118,9 @@ export interface PerformerStatGroup {
 
 /**
  * PRODUCED occurrences whose effective declaration time falls in [since, until]
- * (UTC days, inclusive), counted per the asked dimensions. A co-branded run's
+ * (UTC days, inclusive), counted per the asked dimensions, MINUS the reversals
+ * (LEDGER-REVERSAL-1107) dated in the window: a reversed Unit counts -1 on its
+ * reversal day (`day` = that day), so a window covering both reads zero. A co-branded run's
  * occurrence counts under EACH brand only when grouping by brandId (as every
  * brand read here); a brand filter alone counts it once.
  */
@@ -128,11 +130,10 @@ export async function readPerformerStats(
   since: string,
   until: string,
 ): Promise<{ groups: PerformerStatGroup[]; totals: { count: number; quantity: string } }> {
-  const where: SQL[] = [
-    sql`o.direction = 'produced'`,
-    sql`o.declared_at >= (${since}::date)::timestamp AT TIME ZONE 'UTC'`,
-    sql`o.declared_at < (${until}::date + 1)::timestamp AT TIME ZONE 'UTC'`,
-  ];
+  // LEDGER-REVERSAL-1107: the window is applied INSIDE each entry arm (the occurrence on its
+  // declaration time, its reversal on the reversal time), so `o.declared_at` below is the ENTRY's
+  // time: +1 on the declaration day, -1 on the reversal day.
+  const where: SQL[] = [];
   if (f.outcomeKey) where.push(sql`o.outcome_key = ${f.outcomeKey}`);
   if (f.orgId) where.push(sql`r.organization_id = ${f.orgId}::uuid`);
   if (f.campaignId) where.push(sql`r.campaign_id::text = ${f.campaignId}`);
@@ -148,19 +149,35 @@ export async function readPerformerStats(
     : sql``;
   const dims = groupBy.map((d) => sql.raw(`x.${COLUMN[d]} AS "${d}"`));
   const groupSql = groupBy.length > 0 ? sql`GROUP BY ${sql.join(groupBy.map((d) => sql.raw(`x.${COLUMN[d]}`)), sql`, `)}` : sql``;
+  // A group whose entries net to nothing (every Unit of it reversed in the window) is not listed.
+  const havingSql = sql`HAVING SUM(x.sign) <> 0 OR SUM(x.sign * x.quantity) <> 0`;
+  const whereSql = where.length > 0 ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
+  const window = (col: string) =>
+    sql`${sql.raw(col)} >= (${since}::date)::timestamp AT TIME ZONE 'UTC' AND ${sql.raw(col)} < (${until}::date + 1)::timestamp AT TIME ZONE 'UTC'`;
+  const entries = sql`(
+      SELECT o.run_id, o.direction, o.outcome_key, o.quantity, o.performer_kind, o.performer_workflow_slug, o.performer_name,
+             o.declared_at, 1 AS sign
+      FROM run_outcomes o WHERE o.direction = 'produced' AND ${window("o.declared_at")}
+      UNION ALL
+      SELECT o.run_id, o.direction, o.outcome_key, o.quantity, o.performer_kind, o.performer_workflow_slug, o.performer_name,
+             v.reversed_at AS declared_at, -1 AS sign
+      FROM run_outcome_reversals v JOIN run_outcomes o ON o.id = v.occurrence_id
+      WHERE o.direction = 'produced' AND ${window("v.reversed_at")}
+    )`;
   const orderSql = groupBy.length > 0 ? sql`ORDER BY ${sql.join(groupBy.map((d) => sql.raw(`x.${COLUMN[d]} NULLS LAST`)), sql`, `)}` : sql``;
   const rows = (await statsDb.execute(sql`
-    SELECT ${sql.join([...dims, sql`COUNT(*)::text AS n`, sql`SUM(x.quantity)::text AS q`], sql`, `)}
+    SELECT ${sql.join([...dims, sql`SUM(x.sign)::text AS n`, sql`SUM(x.sign * x.quantity)::text AS q`], sql`, `)}
     FROM (
       SELECT o.outcome_key, to_char((o.declared_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
              r.organization_id::text AS org_id, ${byBrand ? sql`b.brand_id` : sql`NULL::text`} AS brand_id,
-             r.campaign_id::text AS campaign_id, r.feature_slug, r.service_name, r.task_name, o.quantity,
+             r.campaign_id::text AS campaign_id, r.feature_slug, r.service_name, r.task_name, o.quantity, o.sign,
              ${EFFECTIVE_PERFORMER_COLUMNS}
-      FROM run_outcomes o JOIN runs r ON r.id = o.run_id
+      FROM ${entries} o JOIN runs r ON r.id = o.run_id
       ${brandJoin}
-      WHERE ${sql.join(where, sql` AND `)}
+      ${whereSql}
     ) x
     ${groupSql}
+    ${havingSql}
     ${orderSql}
     LIMIT ${MAX_PERFORMER_GROUPS + 1}
   `)) as any[];
@@ -172,9 +189,9 @@ export async function readPerformerStats(
   });
   // Totals count each occurrence once (a co-branded occurrence is under each brand in groups).
   const [t] = (await statsDb.execute(sql`
-    SELECT COUNT(*)::text AS n, COALESCE(SUM(o.quantity), 0)::text AS q
-    FROM run_outcomes o JOIN runs r ON r.id = o.run_id
-    WHERE ${sql.join(where, sql` AND `)}
+    SELECT COALESCE(SUM(o.sign), 0)::text AS n, COALESCE(SUM(o.sign * o.quantity), 0)::text AS q
+    FROM ${entries} o JOIN runs r ON r.id = o.run_id
+    ${whereSql}
   `)) as any[];
   return { groups, totals: { count: Number(t.n), quantity: fx6(t.q) } };
 }
