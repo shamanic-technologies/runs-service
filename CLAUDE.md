@@ -1110,7 +1110,9 @@ stored produced-none sources agree) AND complete AND declarationsComplete (no un
   days and, when dated on a past day, the declaration days of later occurrences of the same subjects (+ equated ones); a run that
   spends, or whose production line (org x task pool) has spend, still stales every day from its start. 108 signups + 34 paid clients
   back-dated to 2026-03-23 had staled 276 of 279 days (~3 min each). The 15-min tick starts the paced backfill itself when past days
-  stay due (its budget goes to the 3 recent days). Guard: `tests/integration/ledger-stale-dated-facts.test.ts`.
+  stay due (its budget goes to the 3 recent days). The next tick fires 15 min after the previous one ENDS, and keeps to the recent days while
+  the backfill runs (NEWSLETTER-COST-1107-LEDGER-STALE: a fixed 15-min interval with ticks running past 15 min left the backfill no
+  window, 1 past day an hour while 276 stayed stale after the re-price). Guard: `tests/integration/ledger-reprice-refresh.test.ts`. Guard: `tests/integration/ledger-stale-dated-facts.test.ts`.
 - **unattributed** (migration 0071): real production its OWNER marks `unattributed_production` through the support-mark doors (no pipe,
   subject never recorded, e.g. Feb 2026 runs from before campaigns): its own line on the reconciliation (totals/days/services), never
   support, never undeclared, never spread; never inferred from a missing campaign. `declarationsComplete` = complete AND no undeclared AND
