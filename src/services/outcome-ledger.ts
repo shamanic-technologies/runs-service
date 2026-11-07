@@ -2386,6 +2386,29 @@ export async function firstLedgerDay(today: string): Promise<string> {
 const CURRENT_DAY_SQL = sql`outcome_costs AND consumed_sources AND support_split AND start_days AND owner_service AND loss_lines`;
 
 /**
+ * The run of `${alias}.run_id` with whether it SPENDS: a cost row of its own or a child run
+ * (a spend-free run carries no money: a recorded past fact, 0068).
+ */
+const runSpendsText = (alias: string) => `
+  SELECT started_at, completed_at, organization_id, service_name, task_name, workflow_slug,
+         (EXISTS (SELECT 1 FROM runs_costs c WHERE c.run_id = runs.id) OR EXISTS (SELECT 1 FROM runs k WHERE k.parent_run_id = runs.id)) AS spends
+  FROM runs WHERE id = ${alias}.run_id OFFSET 0`;
+const runSpendsSql = (alias: string) => sql.raw(runSpendsText(alias));
+
+/**
+ * The UTC days `d` an occurrence (`${alias}.run_id`, `${alias}.declared_at`) can move: its run's
+ * days (from LEAST(declaration, start) to the later of the declaration and the run's end, today
+ * while it runs: where its cost rows land) when the run spends, else its declaration day only.
+ */
+const occurrenceRunDaysSql = (alias: string) => sql.raw(`
+  CROSS JOIN LATERAL (${runSpendsText(alias)}) r
+  CROSS JOIN LATERAL generate_series(
+    date_trunc('day', (CASE WHEN r.spends THEN LEAST(${alias}.declared_at, r.started_at) ELSE ${alias}.declared_at END) AT TIME ZONE 'UTC'),
+    date_trunc('day', (CASE WHEN r.spends THEN GREATEST(${alias}.declared_at, COALESCE(r.completed_at, now())) ELSE ${alias}.declared_at END) AT TIME ZONE 'UTC'),
+    interval '1 day'
+  ) d`);
+
+/**
  * Stored days whose figures predate a fact recorded after them, so they read
  * STALE until the refresher recomputes them:
  *  - a declaration RECORDED after the day was computed (on time or a backfill),
@@ -2412,17 +2435,91 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   // backfilled 788k occurrences in a day (2026-10-24). Pairing a run's earliest
   // declaration with its newest recording can only flag MORE days (recomputed
   // byte for byte), never fewer.
+  //
+  // A run that SPENDS (a cost row or a child run) re-anchors its subtree's cost rows from
+  // its start: every day from LEAST(first declaration, start) on ('from' rows). A
+  // SPEND-FREE run (a recorded past fact: lead-service's outcome-recording, social-service's
+  // imported posts, newsletter units) carries no money and no anchor of anyone's spend, so
+  // its declarations move only ('day' rows): the days they are declared on (units, consumed
+  // rows, reuse), the days of the run's earlier consumptions (their consuming outcome is its
+  // production), and, for a fact dated on a PAST day, the declaration days of every later
+  // occurrence of the same subjects or of a subject equated to them (consumption resolution,
+  // reuse rank: both keyed on the consumption's day). Except when its production line
+  // (org x pool key) has spend: a line that now produced earlier turns that spend's unpooled
+  // loss vs undeclared on every later day, and a repeat production of the same task is a
+  // spending share ('from'). LEDGER-STALE-1107: lead-service back-declared 108 signups + 34
+  // paid clients dated from 2026-03-23 on spend-free runs and 276 of 279 days went stale at
+  // once, at ~3 min a day on the box (~1 day before the history was current again).
   const late = (await db.execute(sql`
-    WITH o AS MATERIALIZED (
-      SELECT run_id, MIN(declared_at) AS first_declared, MAX(COALESCE(recorded_at, declared_at)) AS last_recorded
+    WITH x AS MATERIALIZED (
+      SELECT run_id, direction, declared_at, COALESCE(recorded_at, declared_at) AS rec, subject_service, subject_id
       FROM run_outcomes
       WHERE COALESCE(recorded_at, declared_at) > ${oldest}::timestamptz
-      GROUP BY run_id
+    ),
+    o AS MATERIALIZED (
+      SELECT run_id, MIN(declared_at) AS first_declared, MAX(rec) AS last_recorded, bool_or(direction = 'produced') AS produced
+      FROM x GROUP BY run_id
+    ),
+    j AS MATERIALIZED (
+      SELECT o.*, r.started_at, r.organization_id, r.service_name, r.task_name, r.workflow_slug, r.spends
+      FROM o CROSS JOIN LATERAL (${runSpendsSql("o")}) r
+    ),
+    lines AS MATERIALIZED (
+      SELECT p.organization_id, p.service_name, p.task_name,
+             CASE WHEN p.organization_id IS NULL
+               THEN EXISTS (SELECT 1 FROM runs r2 WHERE r2.organization_id IS NULL AND r2.service_name = p.service_name AND r2.task_name = p.task_name
+                              AND r2.workflow_slug IS NULL AND EXISTS (SELECT 1 FROM runs_costs c WHERE c.run_id = r2.id))
+               ELSE EXISTS (SELECT 1 FROM runs r2 WHERE r2.organization_id = p.organization_id AND r2.service_name = p.service_name AND r2.task_name = p.task_name
+                              AND r2.workflow_slug IS NULL AND EXISTS (SELECT 1 FROM runs_costs c WHERE c.run_id = r2.id))
+             END AS spends
+      FROM (SELECT DISTINCT organization_id, service_name, task_name FROM j WHERE NOT spends AND workflow_slug IS NULL) p
+    ),
+    k AS MATERIALIZED (
+      SELECT j.*, (j.spends OR j.workflow_slug IS NOT NULL OR COALESCE(l.spends, true)) AS broad
+      FROM j LEFT JOIN lines l
+        ON l.organization_id IS NOT DISTINCT FROM j.organization_id AND l.service_name = j.service_name AND l.task_name = j.task_name
+    ),
+    narrow AS MATERIALIZED (SELECT run_id, last_recorded, produced FROM k WHERE NOT broad),
+    subj AS MATERIALIZED (
+      SELECT x.subject_service AS svc, x.subject_id AS sid, MIN(x.declared_at) AS from_at, MAX(x.rec) AS at
+      FROM x JOIN narrow n ON n.run_id = x.run_id
+      GROUP BY 1, 2
+      -- an on-time fact (today) moves only today's days, which every tick recomputes
+      HAVING MIN(x.declared_at) < (now() AT TIME ZONE 'UTC')::date::timestamp AT TIME ZONE 'UTC'
+    ),
+    subj_eq AS MATERIALIZED (
+      SELECT svc, sid, from_at, at FROM subj
+      UNION
+      SELECT e.target_service, e.target_id, s.from_at, s.at FROM subj s JOIN subject_equivalences e ON e.subject_service = s.svc AND e.subject_id = s.sid
+      UNION
+      SELECT e2.subject_service, e2.subject_id, s.from_at, s.at FROM subj s
+      JOIN subject_equivalences e1 ON e1.subject_service = s.svc AND e1.subject_id = s.sid
+      JOIN subject_equivalences e2 ON e2.target_service = e1.target_service AND e2.target_id = e1.target_id
+      UNION
+      SELECT e.subject_service, e.subject_id, s.from_at, s.at FROM subj s JOIN subject_equivalences e ON e.target_service = s.svc AND e.target_id = s.sid
+    ),
+    days AS (
+      SELECT x.declared_at AS at_day, x.rec AS at FROM x JOIN narrow n ON n.run_id = x.run_id
+      UNION ALL
+      SELECT c.declared_at, n.last_recorded FROM narrow n
+      CROSS JOIN LATERAL (
+        SELECT declared_at FROM run_outcomes
+        WHERE run_id = n.run_id AND direction = 'consumed' AND COALESCE(recorded_at, declared_at) <= ${oldest}::timestamptz OFFSET 0
+      ) c
+      WHERE n.produced
+      UNION ALL
+      SELECT y.declared_at, s.at FROM subj_eq s
+      CROSS JOIN LATERAL (
+        SELECT declared_at FROM run_outcomes
+        WHERE subject_service = s.svc AND subject_id = s.sid
+          AND declared_at >= date_trunc('day', s.from_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        OFFSET 0
+      ) y
     )
-    SELECT to_char(LEAST(o.first_declared, r.started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-           MAX(o.last_recorded) AS last_recorded
-    FROM o CROSS JOIN LATERAL (SELECT started_at FROM runs WHERE id = o.run_id OFFSET 0) r
-    GROUP BY 1
+    SELECT 'from' AS kind, to_char(LEAST(first_declared, started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(last_recorded) AS last_recorded
+    FROM k WHERE broad GROUP BY 2
+    UNION ALL
+    SELECT 'day', to_char(at_day AT TIME ZONE 'UTC', 'YYYY-MM-DD'), MAX(at) FROM days GROUP BY 2
   `)) as any[];
   const marks = (await db.execute(sql`
     WITH m AS MATERIALIZED (SELECT run_id, marked_at FROM run_support_marks WHERE marked_at > ${oldest}::timestamptz)
@@ -2430,8 +2527,12 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
     FROM m CROSS JOIN LATERAL (SELECT started_at FROM runs WHERE id = m.run_id OFFSET 0) r
     GROUP BY 1
   `)) as any[];
+  const from = [...late.filter((l) => l.kind === "from"), ...marks];
+  const lateDayAt = new Map(late.filter((l) => l.kind === "day").map((l) => [l.day as string, new Date(l.last_recorded)]));
   for (const [day, at] of computed) {
-    if ([...late, ...marks].some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
+    if (from.some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
+    const changed = lateDayAt.get(day);
+    if (changed && changed > at) out.add(day);
   }
   const voids = (await db.execute(sql`
     SELECT payload->>'affectedFromDay' AS from_day, MAX(occurred_at) AS occurred_at FROM outcome_declaration_events
@@ -2463,13 +2564,7 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
       CROSS JOIN LATERAL (SELECT declared_at, run_id FROM run_outcomes o WHERE o.subject_service = s.svc AND o.subject_id = s.sid OFFSET 0) o
     )
     SELECT to_char(d, 'YYYY-MM-DD') AS day, MAX(o.at) AS last_recorded
-    FROM o
-    CROSS JOIN LATERAL (SELECT started_at, completed_at FROM runs WHERE id = o.run_id OFFSET 0) r
-    CROSS JOIN LATERAL generate_series(
-      date_trunc('day', LEAST(o.declared_at, r.started_at) AT TIME ZONE 'UTC'),
-      date_trunc('day', GREATEST(o.declared_at, COALESCE(r.completed_at, now())) AT TIME ZONE 'UTC'),
-      interval '1 day'
-    ) d
+    FROM o ${occurrenceRunDaysSql("o")}
     GROUP BY 1
   `)) as any[];
   const subjectDayAt = new Map(subjectDays.map((l) => [l.day as string, new Date(l.last_recorded)]));
@@ -2666,7 +2761,7 @@ export async function refreshLedgerDays(
   maxDays = Infinity,
   firstDay?: string,
   budgetMs = TICK_BUDGET_MS,
-): Promise<{ computed: string[]; failed: string[] }> {
+): Promise<{ computed: string[]; failed: string[]; pastDaysDue: number }> {
   const started = Date.now();
   await ensurePoolLines();
   const versions = await fetchVendorCostCatalog();
@@ -2697,7 +2792,11 @@ export async function refreshLedgerDays(
       console.error(`[Runs Service] cost ledger day ${day} failed after ${Date.now() - t0}ms (retried next tick):`, err);
     }
   }
-  return { computed, failed };
+  // Past days this tick left (missing, stale, older column set): the paced backfill takes them.
+  const recent = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(utcDay(now), -i)));
+  const done = new Set(computed);
+  const pastDaysDue = days.filter((d) => !recent.has(d) && !done.has(d)).length;
+  return { computed, failed, pastDaysDue };
 }
 
 let refreshing = false;
@@ -2715,12 +2814,20 @@ export function startCostLedgerRefresh(): NodeJS.Timeout {
     while (refreshing) await sleep(5_000);
     tickWaiting = false;
     refreshing = true;
+    let pastDaysDue = 0;
     try {
-      await refreshLedgerDays();
+      ({ pastDaysDue } = await refreshLedgerDays());
     } catch (err) {
       console.error("[Runs Service] cost ledger refresh failed (retried next tick):", err);
     } finally {
       refreshing = false;
+    }
+    // LEDGER-STALE-1107: past days a fact moved (a back-dated declaration, a void, a relabel)
+    // are recomputed on their own, paced to the box: the tick's budget goes to the recent
+    // days, so without this the history waited for a human to start the backfill.
+    if (pastDaysDue > 0 && !backfillState?.running) {
+      console.log(`[Runs Service] cost ledger: ${pastDaysDue} past days due, paced backfill started`);
+      startLedgerBackfill();
     }
   };
   setTimeout(() => void tick(), FIRST_TICK_MS).unref();
