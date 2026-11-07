@@ -1039,6 +1039,23 @@ concept, a value-based joint-cost split.
   once (`prods` + `DISTINCT ON`), never a per-consumption scan of `members` (2.7 s of a 1000-row page). Guard:
   `tests/integration/outcome-occurrences-newsletter.test.ts`.
 
+## Box load: lock hold and per-page pricing (BOX-LOAD-1107-RUNS)
+
+- **Bronze writes never read back inside their transaction** (`BronzeWriter` in `services/bronze.ts`): a lone run/cost
+  event is one autocommit insert, several cost rows one transaction of inserts only; the silver row is read after
+  COMMIT. The projection triggers row-lock SHARED rollup rows (today's run-day counter, feature/workflow, campaign-day
+  groups) until commit: an in-transaction read-back held them across 2 more round trips on a busy event loop, and ~45 %
+  of lifecycle-insert samples waited on `Lock: transactionid` behind an `idle in transaction` read-back (2026-11-07,
+  run.created 184/min at 210 ms mean). Same rows, same responses.
+- **`occurrenceCostSlices(..., { only })`**: the occurrence read prices only the page's produced rows + its
+  consumptions' producers (the refresher's `standardCostsOf` only the producers). Windows still span every occurrence
+  of the anchor / pool (MATERIALIZED before the filter): byte-identical. A newsletter release run (~20k Units) was
+  priced whole for every 1000-row page (consumed page 9 s -> 2.3 s warm, prod 2026-11-07). Guard: the "page of one"
+  test in `tests/integration/outcome-occurrences-newsletter.test.ts`.
+- **`POST /v1/runs/batch`** reads each root's subtree total from `run_subtree_costs` (0086) through
+  `subtreeBilledCostByRoot`, no longer the inline walk (~0.8 s of apollo-service's ~2 s acquisition-cost batch;
+  prod parity 1,172 roots, 0 mismatches).
+
 ## Ledger reads answer from cached stored days (LEDGER-LOAD-1107-RUNS)
 
 `GET /internal/stats/outcome-costs` (every figure features-service serves since LEDGER-ONLY-1107) and the `pipes[]`

@@ -32,6 +32,7 @@ import {
   newCostId,
   type Identity,
 } from "../services/bronze.js";
+import type { BronzeWriter } from "../services/bronze.js";
 import {
   attributionConflicts,
   costAttribution,
@@ -252,7 +253,9 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     };
 
     try {
-      const created = await db.transaction(async (tx) => {
+      // Write, then read back after COMMIT (BronzeWriter, BOX-LOAD-1107-RUNS): the run.created
+      // insert alone is one autocommit statement; a support mark rides the same transaction.
+      const writeCreated = async (tx: BronzeWriter) => {
         await logRunLifecycle(tx, {
           runId: id,
           eventType: "run.created",
@@ -262,11 +265,11 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
         });
         // A support run (COST-SUPPORT-1024-RUNS) is marked in the same transaction: never an instant unmarked.
         if (support) await tx.insert(outcomeDeclarationEvents).values(supportMarkEvent(id, { ...support, markedBy: serviceName }));
-        // Trigger project_run_lifecycle_to_silver fires AFTER the bronze insert
-        // and creates the silver row synchronously. Read it back for the response.
-        const [silver] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-        return silver;
-      });
+      };
+      if (support) await db.transaction(writeCreated);
+      else await writeCreated(db);
+      // Trigger project_run_lifecycle_to_silver created the silver row with the insert: read it back.
+      const [created] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
       res.status(201).json(created);
     } catch (err: any) {
       // Race-condition handling on idempotency_key — concurrent retry inserted
@@ -383,28 +386,14 @@ router.post("/v1/runs/batch", requireApiKey, async (req, res) => {
     const foundIds = runRows.map((r) => r.id);
     const foundIdsList = sql.join(foundIds.map((id) => sql`${id}`), sql`, `);
 
-    // Query 2 — rolled-up aggregates via INLINE bounded recursive CTE.
-    // Gold view removed (unbounded walk caused 20+ GB OOM on prod).
-    // Predicates atomic via cost-aggregator (no `!= 'cancelled'`).
-    // Fenced LATERALs: see RUN_TREE_PLAN_NOTE.
-    const rollupResult = await readDb.execute(sql`
-      WITH RECURSIVE descendants AS (
-        SELECT id, id AS root_run_id FROM runs WHERE id IN (${foundIdsList})
-        UNION ALL
-        SELECT ch.id, d.root_run_id
-        FROM descendants d
-        CROSS JOIN LATERAL (SELECT c.id FROM runs c WHERE c.parent_run_id = d.id OFFSET 0) ch
-      )
-      SELECT
-        d.root_run_id,
-        ${costAggregateSelectSql("rc")}
-      FROM descendants d
-      LEFT JOIN LATERAL (${runCostRowsSql(sql`d.id`)}) rc ON true
-      GROUP BY d.root_run_id
-    `);
-    const rollupByRoot = new Map<string, any>(
-      (rollupResult as any[]).map((r) => [r.root_run_id, r])
-    );
+    // Query 2 — each root's subtree total (actual / provisioned / total, gross),
+    // read from `run_subtree_costs` (migration 0086, kept on write) once stamped,
+    // else the same live walk (BOX-LOAD-1107-RUNS: the inline recursive CTE here was
+    // ~0.8 s of the ~2 s apollo-service acquisition-cost batch). Same values: the
+    // stored rows and the walk share `costAggregateSelectSql`'s predicates, and every
+    // figure below is re-rendered with `toFixed(10)`; a root with no actual /
+    // provisioned row is absent either way and reads "0".
+    const rollupByRoot = await subtreeBilledCostByRoot(foundIds);
 
     // Query 3 — descendant run rows via INLINE bounded recursive CTE.
     // The walk carries each run's columns (no join back to runs): see RUN_TREE_PLAN_NOTE.
@@ -743,7 +732,9 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
       itemsToCreate.push({ item, costId: newCostId(), total, net });
     }
 
-    const newRows = await db.transaction(async (tx) => {
+    // Several rows are written atomically; a lone row is one autocommit statement. Read back
+    // after COMMIT (BronzeWriter, BOX-LOAD-1107-RUNS).
+    const writeCosts = async (tx: BronzeWriter) => {
       for (const { item, costId, total, net } of itemsToCreate) {
         const unitCost = costMap.get(item.costName)!;
         const attribution = costAttribution(item, req, run);
@@ -785,12 +776,12 @@ router.post("/v1/runs/:id/costs", requireApiKey, async (req, res) => {
           idempotencyKey: item.idempotencyKey ?? null,
         });
       }
-      if (itemsToCreate.length === 0) return [] as any[];
-      return await tx
-        .select()
-        .from(runsCosts)
-        .where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
-    });
+    };
+    if (itemsToCreate.length > 1) await db.transaction(writeCosts);
+    else await writeCosts(db);
+    const newRows: any[] = itemsToCreate.length === 0
+      ? []
+      : await db.select().from(runsCosts).where(inArray(runsCosts.id, itemsToCreate.map((c) => c.costId)));
 
     // Restore 1-to-1 mapping for response: items that idempotency-collided return the existing row.
     const newRowsById = new Map<string, any>(newRows.map((r: any) => [r.id, r]));
@@ -918,32 +909,30 @@ router.patch("/v1/runs/:id/costs/:costId", requireApiKey, async (req, res) => {
         ? { from: existing.status, to: newStatus, reason: parsed.data.reason, refundedBy: parsed.data.refundedBy }
         : { from: existing.status, to: newStatus };
 
-    const updated = await db.transaction(async (tx) => {
-      await logCostLifecycle(tx, {
-        runId: id,
-        costId,
-        eventType,
-        payload,
-        identity: {
-          orgId: req.orgId,
-          userId: req.userId || run.userId,
-          brandIds: req.headerBrandIds ?? run.brandIds ?? null,
-          campaignId: req.headerCampaignId ?? run.campaignId ?? null,
-          workflowSlug: req.headerWorkflowSlug ?? run.workflowSlug ?? null,
-          featureSlug: req.headerFeatureSlug ?? run.featureSlug ?? null,
-          goal: existing.goal,
-          brandProfileId: existing.brandProfileId,
-          audienceId: existing.audienceId,
-          workflowContext: existing.workflowContext,
-        },
-      });
-      const [row] = await tx
-        .select()
-        .from(runsCosts)
-        .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
-        .limit(1);
-      return row;
+    // One autocommit statement, read back after COMMIT (BronzeWriter, BOX-LOAD-1107-RUNS).
+    await logCostLifecycle(db, {
+      runId: id,
+      costId,
+      eventType,
+      payload,
+      identity: {
+        orgId: req.orgId,
+        userId: req.userId || run.userId,
+        brandIds: req.headerBrandIds ?? run.brandIds ?? null,
+        campaignId: req.headerCampaignId ?? run.campaignId ?? null,
+        workflowSlug: req.headerWorkflowSlug ?? run.workflowSlug ?? null,
+        featureSlug: req.headerFeatureSlug ?? run.featureSlug ?? null,
+        goal: existing.goal,
+        brandProfileId: existing.brandProfileId,
+        audienceId: existing.audienceId,
+        workflowContext: existing.workflowContext,
+      },
     });
+    const [updated] = await db
+      .select()
+      .from(runsCosts)
+      .where(and(eq(runsCosts.id, costId), eq(runsCosts.runId, id)))
+      .limit(1);
 
     res.json(updated);
 
@@ -993,34 +982,31 @@ router.patch("/v1/runs/:id", requireApiKey, async (req, res) => {
     const { status } = parsed.data;
     const eventType = status === "completed" ? "run.completed" : "run.failed";
 
-    const updated = await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-      if (!existing) return null;
-      await logRunLifecycle(tx, {
-        runId: id,
-        eventType,
-        payload: { from: existing.status, to: status },
-        identity: {
-          orgId: req.orgId,
-          userId: req.userId || existing.userId,
-          brandIds: existing.brandIds,
-          campaignId: existing.campaignId,
-          workflowSlug: existing.workflowSlug,
-          featureSlug: existing.featureSlug,
-          goal: existing.goal,
-          brandProfileId: existing.brandProfileId,
-          audienceId: existing.audienceId,
-          workflowContext: existing.workflowContext,
-        },
-      });
-      const [row] = await tx.select().from(runs).where(eq(runs.id, id)).limit(1);
-      return row;
-    });
-
-    if (!updated) {
+    // No transaction (BronzeWriter, BOX-LOAD-1107-RUNS): the read takes no lock either way, the event is
+    // one autocommit statement, the row is read back after COMMIT.
+    const [existing] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!existing) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
+    await logRunLifecycle(db, {
+      runId: id,
+      eventType,
+      payload: { from: existing.status, to: status },
+      identity: {
+        orgId: req.orgId,
+        userId: req.userId || existing.userId,
+        brandIds: existing.brandIds,
+        campaignId: existing.campaignId,
+        workflowSlug: existing.workflowSlug,
+        featureSlug: existing.featureSlug,
+        goal: existing.goal,
+        brandProfileId: existing.brandProfileId,
+        audienceId: existing.audienceId,
+        workflowContext: existing.workflowContext,
+      },
+    });
+    const [updated] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
     res.json(updated);
   } catch (err) {
     console.error("[runs-service] Error updating run:", err);

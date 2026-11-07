@@ -144,4 +144,27 @@ describe("Newsletter outcome page reads (SOCIAL-OUTCOMES-1107)", () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/^outcome_occurrences_timeout:/);
   });
+
+  // BOX-LOAD-1107-RUNS: a page prices only its own occurrences (and its consumptions'
+  // producers); each share is still cut over EVERY occurrence of the anchor. An uneven
+  // split (1 cent over 3 Units: cumulative rounding) read one row per page must equal the
+  // one-page read, Unit for Unit, cost for cost, standard cost included.
+  it("a page of one prices each Unit exactly as the whole-run read does", async () => {
+    const uneven = (await run("uneven-units")).id;
+    await insertTestRunCost({ runId: uneven, costName: "tok", quantity: "0.2", unitCostInUsdCents: "5", totalCostInUsdCents: "1.0000000000", status: "actual" });
+    const subs = [0, 1, 2].map((i) => ({ subjectService: SVC, subjectId: `uneven-${i}` }));
+    await declare(uneven, { produced: subs.map((s) => ({ outcomeKey: "message_sent", ...s })) });
+    const user = (await run("uneven-consumer")).id;
+    await declare(user, { consumed: subs.map((s) => ({ outcomeKey: "message_sent", ...s })) });
+
+    const strip = (rows: any[]) => rows.map((r) => ({ id: r.id, cost: r.cost, costSlices: r.costSlices, consumption: r.consumption }));
+    const whole = strip(await readAll({ runIds: uneven, direction: "produced" }, 100));
+    expect(whole).toHaveLength(3);
+    expect(whole.map((r) => r.cost.grossCents).sort()).toEqual(["0.3333333333", "0.3333333333", "0.3333333334"]);
+    expect(strip(await readAll({ runIds: uneven, direction: "produced" }, 1))).toEqual(whole);
+
+    const consumedWhole = strip(await readAll({ runIds: user, direction: "consumed" }, 100));
+    expect(consumedWhole.map((r) => r.consumption.standardCost.grossCents).sort()).toEqual(["0.3333333333", "0.3333333333", "0.3333333334"]);
+    expect(strip(await readAll({ runIds: user, direction: "consumed" }, 1))).toEqual(consumedWhole);
+  });
 });
