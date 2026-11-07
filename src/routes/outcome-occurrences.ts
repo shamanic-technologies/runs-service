@@ -664,6 +664,14 @@ router.get("/internal/outcome-occurrences", requireInternalAuth, async (req, res
       res.status(502).json({ error: err.message });
       return;
     }
+    // SOCIAL-OUTCOMES-1107: a statement past the stats timeout (a loaded box) is a
+    // named, retryable 503, never a bare 500.
+    const e = err as { code?: string; cause?: { code?: string } };
+    if (e.code === "57014" || e.cause?.code === "57014") {
+      console.error("[Runs Service] outcome occurrences read timed out:", (err as Error).message.slice(0, 300));
+      res.status(503).json({ error: "outcome_occurrences_timeout: a statement of this read passed the stats statement timeout, retry later or narrow the read" });
+      return;
+    }
     console.error("[Runs Service] outcome occurrences read failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }

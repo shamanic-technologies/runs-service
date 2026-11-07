@@ -1022,6 +1022,14 @@ concept, a value-based joint-cost split.
   ONE read-only statement on the stats pool with its own 900 s timeout: on the loaded box of 2026-10-23 a day's ~25k
   cold run PK probes took minutes. A failed day never blocks the others.
 - Guards: `tests/integration/outcome-ledger.test.ts`, `tests/unit/outcome-ledger-check.test.ts`.
+- **The occurrence read at newsletter scale (SOCIAL-OUTCOMES-1107)**: a release run = ~15-20k Units, each consuming
+  the subscriber's message_sent; features-service pages it 1000 at a time. Each page runs in ONE stats transaction with its
+  own `statement_timeout` 100 s (features waits 120 s); a statement past it = 503 `outcome_occurrences_timeout`, never a bare
+  500. runIds / subjectIds read their rows through their own index (fenced subquery), never a pk walk in id order;
+  outcomeKey + direction reads walk `idx_run_outcomes_key_direction_id` (migration 0100: the org's newsletter_email_sent
+  CONSUMED read matched nothing and scanned all 1.2M rows). Consumption resolution joins the subject group's productions
+  once (`prods` + `DISTINCT ON`), never a per-consumption scan of `members` (2.7 s of a 1000-row page). Guard:
+  `tests/integration/outcome-occurrences-newsletter.test.ts`.
 
 ## Lead states — allocation v5 (migration 0076, LEAD-STATES-1024-RUNS)
 
