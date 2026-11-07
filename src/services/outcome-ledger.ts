@@ -2066,21 +2066,35 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   for (const r of reached) {
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
   }
+  // LEDGER-REVERSAL-1107: an occurrence counts +1 on the day it was declared and, once its declaring
+  // service reversed it, -1 on the reversal's day (a counter-entry under the same tags): a range
+  // covering both nets to zero, a range ending before the reversal still reads it.
   const declared = (await tx.execute(sql`
     SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
            r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
-           COUNT(*)::text AS n, SUM(o.quantity)::text AS quantity
-    FROM run_outcomes o
+           SUM(o.sign)::text AS n, SUM(o.sign * o.quantity)::text AS quantity
+    FROM (
+      SELECT o.run_id, o.outcome_key, o.quantity, 1 AS sign
+      FROM run_outcomes o
+      WHERE o.direction = 'produced'
+        AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+        AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      UNION ALL
+      SELECT o.run_id, o.outcome_key, o.quantity, -1 AS sign
+      FROM run_outcome_reversals v
+      JOIN run_outcomes o ON o.id = v.occurrence_id
+      WHERE o.direction = 'produced'
+        AND v.reversed_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+        AND v.reversed_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    ) o
     CROSS JOIN LATERAL (
       SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at
       FROM runs WHERE id = o.run_id OFFSET 0
     ) r
-    WHERE o.direction = 'produced'
-      AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-      -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
-      AND NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
+    -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
+    WHERE NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+    HAVING SUM(o.sign) <> 0 OR SUM(o.sign * o.quantity) <> 0
   `)) as any[];
   for (const r of declared) {
     outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
@@ -2441,6 +2455,16 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   for (const v of voids) {
     const at = new Date(v.occurred_at);
     for (const [day, computedAt] of computed) if (day >= v.from_day && computedAt < at) out.add(day);
+  }
+  // LEDGER-REVERSAL-1107: a reversal is a counter-entry on ITS OWN UTC day: exactly that day moves
+  // (the declaration day keeps the Unit, every other day is untouched).
+  const reversals = (await db.execute(sql`
+    SELECT to_char(reversed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(recorded_at) AS last_recorded
+    FROM run_outcome_reversals WHERE recorded_at > ${oldest}::timestamptz GROUP BY 1
+  `)) as any[];
+  for (const v of reversals) {
+    const computedAt = computed.get(v.day);
+    if (computedAt && computedAt < new Date(v.last_recorded)) out.add(v.day);
   }
   // An equivalence stated, or a lead state reached / re-dated / removed, after a day was computed moves
   // only the days its SUBJECTS' production orders spent or declared on: the routing of every run that
@@ -2902,6 +2926,8 @@ export interface OccurrenceWithCost {
   /** PRODUCED: its production (= standard) cost. CONSUMED: null. */
   /** OUTCOME-PERFORMER-1106: who performed it (stated, else the declaring run's workflow for a produced occurrence), null = unknown. */
   performer: EffectivePerformer | null;
+  /** LEDGER-REVERSAL-1107: the reversing entry its declaring service stated (counts drop by it from reversedAt on); null = it stands. */
+  reversal: { reversedAt: string; recordedAt: string; reason: string; reversedBy: string } | null;
   cost: Money | null;
   /** PRODUCED: `cost` per (UTC day, org) of the spend it carries (sums exactly to cost). CONSUMED: null. */
   costSlices: CostSlice[] | null;
@@ -3171,7 +3197,9 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
       SELECT o.id, o.run_id, r.organization_id, r.service_name, r.task_name, o.direction, o.outcome_key,
              o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at,
              COALESCE(o.recorded_at, o.declared_at) AS recorded_at, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id,
-             ${EFFECTIVE_PERFORMER_COLUMNS}
+             ${EFFECTIVE_PERFORMER_COLUMNS},
+             (SELECT jsonb_build_object('reversedAt', v.reversed_at, 'recordedAt', v.recorded_at, 'reason', v.reason, 'reversedBy', v.reversed_by)
+              FROM run_outcome_reversals v WHERE v.occurrence_id = o.id) AS reversal
       FROM ${narrowed.length ? sql`(SELECT * FROM run_outcomes WHERE ${sql.join(narrowed, sql` AND `)} OFFSET 0)` : sql`run_outcomes`} o
       JOIN runs r ON r.id = o.run_id
       ${whereSql}
@@ -3217,6 +3245,14 @@ export async function listOccurrences(f: OccurrenceFilters): Promise<{ occurrenc
           audienceId: r.audience_id ?? null,
         },
         performer: effectivePerformerOf(r),
+        reversal: r.reversal
+          ? {
+              reversedAt: new Date(r.reversal.reversedAt).toISOString(),
+              recordedAt: new Date(r.reversal.recordedAt).toISOString(),
+              reason: r.reversal.reason,
+              reversedBy: r.reversal.reversedBy,
+            }
+          : null,
         cost: r.direction === "produced" ? costs.get(r.id) ?? null : null,
         costSlices: r.direction === "produced" ? sliced.get(r.id)?.slices ?? null : null,
         consumption: r.direction === "consumed" ? consumptionOf(resolvedById.get(r.id), costs, consumingKeys.get(r.run_id) ?? []) : null,

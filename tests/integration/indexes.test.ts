@@ -186,6 +186,8 @@ describe("Silver table naming (migration 0031)", () => {
       // Migration 0040: the entry-run projection cascades with its run.
       { conname: "run_campaign_entries_run_id_fkey", tbl: "run_campaign_entries", ref: "runs" },
       { conname: "run_events_run_id_runs_id_fk", tbl: "run_events", ref: "runs" },
+      // Migration 0103: a reversal cascades with its occurrence (a void takes it along).
+      { conname: "run_outcome_reversals_occurrence_id_fkey", tbl: "run_outcome_reversals", ref: "run_outcomes" },
       // Migration 0057: a declared outcome occurrence cascades with its run.
       { conname: "run_outcomes_run_id_fkey", tbl: "run_outcomes", ref: "runs" },
       // Migration 0091: a run's stored support function cascades with its run.

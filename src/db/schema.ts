@@ -310,6 +310,28 @@ export const runOutcomes = pgTable(
 
 export type RunOutcome = typeof runOutcomes.$inferSelect;
 
+// A produced occurrence its declaring service took back as a REVERSING ENTRY (migration 0103,
+// LEDGER-REVERSAL-1107): the occurrence stays, every count drops by it from reversed_at on.
+// Projected from bronze `outcomes.reversed`; app code never writes it.
+export const runOutcomeReversals = pgTable(
+  "run_outcome_reversals",
+  {
+    occurrenceId: uuid("occurrence_id")
+      .primaryKey()
+      .references(() => runOutcomes.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    reversedAt: timestamp("reversed_at", { withTimezone: true }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    reversedBy: text("reversed_by").notNull(),
+    sourceService: text("source_service"),
+  },
+  (table) => [
+    index("idx_run_outcome_reversals_reversed_at").on(table.reversedAt),
+    index("idx_run_outcome_reversals_recorded_at").on(table.recordedAt),
+  ]
+);
+
 // Runs marked SUPPORT (migration 0062): the ledger's anchor walk stops there. Projected from bronze.
 export const runSupportMarks = pgTable(
   "run_support_marks",
