@@ -3,6 +3,8 @@ import { beforeAll, afterAll } from "vitest";
 process.env.RUNS_SERVICE_DATABASE_URL =
   process.env.RUNS_SERVICE_DATABASE_URL || "postgresql://test:test@localhost/test";
 process.env.RUNS_SERVICE_API_KEY = "test-api-key";
+// Stored answers (services/read-cache.ts) off: tests read right after they write. Guard: tests/unit/read-cache.test.ts.
+process.env.READ_CACHE = "off";
 process.env.COSTS_SERVICE_URL = "http://localhost:9999";
 process.env.COSTS_SERVICE_API_KEY = "test-costs-key";
 process.env.BILLING_SERVICE_URL = "http://localhost:9998";

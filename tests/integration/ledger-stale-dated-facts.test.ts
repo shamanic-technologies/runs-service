@@ -9,6 +9,7 @@ import {
   ALLOCATION_VERSION,
   addDays,
   computeLedgerDay,
+  reassessStaleDays,
   refreshLedgerDays,
   staleComputedDays,
   storeLedgerDay,
@@ -121,17 +122,98 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
     expect(after.has(addDays(TODAY, -315))).toBe(before.has(addDays(TODAY, -315)));
   });
 
-  it("a declaration on a run that spends still stales every day from its run's start (it re-anchors its cost rows)", async () => {
+  it("a BACK-DATED declaration on a run that spends still stales every day from its run's start (it re-anchors its cost rows)", async () => {
     const computedAt = new Date(Date.now() - 60_000);
     const D = addDays(TODAY, -345);
     const D3 = addDays(TODAY, -342);
     const computed = new Map([D, D3].map((d) => [d, computedAt]));
     const r = await insertTestRun({ organizationId: ORG, serviceName: "svc", taskName: "spend", status: "completed", startedAt: new Date(`${D}T08:00:00Z`) });
     await insertTestRunCost({ runId: r.id, costName: "tok", quantity: "1", unitCostInUsdCents: "5", totalCostInUsdCents: new Decimal(5).toFixed(10), status: "actual", createdAt: new Date(`${D}T08:00:01Z`) });
-    const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1107-b1")] });
+    const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ occurredAt: `${addDays(D, 1)}T10:00:00.000Z`, produced: [lead("email_found", "stale-1107-b1")] });
     expect([200, 201]).toContain(res.status);
     const after = await staleComputedDays(computed, computedAt);
     expect(after.has(D)).toBe(true);
     expect(after.has(D3)).toBe(true);
+  });
+
+  it("a SECOND declaration on a run that spends still stales every day from its run's start (it moves its earlier units' split)", async () => {
+    const D = addDays(TODAY, -350);
+    const D3 = addDays(TODAY, -347);
+    const r = await insertTestRun({ organizationId: ORG, serviceName: "svc", taskName: "spend", status: "completed", startedAt: new Date(`${D}T08:00:00Z`) });
+    await insertTestRunCost({ runId: r.id, costName: "tok", quantity: "1", unitCostInUsdCents: "5", totalCostInUsdCents: new Decimal(5).toFixed(10), status: "actual", createdAt: new Date(`${D}T08:00:01Z`) });
+    const first = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1110-s1")] });
+    expect([200, 201]).toContain(first.status);
+    const computedAt = new Date(Date.now() + 1_000);
+    await new Promise((ok) => setTimeout(ok, 1_100));
+    const computed = new Map([D, D3].map((d) => [d, computedAt]));
+    const second = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1110-s2")] });
+    expect([200, 201]).toContain(second.status);
+    const after = await staleComputedDays(computed, computedAt);
+    expect(after.has(D)).toBe(true);
+    expect(after.has(D3)).toBe(true);
+  });
+
+  // DASH-SPEED-1110: one email_found Apollo declared on a 2026-02-10 run re-staled 273 days.
+  it("a run's FIRST on-time declaration stales only its subtree's cost days and its own day; every other day recomputes byte for byte", async () => {
+    const D0 = addDays(TODAY, -360);
+    const D1 = addDays(TODAY, -359);
+    const D2 = addDays(TODAY, -358);
+    const D3 = addDays(TODAY, -357);
+    const days = [D0, D1, D2, D3];
+    const cost = (runId: string, day: string, q: string) =>
+      insertTestRunCost({ runId, costName: "tok", quantity: q, unitCostInUsdCents: "5", totalCostInUsdCents: new Decimal(5).times(q).toFixed(10), status: "actual", createdAt: new Date(`${day}T08:00:01Z`) });
+    // A workflow run A produced message_sent on D0; its children spend on D0 and D1 (riding A's unit).
+    const a = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "execute-workflow", workflowSlug: "stale-1110-wf", status: "completed", startedAt: new Date(`${D0}T07:00:00Z`) });
+    await db.execute(sql`UPDATE runs SET completed_at = ${`${D1}T23:00:00Z`}::timestamptz WHERE id = ${a.id}::uuid`);
+    const decA = await request(app).post(`/v1/runs/${a.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("message_sent", "stale-1110-a")] });
+    expect([200, 201]).toContain(decA.status);
+    await db.execute(sql`UPDATE run_outcomes SET declared_at = ${`${D0}T07:30:00Z`}::timestamptz, recorded_at = ${`${D0}T07:30:00Z`}::timestamptz WHERE run_id = ${a.id}::uuid`);
+    const other = await insertTestRun({ organizationId: ORG, parentRunId: a.id, serviceName: "svc", taskName: "other", status: "completed", startedAt: new Date(`${D1}T08:00:00Z`) });
+    await cost(other.id, D1, "3");
+    // R (under A) spends on D0; its child C spends on D2. R has not declared yet.
+    const r = await insertTestRun({ organizationId: ORG, parentRunId: a.id, serviceName: "apollo", taskName: "enrichment", status: "completed", startedAt: new Date(`${D0}T08:00:00Z`) });
+    await cost(r.id, D0, "2");
+    const c = await insertTestRun({ organizationId: ORG, parentRunId: r.id, serviceName: "svc", taskName: "child", status: "completed", startedAt: new Date(`${D2}T08:00:00Z`) });
+    await cost(c.id, D2, "1");
+    // D3 holds unrelated spend of the org.
+    const u = await insertTestRun({ organizationId: ORG, serviceName: "svc", taskName: "unrelated", status: "completed", startedAt: new Date(`${D3}T08:00:00Z`) });
+    await cost(u.id, D3, "4");
+
+    const figures = async (day: string) => {
+      const d = await computeLedgerDay(day, VERSIONS as any);
+      const { computedAt: _c, ...rest } = d;
+      return JSON.stringify(rest);
+    };
+    const before = new Map<string, string>();
+    for (const d of days) before.set(d, await figures(d));
+    for (const d of days) await storeLedgerDay(await computeLedgerDay(d, VERSIONS as any));
+    await new Promise((ok) => setTimeout(ok, 20));
+    const computedAt = new Date(Date.now() - 1_000);
+    const computed = new Map(days.map((d) => [d, computedAt]));
+    expect((await staleComputedDays(computed, computedAt)).size).toBe(0);
+
+    const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1110-r")] });
+    expect([200, 201]).toContain(res.status);
+
+    const stale = await staleComputedDays(computed, computedAt);
+    expect([...stale].sort()).toEqual([D0, D2]); // R's and C's cost days; R's declaration day is today
+    for (const d of days) {
+      const now = await figures(d);
+      if (stale.has(d)) continue;
+      expect(now, `day ${d} moved but was not flagged stale`).toBe(before.get(d));
+    }
+    // The flagged days did move (R now anchors its own and C's cost).
+    expect(await figures(D0)).not.toBe(before.get(D0));
+    expect(await figures(D2)).not.toBe(before.get(D2));
+
+    // A sweep under the old broad rule PERSISTED every day as stale: re-judged, only D0 and D2 keep their flag.
+    await db.execute(sql`UPDATE cost_ledger_computed_days SET stale = true WHERE allocation_version = ${ALLOCATION_VERSION} AND day = ANY(${`{${days.join(",")}}`}::date[])`);
+    const r2 = await reassessStaleDays();
+    expect(r2.flagged).toBeGreaterThanOrEqual(4);
+    const flags = (await db.execute(sql`
+      SELECT to_char(day, 'YYYY-MM-DD') AS day, stale FROM cost_ledger_computed_days
+      WHERE allocation_version = ${ALLOCATION_VERSION} AND day = ANY(${`{${days.join(",")}}`}::date[]) ORDER BY day
+    `)) as any[];
+    expect(flags.map((f) => [f.day, f.stale])).toEqual([[D0, true], [D1, false], [D2, true], [D3, false]]);
   });
 });

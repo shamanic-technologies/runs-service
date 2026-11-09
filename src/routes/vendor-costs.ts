@@ -12,6 +12,7 @@ import {
 } from "../services/dynasty-resolver.js";
 import { parseCampaignIds } from "../services/campaign-ids.js";
 import { VendorCostCatalogError, fetchVendorCostCatalog, type VendorCostVersion } from "../services/vendor-costs.js";
+import { ReadCache } from "../services/read-cache.js";
 import { PUBLIC_COST_SOURCES, buildPublicFilterSql, costSourceJoinSql, parseCsv } from "./stats.js";
 import { listRunsPage } from "./runs.js";
 import { isStatsRollupReady } from "../services/stats-rollup.js";
@@ -613,6 +614,13 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
  * Bounded by a brand or a campaign (400 otherwise): without one the walk is an
  * org's whole history. Service-auth only — the vendor cost reveals the margin.
  */
+/**
+ * DASH-SPEED-1110: the answer per (org, brand, campaign, service, task) is stored and served from memory
+ * (`services/read-cache.ts`): fresh 2 min, then served while one background read refreshes it (up to 30
+ * min old). The busiest brand's lead-serve read (Offer > Sourcing) was 12-20 s cold on the loaded box.
+ */
+export const subtreeCostsCache = new ReadCache({ freshMs: 2 * 60_000, maxStaleMs: 30 * 60_000, maxBytes: 16 * 1024 * 1024 });
+
 router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res) => {
   try {
     const { orgId, brandId, campaignId, serviceName, taskName } = req.query as Record<string, unknown>;
@@ -637,6 +645,8 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
     if (serviceName) conditions.push(sql`service_name = ${serviceName as string}`);
     if (taskName) conditions.push(sql`task_name = ${taskName as string}`);
 
+    const cacheKey = JSON.stringify([orgId, brandId ?? null, campaignId ?? null, serviceName ?? null, taskName ?? null]);
+    const body = await subtreeCostsCache.get(cacheKey, async () => {
     const versions = await fetchVendorCostCatalog();
     // Its own transaction and statement budget: brand-wide on the owner brand (86,839 lead-serve
     // runs) the stores answer in ~4 s warm, but cold on the loaded box the per-run reads (run rows,
@@ -783,7 +793,7 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
 
     // A run whose subtree has no committed cost row has no sums row: 0 on every basis.
     const zero = "0";
-    res.json({
+    return JSON.stringify({
       runs: rows.map((r) => ({
         id: r.id as string,
         audienceId: (r.audience_id as string | null) ?? null,
@@ -795,6 +805,8 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
         supportFunction: (r.support_function as string | null) ?? null,
       })),
     });
+    });
+    res.type("application/json").send(body);
   } catch (err) {
     console.error("[Runs Service] Error in GET /internal/runs/subtree-costs:", err);
     if (err instanceof VendorCostCatalogError) {

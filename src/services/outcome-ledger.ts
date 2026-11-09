@@ -2444,6 +2444,58 @@ const occurrenceRunDaysSql = (alias: string) => sql.raw(`
     interval '1 day'
   ) d`);
 
+/** A subtree larger than this keeps the broad rule (every day from the run's start). */
+export const FIRST_DECLARATION_SUBTREE_CAP = 5_000;
+/** More first declarations than this in one sweep: the rest keep the broad rule (one walk each). */
+const FIRST_DECLARATION_MAX_WALKS = 200;
+
+/**
+ * DASH-SPEED-1110: the FIRST declaration of a run that spends, stated ON TIME (dated the day it is
+ * recorded), moves only:
+ *  - the days its subtree's cost rows sit on: they re-anchor from their old anchor (an ancestor's
+ *    occurrence, a loss pool, produced-none) to this run, and every split of a cost row (rule 1,
+ *    loss pools, state routing) is keyed on the cost row's own UTC day;
+ *  - its declaration days (its units, the pools and lines it joins, its consumptions).
+ * Nothing on another day can see it: a consumption only resolves to a production declared before the
+ * end of its own day, the run had no earlier occurrence whose split it changes, and a line first
+ * produced today changes no earlier day. A consumption's STANDARD cost is read at compute time, as for
+ * a late cost row (which also stales only its own day). The broad rule (every day from the run's
+ * start) re-staled every day since 2026-02-10 for ONE email_found Apollo declared on a February run
+ * (2026-11-09 19:27): 273 days at 3-8 min each, the 359 s statements of the box audit.
+ * A subtree past FIRST_DECLARATION_SUBTREE_CAP runs keeps the broad rule.
+ */
+async function narrowFirstDeclarations(late: any[]): Promise<void> {
+  const anchors = late.filter((l) => l.kind === "anchor");
+  for (let i = late.length - 1; i >= 0; i--) if (late[i].kind === "anchor") late.splice(i, 1);
+  for (const [i, a] of anchors.entries()) {
+    const broad = { kind: "from", day: a.day, last_recorded: a.last_recorded };
+    if (i >= FIRST_DECLARATION_MAX_WALKS) {
+      late.push(broad);
+      continue;
+    }
+    const [r] = (await db.execute(sql`
+      WITH RECURSIVE sub(id) AS (
+        SELECT ${a.run_id}::uuid
+        UNION ALL
+        SELECT c.id FROM sub s CROSS JOIN LATERAL (SELECT x.id FROM runs x WHERE x.parent_run_id = s.id OFFSET 0) c
+      ),
+      capped AS MATERIALIZED (SELECT id FROM sub LIMIT ${FIRST_DECLARATION_SUBTREE_CAP + 1})
+      SELECT (SELECT count(*) FROM capped)::int AS n,
+             ARRAY(
+               SELECT DISTINCT to_char(rc.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+               FROM capped CROSS JOIN LATERAL (SELECT created_at FROM runs_costs WHERE run_id = capped.id OFFSET 0) rc
+             ) AS days
+    `)) as any[];
+    if (Number(r.n) > FIRST_DECLARATION_SUBTREE_CAP) {
+      late.push(broad);
+      continue;
+    }
+    for (const day of new Set<string>([...(r.days as string[]), ...(a.declared_days as string[])])) {
+      late.push({ kind: "day", day, last_recorded: a.last_recorded });
+    }
+  }
+}
+
 /**
  * Stored days whose figures predate a fact recorded after them, so they read
  * STALE until the refresher recomputes them:
@@ -2493,7 +2545,10 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
       WHERE COALESCE(recorded_at, declared_at) > ${oldest}::timestamptz
     ),
     o AS MATERIALIZED (
-      SELECT run_id, MIN(declared_at) AS first_declared, MAX(rec) AS last_recorded, bool_or(direction = 'produced') AS produced
+      SELECT run_id, MIN(declared_at) AS first_declared, MAX(rec) AS last_recorded, bool_or(direction = 'produced') AS produced,
+             -- ON TIME: no occurrence dated on a UTC day before the day it was recorded.
+             bool_and((declared_at AT TIME ZONE 'UTC')::date >= (rec AT TIME ZONE 'UTC')::date) AS on_time,
+             array_agg(DISTINCT to_char(declared_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')) AS declared_days
       FROM x GROUP BY run_id
     ),
     j AS MATERIALIZED (
@@ -2551,12 +2606,27 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
           AND declared_at >= date_trunc('day', s.from_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
         OFFSET 0
       ) y
+    ),
+    -- DASH-SPEED-1110: a run's FIRST declaration, on time, on a run started before the recent days
+    -- moves only the days its subtree's cost rows sit on + its declaration days (resolved below).
+    first_on_time AS MATERIALIZED (
+      SELECT k.run_id FROM k
+      WHERE k.broad AND k.on_time
+        AND k.started_at < ((now() AT TIME ZONE 'UTC')::date - ${RECOMPUTE_RECENT_DAYS - 1}::int)::timestamp AT TIME ZONE 'UTC'
+        AND NOT EXISTS (
+          SELECT 1 FROM run_outcomes p WHERE p.run_id = k.run_id AND COALESCE(p.recorded_at, p.declared_at) <= ${oldest}::timestamptz
+        )
     )
-    SELECT 'from' AS kind, to_char(LEAST(first_declared, started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(last_recorded) AS last_recorded
-    FROM k WHERE broad GROUP BY 2
+    SELECT 'from' AS kind, to_char(LEAST(first_declared, started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(last_recorded) AS last_recorded,
+           NULL::uuid AS run_id, NULL::text[] AS declared_days
+    FROM k WHERE broad AND run_id NOT IN (SELECT run_id FROM first_on_time) GROUP BY 2
     UNION ALL
-    SELECT 'day', to_char(at_day AT TIME ZONE 'UTC', 'YYYY-MM-DD'), MAX(at) FROM days GROUP BY 2
+    SELECT 'day', to_char(at_day AT TIME ZONE 'UTC', 'YYYY-MM-DD'), MAX(at), NULL::uuid, NULL::text[] FROM days GROUP BY 2
+    UNION ALL
+    SELECT 'anchor', to_char(LEAST(k.first_declared, k.started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD'), k.last_recorded, k.run_id, k.declared_days
+    FROM k JOIN first_on_time f ON f.run_id = k.run_id
   `)) as any[];
+  await narrowFirstDeclarations(late);
   const marks = (await db.execute(sql`
     WITH m AS MATERIALIZED (SELECT run_id, marked_at FROM run_support_marks WHERE marked_at > ${oldest}::timestamptz)
     SELECT to_char(r.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(m.marked_at) AS last_recorded
@@ -2564,7 +2634,13 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
     GROUP BY 1
   `)) as any[];
   const from = [...late.filter((l) => l.kind === "from"), ...marks];
-  const lateDayAt = new Map(late.filter((l) => l.kind === "day").map((l) => [l.day as string, new Date(l.last_recorded)]));
+  // Several rows can name one day (narrowFirstDeclarations): keep the newest recording.
+  const lateDayAt = new Map<string, Date>();
+  for (const l of late.filter((x) => x.kind === "day")) {
+    const at = new Date(l.last_recorded);
+    const prev = lateDayAt.get(l.day);
+    if (!prev || at > prev) lateDayAt.set(l.day, at);
+  }
   for (const [day, at] of computed) {
     if (from.some((l) => l.day <= day && new Date(l.last_recorded) > at)) out.add(day);
     const changed = lateDayAt.get(day);
@@ -2720,6 +2796,32 @@ async function persistStaleDays(stale: Set<string>, sweptAt: Date): Promise<void
       ON CONFLICT (allocation_version) DO UPDATE SET swept_at = GREATEST(cost_ledger_stale_sweeps.swept_at, EXCLUDED.swept_at)
     `);
   });
+}
+
+/**
+ * DASH-SPEED-1110: a stale flag a sweep PERSISTED under an older, broader rule (one first declaration on
+ * a February run flagged 265 days, each 3-8 min to recompute) is re-judged under the current rules from
+ * the day's own computed_at: a day no fact recorded since moves is current and loses its flag. Called
+ * by the backfill under the refresh lock (no sweep can flag a day between the read and the clear); a
+ * flag it keeps is recomputed as before. Clearing only ever skips a recompute that would store the same
+ * figures (the guard in tests/integration/ledger-stale-dated-facts.test.ts).
+ */
+export async function reassessStaleDays(): Promise<{ flagged: number; cleared: number }> {
+  const rows = (await db.execute(sql`
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at FROM cost_ledger_computed_days
+    WHERE allocation_version = ${ALLOCATION_VERSION} AND stale
+  `)) as any[];
+  if (rows.length === 0) return { flagged: 0, cleared: 0 };
+  const still = await staleComputedDays(new Map(rows.map((r) => [r.day as string, new Date(r.computed_at)])));
+  const clear = rows.filter((r) => !still.has(r.day));
+  if (clear.length > 0) {
+    await db.execute(sql`
+      UPDATE cost_ledger_computed_days SET stale = false
+      WHERE allocation_version = ${ALLOCATION_VERSION} AND stale
+        AND day = ANY(${`{${clear.map((r) => r.day).join(",")}}`}::date[])
+    `);
+  }
+  return { flagged: rows.length, cleared: clear.length };
 }
 
 /** The recent days a tick recomputes: today always, the others once older than RECENT_DAY_MAX_AGE_MS. */
@@ -2992,6 +3094,14 @@ export function startLedgerBackfill(opts: { maxActive?: number; maxPasses?: numb
 
 export async function runLedgerBackfill(state: LedgerBackfillState, maxActive: number, maxPasses: number, restFactor: number, minRestMs = BACKFILL_MIN_REST_MS): Promise<void> {
   await ensurePoolLines();
+  while (tickWaiting || refreshing) await sleep(BACKFILL_MIN_REST_MS);
+  refreshing = true;
+  try {
+    const r = await reassessStaleDays();
+    if (r.cleared > 0) console.log(`[Runs Service] cost ledger: ${r.cleared} of ${r.flagged} stale flags cleared (no fact recorded since moves them under the current rules)`);
+  } finally {
+    refreshing = false;
+  }
   for (let pass = 1; pass <= maxPasses; pass++) {
     state.pass = pass;
     const now = new Date();

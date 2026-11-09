@@ -6,6 +6,7 @@ import { firstOutcomeCostDay, MAX_RANGE_DAYS } from "../services/outcome-cost-to
 import { ledgerBackfillState, startLedgerBackfill } from "../services/outcome-ledger.js";
 import { BRAND_RUN_KINDS, type BrandRunKind, BRAND_RUNS_MAX_LIMIT, firstBrandSpendDay, readBrandLedgerCached, readBrandLedgerRuns, type BrandBooks } from "../services/brand-ledger.js";
 import { OUTCOME_UUID_RE } from "../schemas.js";
+import { ReadCache } from "../services/read-cache.js";
 
 const router = Router();
 
@@ -94,6 +95,13 @@ async function ledgerHandler(req: Request, res: Response, orgId: string | null, 
  * newest first, each with its own cost, the outcomes it declared produced and consumed, and its
  * support mark. One page reads at most a 24h window before `before`; follow `nextBefore`.
  */
+/**
+ * DASH-SPEED-1110: each page is stored and served from memory (`services/read-cache.ts`): fresh 30 s, then
+ * served while one background read refreshes it (up to 5 min old). The first page without `before` is the
+ * window ending when it was computed (its `before` says when). 1.4-3.9 s cold for brand 33211c62.
+ */
+export const brandRunsCache = new ReadCache({ freshMs: 30_000, maxStaleMs: 5 * 60_000, maxBytes: 4 * 1024 * 1024 });
+
 async function runsHandler(req: Request, res: Response, orgId: string | null) {
   try {
     const unknown = Object.keys(req.query).filter((k) => !["before", "beforeId", "limit", "kind"].includes(k));
@@ -125,7 +133,11 @@ async function runsHandler(req: Request, res: Response, orgId: string | null) {
       res.status(400).json({ error: `kind must be one of ${BRAND_RUN_KINDS.join(", ")}` });
       return;
     }
-    res.json(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit, (q.kind as BrandRunKind | undefined) ?? null, orgId));
+    const key = JSON.stringify([brandId, q.before ?? "now", q.beforeId ?? null, limit, q.kind ?? null, orgId]);
+    const body = await brandRunsCache.get(key, async () =>
+      JSON.stringify(await readBrandLedgerRuns(brandId, before, q.beforeId ?? null, limit, (q.kind as BrandRunKind | undefined) ?? null, orgId)),
+    );
+    res.type("application/json").send(body);
   } catch (err) {
     console.error("[Runs Service] brand ledger runs read failed:", err);
     res.status(500).json({ error: "Internal server error" });

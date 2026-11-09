@@ -344,17 +344,25 @@ export async function readBrandLedgerRuns(
     : sql`r.started_at < ${before}::timestamptz`;
   // started_at range first: the planner walks idx_runs_started_status backward and filters the brand
   // (a GIN bitmap over a brand's millions of runs then a sort is the slow plan).
+  // The page first, then its marks and parents (DASH-SPEED-1110): joined before the LIMIT, the parent
+  // probe ran for every run of the brand's window (1,036 for 33211c62, ~2 s of the 3.7 s cold read).
   const rows = (await statsDb.execute(sql`
+    WITH page AS MATERIALIZED (
+      SELECT r.id, r.parent_run_id, r.started_at, r.completed_at, r.status, r.service_name, r.task_name,
+             r.workflow_slug, r.feature_slug, r.campaign_id
+      FROM runs r
+      WHERE ${cut} AND r.started_at >= ${windowStart}::timestamptz
+        AND r.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
+        ${kind ? sql`AND ${KIND_SQL[kind]}` : sql``}
+      ORDER BY r.started_at DESC, r.id DESC
+      LIMIT ${limit}
+    )
     SELECT r.id, r.parent_run_id, r.started_at, r.started_at::text AS started_at_raw, r.completed_at, r.status, r.service_name, r.task_name,
            r.workflow_slug, r.feature_slug, r.campaign_id, m.kind AS support_kind, p.service_name AS parent_service, p.task_name AS parent_task
-    FROM runs r
+    FROM page r
     LEFT JOIN run_support_marks m ON m.run_id = r.id
     LEFT JOIN LATERAL (SELECT service_name, task_name FROM runs WHERE id = r.parent_run_id OFFSET 0) p ON true
-    WHERE ${cut} AND r.started_at >= ${windowStart}::timestamptz
-      AND r.brand_ids @> ARRAY[${brandId}]::text[] ${orgCut}
-      ${kind ? sql`AND ${KIND_SQL[kind]}` : sql``}
     ORDER BY r.started_at DESC, r.id DESC
-    LIMIT ${limit}
   `)) as any[];
   const ids = rows.map((r) => r.id as string);
   const costs = new Map<string, { g: string; n: string; c: number }>();

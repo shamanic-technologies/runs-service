@@ -1056,6 +1056,29 @@ concept, a value-based joint-cost split.
   `subtreeBilledCostByRoot`, no longer the inline walk (~0.8 s of apollo-service's ~2 s acquisition-cost batch;
   prod parity 1,172 roots, 0 mismatches).
 
+## A first on-time declaration stales only the days it moves (DASH-SPEED-1110)
+
+- **The broad rule** ('from': every day from the run's start) re-staled every day since 2026-02-10 for ONE `email_found`
+  apollo-service declared on time on a February enrichment run (2026-11-09 19:27): 265 days at 3-8 min each, 3 passes =
+  the 359 s statements of the box audit. Now a run's FIRST declaration (no occurrence of it recorded before the sweep),
+  ON TIME (no occurrence dated on a UTC day before its recording day), on a run started before the recent days, stales
+  only the UTC days of its subtree's cost rows (they re-anchor; every split is keyed on the cost row's day) + its own
+  declaration days (`narrowFirstDeclarations` in `services/outcome-ledger.ts`). Back-dated facts, a run's later
+  declarations and subtrees > 5,000 runs keep the broad rule. A consumption's standard cost is read at compute time, as
+  for a late cost row (which also stales only its own day).
+- **Persisted flags are re-judged**: each backfill starts with `reassessStaleDays` under the refresh lock (a flag no fact
+  recorded since moves under the current rules is cleared). Guard: `tests/integration/ledger-stale-dated-facts.test.ts`
+  (every unflagged day recomputes byte for byte; the reassess keeps exactly the moved days).
+
+## Stored answers for slow polled reads (DASH-SPEED-1110)
+
+`services/read-cache.ts` (`ReadCache`): an answer per key computed once, served fresh, then served while ONE background
+read refreshes it, recomputed synchronously only past `maxStaleMs`; failures never stored; bodies over `maxBytes` not
+kept; 64 MB per cache. Used by `GET /internal/runs/subtree-costs` (fresh 2 min, stale up to 30 min; busiest brand's
+lead-serve read 12-20 s cold) and `GET /{v1,internal}/brands/:brandId/ledger/runs` (fresh 30 s, up to 5 min; the page is
+now picked BEFORE its marks/parents join: the parent probe ran for every run of the window). Kill switch `READ_CACHE=off`
+(tests run with it off; guard `tests/unit/read-cache.test.ts`). Disk is at 96 %: no new index for these reads.
+
 ## Ledger reads answer from cached stored days (LEDGER-LOAD-1107-RUNS)
 
 `GET /internal/stats/outcome-costs` (every figure features-service serves since LEDGER-ONLY-1107) and the `pipes[]`
