@@ -1104,8 +1104,8 @@ concept, a value-based joint-cost split.
 
 `services/read-cache.ts` (`ReadCache`): an answer per key computed once, served fresh, then served while ONE background
 read refreshes it, recomputed synchronously only past `maxStaleMs`; failures never stored; bodies over `maxBytes` not
-kept; 64 MB per cache. Used by `GET /internal/runs/subtree-costs` (fresh 2 min, stale up to 30 min; busiest brand's
-lead-serve read 12-20 s cold) and `GET /{v1,internal}/brands/:brandId/ledger/runs` (fresh 30 s, up to 5 min; the page is
+kept; 64 MB per cache. Used by `GET /internal/runs/subtree-costs` (fresh 10 min, stale up to 6 h, 280 s compute budget;
+lead-serve reads 12-43 s for 33211c62, 94-120 s for 75d7e3e8 = 500 at the old 120 s) and `GET /{v1,internal}/brands/:brandId/ledger/runs` (fresh 30 s, up to 5 min; the page is
 now picked BEFORE its marks/parents join: the parent probe ran for every run of the window). Kill switch `READ_CACHE=off`
 (tests run with it off; guard `tests/unit/read-cache.test.ts`). Disk is at 96 %: no new index for these reads.
 

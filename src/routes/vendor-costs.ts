@@ -616,10 +616,10 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
  */
 /**
  * DASH-SPEED-1110: the answer per (org, brand, campaign, service, task) is stored and served from memory
- * (`services/read-cache.ts`): fresh 2 min, then served while one background read refreshes it (up to 30
- * min old). The busiest brand's lead-serve read (Offer > Sourcing) was 12-20 s cold on the loaded box.
+ * (`services/read-cache.ts`): fresh 10 min, then served while one background read refreshes it (up to 6 h
+ * old). Lead-serve reads (Offer > Sourcing): 12-43 s for brand 33211c62, 94-120 s for 75d7e3e8 on the loaded box.
  */
-export const subtreeCostsCache = new ReadCache({ freshMs: 2 * 60_000, maxStaleMs: 30 * 60_000, maxBytes: 16 * 1024 * 1024 });
+export const subtreeCostsCache = new ReadCache({ freshMs: 10 * 60_000, maxStaleMs: 6 * 60 * 60_000, maxBytes: 32 * 1024 * 1024 });
 
 router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res) => {
   try {
@@ -654,7 +654,9 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
     // caller (features-service sourcing investment) waits up to 300 s.
     const rows = (await statsDb.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION READ ONLY`);
-      await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+      // 280 s (DASH-SPEED-1110): brand 75d7e3e8's 110,758 lead-serve runs read in ~94-120 s on the loaded box
+      // and 500'd at 120 s every time, so the stored answer below was never made. The caller waits 300 s.
+      await tx.execute(sql`SET LOCAL statement_timeout = '280s'`);
       return tx.execute(sql`
       -- Both stamps are read IN this statement: a rebuild cannot clear one between
       -- the check and the read. Stamped = the write-time stores answer; else the walks.
