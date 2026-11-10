@@ -191,13 +191,15 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
     const computedAt = new Date(Date.now() - 1);
     await new Promise((ok) => setTimeout(ok, 20));
     const computed = new Map(days.map((d) => [d, computedAt]));
-    expect((await staleComputedDays(computed, computedAt)).size).toBe(0);
+    // Other files of the shard record facts meanwhile: judge only what R's declaration adds.
+    const baseline = await staleComputedDays(computed, computedAt);
 
     const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ occurredAt: `${D0}T08:30:00.000Z`, produced: [lead("email_found", "stale-1110-bd1")] });
     expect([200, 201]).toContain(res.status);
 
     const stale = await staleComputedDays(computed, computedAt);
-    expect([...stale].sort()).toEqual([D0, D2, D3]); // cost days of R + C, its own day, the later consumption of its subject
+    expect(stale.has(D0) && stale.has(D2) && stale.has(D3)).toBe(true); // cost days of R + C, its own day, the later consumption of its subject
+    expect(stale.has(D1) && !baseline.has(D1)).toBe(false);
     for (const d of days) {
       if (stale.has(d)) continue;
       expect(await figures(d), `day ${d} moved but was not flagged stale`).toBe(before.get(d));
@@ -242,13 +244,15 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
     await new Promise((ok) => setTimeout(ok, 20));
     const computedAt = new Date(Date.now() - 1_000);
     const computed = new Map(days.map((d) => [d, computedAt]));
-    expect((await staleComputedDays(computed, computedAt)).size).toBe(0);
+    // Other files of the shard record facts meanwhile: judge only what R's declaration adds.
+    const baseline = await staleComputedDays(computed, computedAt);
 
     const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1110-r")] });
     expect([200, 201]).toContain(res.status);
 
     const stale = await staleComputedDays(computed, computedAt);
-    expect([...stale].sort()).toEqual([D0, D2]); // R's and C's cost days; R's declaration day is today
+    expect(stale.has(D0) && stale.has(D2)).toBe(true); // R's and C's cost days; R's declaration day is today
+    expect([D1, D3].filter((d) => stale.has(d) && !baseline.has(d))).toEqual([]);
     for (const d of days) {
       const now = await figures(d);
       if (stale.has(d)) continue;
@@ -266,6 +270,8 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
       SELECT to_char(day, 'YYYY-MM-DD') AS day, stale FROM cost_ledger_computed_days
       WHERE allocation_version = ${ALLOCATION_VERSION} AND day = ANY(${`{${days.join(",")}}`}::date[]) ORDER BY day
     `)) as any[];
-    expect(flags.map((f) => [f.day, f.stale])).toEqual([[D0, true], [D1, false], [D2, true], [D3, false]]);
+    const flag = new Map(flags.map((f) => [f.day as string, f.stale as boolean]));
+    expect([flag.get(D0), flag.get(D2)]).toEqual([true, true]);
+    for (const d of [D1, D3]) if (!baseline.has(d)) expect(flag.get(d), `${d} kept its flag`).toBe(false);
   });
 });
