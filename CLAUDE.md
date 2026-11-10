@@ -1260,6 +1260,13 @@ several keys and consumed their own, a cost loop) takes back the run's WHOLE dec
   = x-service-name, matched on the row id), owner included: no service ever voids another's rows. So a NON-owner that declared on the run
   may scoped-void (content-generation-service on workflow's `execute-workflow` runs, 58,885 declarations in prod 2026-10-24) and re-declare
   on the same run; a non-owner with no declaration there = 403 `not_run_declarer`; whole-run void unchanged (owner only, 403 `not_run_owner`).
+- **Run-door declarer (RUN-DOOR-DECLARER-1110)**: the ORG declare door `POST /v1/runs/:id/outcomes` records x-service-name as the
+  declarer (absent = the run's service, as before). Until 2026-11-10 it always recorded the run's service, so a producer called as its
+  caller's run (scraping-service backlinks on a workflow script run) could not reverse/scoped-void its own Units. A non-owner declaring
+  there gets `runOwnerHolds: true` on its `outcomes.declared` event: the run's owner keeps reversing / scoped-voiding those rows (the
+  right it had when it was the recorded declarer). Platform door unchanged (non-owner rows are the declarer's alone). Past org-door
+  rows stay attributed to the run's service: runs-service never stored the header, so nothing re-attributes them safely.
+  Guard: `tests/integration/run-door-declarer.test.ts`.
 - Guard: `tests/integration/outcome-ledger.test.ts` ("RUNS-VOID-1023").
 
 ## Relabelling an outcome key — `POST /internal/outcome-occurrences/relabel{,/preview}` (migration 0101, OUTCOME-RELABEL-1107)
@@ -1288,7 +1295,8 @@ A declared Unit stays on the ledger after the fact behind it is taken back (prod
   before the reversal reads the Unit (the past as it was), one covering it does not. `/internal/outcome-occurrences` serves `reversal`.
 - **Money: none moves** (owner-delegated call): the spend that made the Unit stays where v6 put it; over a range covering the reversal the
   standing Units carry it (normal spoilage). Allocation rule unchanged (v6). Staleness: exactly the reversal's day (`staleComputedDays`).
-- **Who**: the service named on the occurrence's `outcomes.declared` event (else the run's service): anyone else 403
+- **Who**: the service named on the occurrence's `outcomes.declared` event (else the run's service; + the run's service when the event
+  carries `runOwnerHolds`, RUN-DOOR-DECLARER-1110): anyone else 403
   `not_occurrence_declarer`; not found / x-org-id mismatch / reversedAt outside [declaration, now] = 422 `invalid_reversals`. Replay =
   200 `already_reversed`, the first reversal stands (row locks: two racing calls write once). Final: a fact that comes back is a NEW Unit.
 - Guard: `tests/integration/outcome-reversal.test.ts`.
