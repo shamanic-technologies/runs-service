@@ -1302,7 +1302,7 @@ A declared Unit stays on the ledger after the fact behind it is taken back (prod
   `not_occurrence_declarer`; not found / x-org-id mismatch / reversedAt outside [declaration, now] = 422 `invalid_reversals`. Replay =
   200 `already_reversed`, the first reversal stands (row locks: two racing calls write once). Final: a fact that comes back is a NEW Unit.
 - Guard: `tests/integration/outcome-reversal.test.ts`.
-- **Units of a stale past day are current every tick (LEDGER-SIGNUP-UNITS-1110, migration 0108)**: a withdrawal sits on today
+- **Units of a stale past day are current every tick (LEDGER-SIGNUP-UNITS-1110, migration 0107)**: a withdrawal sits on today
   (recomputed each tick), a back-dated Unit on a past day waiting for the paced backfill (3-8 min a day). lead-service re-declared and
   withdrew each Distribute.you signup ~7 times (728 made, 620 withdrawn, 108 standing): the ledger served 484 made beside -620 and the
   dashboard read 0. Each tick, BEFORE full days (half the budget), `daysWithMovedUnits` (stale stored days a declaration / reversal /
