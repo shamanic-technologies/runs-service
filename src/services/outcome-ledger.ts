@@ -248,6 +248,13 @@ export interface DeclarationEntry {
    * the previous value). The caller checks it is the run's own service.
    */
   correctPerformer?: boolean;
+  /**
+   * RUN-DOOR-DECLARER-1110: declared over the ORG door by a service that does not own
+   * the run (a run door). The declarer holds the rows; the run's owner holds them too
+   * (reversal, scoped void, performer), as before the declarer was recorded. Stored on
+   * the `outcomes.declared` event as `runOwnerHolds: true`.
+   */
+  runOwnerHolds?: boolean;
 }
 
 /**
@@ -352,7 +359,7 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
   })).filter((x) => x.items.length > 0);
   const notDeclarer: string[] = [];
   for (const { e } of performerEntries) {
-    if (e.runServiceName === undefined || e.sourceService === e.runServiceName) continue;
+    if (e.runServiceName === undefined || e.sourceService === e.runServiceName || e.runOwnerHolds) continue;
     if (!e.sourceService || !(await hasDeclaredOnRun(e.runId, e.sourceService))) notDeclarer.push(e.runId);
   }
   if (notDeclarer.length > 0) throw new NotRunDeclarerError(notDeclarer);
@@ -409,6 +416,7 @@ export async function declareOutcomesBatch(entries: DeclarationEntry[]): Promise
       sourceService: e.sourceService,
       payload: {
         allocationVersion: ALLOCATION_VERSION,
+        ...(e.runOwnerHolds && { runOwnerHolds: true }),
         ...(e.declaredAt && { backfill: true }),
         items: fresh.map((o) => ({
           id: randomUUID(),
@@ -463,8 +471,9 @@ export async function declareRunOutcomes(
   sourceService: string | null,
   declaredAt: Date | null = null,
   runServiceName?: string,
+  runOwnerHolds = false,
 ): Promise<DeclaredOccurrence[]> {
-  const [out] = await declareOutcomesBatch([{ runId, body, sourceService, declaredAt, runServiceName }]);
+  const [out] = await declareOutcomesBatch([{ runId, body, sourceService, declaredAt, runServiceName, runOwnerHolds }]);
   return out;
 }
 
@@ -526,7 +535,9 @@ export async function voidRunOutcomes(
   const scope = body.scope ? { direction: body.scope.direction, outcomeKey: normalizeOutcomeKey(body.scope.outcomeKey) } : null;
   // DECLARER-VOID-1024: a scoped void takes back only the rows the CALLER declared
   // (the `outcomes.declared` event that projected the row names its service), so
-  // another service's rows on the same run are never touched, owner included.
+  // another service's rows on the same run are never touched, owner included. Rows a
+  // service declared over the ORG door on this run (runOwnerHolds, RUN-DOOR-DECLARER-1110)
+  // are held by the run's owner too.
   const rows = (await db.execute(sql`
     SELECT o.id, o.direction, o.outcome_key, o.subject_service, o.subject_id, o.quantity::text AS quantity, o.declared_at
     FROM run_outcomes o WHERE o.run_id = ${runId}::uuid
@@ -536,7 +547,10 @@ export async function voidRunOutcomes(
             SELECT 1 FROM outcome_declaration_events e
             CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(id uuid)
             WHERE e.run_id = o.run_id AND e.event_type = 'outcomes.declared'
-              AND e.source_service = ${sourceService} AND it.id = o.id)`
+              AND (e.source_service = ${sourceService}
+                OR (e.payload->>'runOwnerHolds' = 'true'
+                    AND ${sourceService} = (SELECT r.service_name FROM runs r WHERE r.id = o.run_id)))
+              AND it.id = o.id)`
         : sql``}
     ORDER BY o.id
   `)) as any[];
