@@ -2450,8 +2450,8 @@ export const FIRST_DECLARATION_SUBTREE_CAP = 5_000;
 const FIRST_DECLARATION_MAX_WALKS = 200;
 
 /**
- * DASH-SPEED-1110: the FIRST declaration of a run that spends, stated ON TIME (dated the day it is
- * recorded), moves only:
+ * DASH-SPEED-1110: the FIRST declaration of a run that spends (on time, or back-dated without holding its
+ * production line's first declaration; a back-dated one also stales its subjects' later days in the SQL) moves only:
  *  - the days its subtree's cost rows sit on: they re-anchor from their old anchor (an ancestor's
  *    occurrence, a loss pool, produced-none) to this run, and every split of a cost row (rule 1,
  *    loss pools, state routing) is keyed on the cost row's own UTC day;
@@ -2571,9 +2571,27 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
         ON l.organization_id IS NOT DISTINCT FROM j.organization_id AND l.service_name = j.service_name AND l.task_name = j.task_name
     ),
     narrow AS MATERIALIZED (SELECT run_id, last_recorded, produced FROM k WHERE NOT broad),
+    -- DASH-SPEED-1110: a run's FIRST declaration on a run started before the recent days moves only the
+    -- days its subtree's cost rows sit on + its declaration days (resolved in narrowFirstDeclarations)
+    -- and, when back-dated, the later days of its subjects (subj below). Broad when back-dated AND it holds
+    -- its production line's first declaration (the line now produced earlier: every later day's loss).
+    first_on_time AS MATERIALIZED (
+      SELECT k.run_id, k.on_time FROM k
+      WHERE k.broad
+        AND k.started_at < ((now() AT TIME ZONE 'UTC')::date - ${RECOMPUTE_RECENT_DAYS - 1}::int)::timestamp AT TIME ZONE 'UTC'
+        AND NOT EXISTS (
+          SELECT 1 FROM run_outcomes p WHERE p.run_id = k.run_id AND COALESCE(p.recorded_at, p.declared_at) <= ${oldest}::timestamptz
+        )
+        AND (k.on_time OR NOT EXISTS (
+          SELECT 1 FROM pool_lines pl
+          WHERE pl.organization_id IS NOT DISTINCT FROM k.organization_id
+            AND pl.pool_key = COALESCE('workflow:' || k.workflow_slug, 'task:' || k.service_name || '/' || k.task_name)
+            AND pl.first_declared_at >= k.first_declared
+        ))
+    ),
     subj AS MATERIALIZED (
       SELECT x.subject_service AS svc, x.subject_id AS sid, MIN(x.declared_at) AS from_at, MAX(x.rec) AS at
-      FROM x JOIN narrow n ON n.run_id = x.run_id
+      FROM x JOIN (SELECT run_id FROM narrow UNION SELECT run_id FROM first_on_time WHERE NOT on_time) n ON n.run_id = x.run_id
       GROUP BY 1, 2
       -- an on-time fact (today) moves only today's days, which every tick recomputes
       HAVING MIN(x.declared_at) < (now() AT TIME ZONE 'UTC')::date::timestamp AT TIME ZONE 'UTC'
@@ -2606,16 +2624,6 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
           AND declared_at >= date_trunc('day', s.from_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
         OFFSET 0
       ) y
-    ),
-    -- DASH-SPEED-1110: a run's FIRST declaration, on time, on a run started before the recent days
-    -- moves only the days its subtree's cost rows sit on + its declaration days (resolved below).
-    first_on_time AS MATERIALIZED (
-      SELECT k.run_id FROM k
-      WHERE k.broad AND k.on_time
-        AND k.started_at < ((now() AT TIME ZONE 'UTC')::date - ${RECOMPUTE_RECENT_DAYS - 1}::int)::timestamp AT TIME ZONE 'UTC'
-        AND NOT EXISTS (
-          SELECT 1 FROM run_outcomes p WHERE p.run_id = k.run_id AND COALESCE(p.recorded_at, p.declared_at) <= ${oldest}::timestamptz
-        )
     )
     SELECT 'from' AS kind, to_char(LEAST(first_declared, started_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(last_recorded) AS last_recorded,
            NULL::uuid AS run_id, NULL::text[] AS declared_days
