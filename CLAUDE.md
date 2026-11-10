@@ -1109,7 +1109,9 @@ read refreshes it, recomputed synchronously only past `maxStaleMs`; failures nev
 kept; 64 MB per cache. Used by `GET /internal/runs/subtree-costs` (fresh 10 min, stale up to 6 h, 280 s compute budget;
 lead-serve reads 12-43 s for 33211c62, 94-120 s for 75d7e3e8 = 500 at the old 120 s) and `GET /{v1,internal}/brands/:brandId/ledger/runs` (fresh 30 s, up to 5 min; the page is
 now picked BEFORE its marks/parents join: the parent probe ran for every run of the window). Kill switch `READ_CACHE=off`
-(tests run with it off; guard `tests/unit/read-cache.test.ts`). Disk is at 96 %: no new index for these reads.
+(tests run with it off; guard `tests/unit/read-cache.test.ts`). subtree-costs roots come off `idx_runs_org_service_task_cover` (migration 0108, (org, service, task) INCLUDE the
+read's columns: Doc Dinners' 112,718 lead-serve runs spent 115 s of 145 s on heap pages); past 20,000 roots the read sets
+`enable_nestloop = off` (stores hash-joined, one sequential scan each, same body: guard in `run-subtree-costs.test.ts`).
 
 ## Ledger reads answer from cached stored days (LEDGER-LOAD-1107-RUNS)
 
