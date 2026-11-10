@@ -1090,15 +1090,17 @@ concept, a value-based joint-cost split.
 
 - **The broad rule** ('from': every day from the run's start) re-staled every day since 2026-02-10 for ONE `email_found`
   apollo-service declared on time on a February enrichment run (2026-11-09 19:27): 265 days at 3-8 min each, 3 passes =
-  the 359 s statements of the box audit. Now a run's FIRST declaration (no occurrence of it recorded before the sweep),
-  ON TIME (no occurrence dated on a UTC day before its recording day), on a run started before the recent days, stales
-  only the UTC days of its subtree's cost rows (they re-anchor; every split is keyed on the cost row's day) + its own
-  declaration days (`narrowFirstDeclarations` in `services/outcome-ledger.ts`). Back-dated facts, a run's later
-  declarations and subtrees > 5,000 runs keep the broad rule. A consumption's standard cost is read at compute time, as
-  for a late cost row (which also stales only its own day).
+  the 359 s statements of the box audit (the fact was DATED at the run's start). Now a run's FIRST declaration (no
+  occurrence of it recorded before the sweep) on a run started before the recent days stales only the UTC days of its
+  subtree's cost rows (they re-anchor; every split is keyed on the cost row's day) + its own declaration days
+  (`narrowFirstDeclarations` in `services/outcome-ledger.ts`) and, when back-dated, the later declaration days of its
+  subjects (resolution, reuse rank, repeat production: the spend-free rule's `subj`). Broad rule kept for: a back-dated
+  first declaration holding its production line's first declaration (`pool_lines`: the line now produced earlier moves
+  every later day's loss), a run's later declarations, subtrees > 5,000 runs. A consumption's standard cost is read at
+  compute time, as for a late cost row (which also stales only its own day).
 - **Persisted flags are re-judged**: each backfill starts with `reassessStaleDays` under the refresh lock (a flag no fact
   recorded since moves under the current rules is cleared). Guard: `tests/integration/ledger-stale-dated-facts.test.ts`
-  (every unflagged day recomputes byte for byte; the reassess keeps exactly the moved days).
+  (on-time and back-dated: every unflagged day recomputes byte for byte; the reassess keeps exactly the moved days).
 
 ## Stored answers for slow polled reads (DASH-SPEED-1110)
 

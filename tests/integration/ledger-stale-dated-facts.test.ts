@@ -153,6 +153,60 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
     expect(after.has(D3)).toBe(true);
   });
 
+  // DASH-SPEED-1110 (prod 2026-11-09): apollo declared email_found DATED at its 2026-02-10 run's start.
+  it("a run's FIRST back-dated declaration on a line that already produced stales its cost days, its own day and its subject's later days only", async () => {
+    const D0 = addDays(TODAY, -380);
+    const D1 = addDays(TODAY, -379);
+    const D2 = addDays(TODAY, -378);
+    const D3 = addDays(TODAY, -377);
+    const days = [D0, D1, D2, D3];
+    const cost = (runId: string, day: string, q: string) =>
+      insertTestRunCost({ runId, costName: "tok", quantity: q, unitCostInUsdCents: "5", totalCostInUsdCents: new Decimal(5).times(q).toFixed(10), status: "actual", createdAt: new Date(`${day}T08:00:01Z`) });
+    const run = (task: string, day: string, hour: string, parentRunId?: string) =>
+      insertTestRun({ organizationId: ORG, parentRunId, serviceName: "apollo", taskName: task, status: "completed", startedAt: new Date(`${day}T${hour}:00:00Z`) });
+    // The line apollo/enrich-bd already produced on D0 (an earlier run), so R's dated fact moves no line.
+    const r0 = await run("enrich-bd", D0, "06");
+    await cost(r0.id, D0, "1");
+    const d0 = await request(app).post(`/v1/runs/${r0.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ occurredAt: `${D0}T06:30:00.000Z`, produced: [lead("email_found", "stale-1110-bd0")] });
+    expect([200, 201]).toContain(d0.status);
+    // R spends on D0, its child on D2; a send on D3 consumes R's subject; D1 has unrelated spend.
+    const r = await run("enrich-bd", D0, "08");
+    await cost(r.id, D0, "2");
+    const c = await run("child-bd", D2, "08", r.id);
+    await cost(c.id, D2, "1");
+    const send = await run("send-bd", D3, "08");
+    await cost(send.id, D3, "1");
+    const sent = await request(app).post(`/v1/runs/${send.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ occurredAt: `${D3}T08:30:00.000Z`, consumed: [lead("email_found", "stale-1110-bd1")] });
+    expect([200, 201]).toContain(sent.status);
+    const u = await run("unrelated-bd", D1, "08");
+    await cost(u.id, D1, "4");
+
+    const figures = async (day: string) => {
+      const { computedAt: _c, ...rest } = await computeLedgerDay(day, VERSIONS as any);
+      return JSON.stringify(rest);
+    };
+    const before = new Map<string, string>();
+    for (const d of days) before.set(d, await figures(d));
+    await new Promise((ok) => setTimeout(ok, 20));
+    const computedAt = new Date(Date.now() - 1);
+    await new Promise((ok) => setTimeout(ok, 20));
+    const computed = new Map(days.map((d) => [d, computedAt]));
+    // Other files of the shard record facts meanwhile: judge only what R's declaration adds.
+    const baseline = await staleComputedDays(computed, computedAt);
+
+    const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ occurredAt: `${D0}T08:30:00.000Z`, produced: [lead("email_found", "stale-1110-bd1")] });
+    expect([200, 201]).toContain(res.status);
+
+    const stale = await staleComputedDays(computed, computedAt);
+    expect(stale.has(D0) && stale.has(D2) && stale.has(D3)).toBe(true); // cost days of R + C, its own day, the later consumption of its subject
+    expect(stale.has(D1) && !baseline.has(D1)).toBe(false);
+    for (const d of days) {
+      if (stale.has(d)) continue;
+      expect(await figures(d), `day ${d} moved but was not flagged stale`).toBe(before.get(d));
+    }
+    expect(await figures(D3)).not.toBe(before.get(D3)); // the D3 consumption now resolves to R's unit
+  });
+
   // DASH-SPEED-1110: one email_found Apollo declared on a 2026-02-10 run re-staled 273 days.
   it("a run's FIRST on-time declaration stales only its subtree's cost days and its own day; every other day recomputes byte for byte", async () => {
     const D0 = addDays(TODAY, -360);
@@ -190,13 +244,15 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
     await new Promise((ok) => setTimeout(ok, 20));
     const computedAt = new Date(Date.now() - 1_000);
     const computed = new Map(days.map((d) => [d, computedAt]));
-    expect((await staleComputedDays(computed, computedAt)).size).toBe(0);
+    // Other files of the shard record facts meanwhile: judge only what R's declaration adds.
+    const baseline = await staleComputedDays(computed, computedAt);
 
     const res = await request(app).post(`/v1/runs/${r.id}/outcomes`).set(getAuthHeaders({ orgId: ORG })).send({ produced: [lead("email_found", "stale-1110-r")] });
     expect([200, 201]).toContain(res.status);
 
     const stale = await staleComputedDays(computed, computedAt);
-    expect([...stale].sort()).toEqual([D0, D2]); // R's and C's cost days; R's declaration day is today
+    expect(stale.has(D0) && stale.has(D2)).toBe(true); // R's and C's cost days; R's declaration day is today
+    expect([D1, D3].filter((d) => stale.has(d) && !baseline.has(d))).toEqual([]);
     for (const d of days) {
       const now = await figures(d);
       if (stale.has(d)) continue;
@@ -214,6 +270,8 @@ describe("LEDGER-STALE-1107: a past-dated fact refreshes its stored day by itsel
       SELECT to_char(day, 'YYYY-MM-DD') AS day, stale FROM cost_ledger_computed_days
       WHERE allocation_version = ${ALLOCATION_VERSION} AND day = ANY(${`{${days.join(",")}}`}::date[]) ORDER BY day
     `)) as any[];
-    expect(flags.map((f) => [f.day, f.stale])).toEqual([[D0, true], [D1, false], [D2, true], [D3, false]]);
+    const flag = new Map(flags.map((f) => [f.day as string, f.stale as boolean]));
+    expect([flag.get(D0), flag.get(D2)]).toEqual([true, true]);
+    for (const d of [D1, D3]) if (!baseline.has(d)) expect(flag.get(d), `${d} kept its flag`).toBe(false);
   });
 });
