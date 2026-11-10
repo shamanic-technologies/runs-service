@@ -750,6 +750,13 @@
       "when": 1784275900000,
       "tag": "0106_stats_rollup_performer_day",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1784275960000,
+      "tag": "0107_runs_org_service_task_cover",
+      "breakpoints": true
     }
   ]
 }
