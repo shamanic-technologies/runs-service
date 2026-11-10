@@ -619,6 +619,9 @@ router.get("/internal/runs/vendor", requireInternalAuth, async (req, res) => {
  * (`services/read-cache.ts`): fresh 10 min, then served while one background read refreshes it (up to 6 h
  * old). Lead-serve reads (Offer > Sourcing): 12-43 s for brand 33211c62, 94-120 s for 75d7e3e8 on the loaded box.
  */
+/** Above this many matched runs the subtree-costs read hash-joins its stores (see the read). Env override for tests. */
+const subtreeCostsHashRoots = () => Number(process.env.SUBTREE_COSTS_HASH_ROOTS ?? 20_000);
+
 export const subtreeCostsCache = new ReadCache({ freshMs: 10 * 60_000, maxStaleMs: 6 * 60 * 60_000, maxBytes: 32 * 1024 * 1024 });
 
 router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res) => {
@@ -657,6 +660,13 @@ router.get("/internal/runs/subtree-costs", requireInternalAuth, async (req, res)
       // 280 s (DASH-SPEED-1110): brand 75d7e3e8's 110,758 lead-serve runs read in ~94-120 s on the loaded box
       // and 500'd at 120 s every time, so the stored answer below was never made. The caller waits 300 s.
       await tx.execute(sql`SET LOCAL statement_timeout = '280s'`);
+      // DASH-SPEED-1110: the planner reads the brand filter as ~300 rows and probes each store per
+      // root (3 random reads per run). Past 20,000 roots one sequential scan of each
+      // store is cheaper (brand 75d7e3e8, 112,718 roots: probes > 280 s, hashed ~20 s). Same rows.
+      const [{ n }] = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM runs WHERE ${sql.join(conditions, sql` AND `)}
+      `)) as any[];
+      if (Number(n) > subtreeCostsHashRoots()) await tx.execute(sql`SET LOCAL enable_nestloop = off`);
       return tx.execute(sql`
       -- Both stamps are read IN this statement: a rebuild cannot clear one between
       -- the check and the read. Stamped = the write-time stores answer; else the walks.

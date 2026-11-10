@@ -165,6 +165,19 @@ describe("GET /internal/runs/subtree-costs", () => {
     expect(one.body.runs).toEqual(expected);
   });
 
+  // DASH-SPEED-1110: a large root set hash-joins its stores (enable_nestloop off): same body, byte for byte.
+  it("serves the same body when the read hash-joins its stores (large root set)", async () => {
+    const probed = await request(app).get("/internal/runs/subtree-costs").query({ orgId: ORG_ID, ...FILTER }).set(API_KEY);
+    process.env.SUBTREE_COSTS_HASH_ROOTS = "0";
+    try {
+      const hashed = await request(app).get("/internal/runs/subtree-costs").query({ orgId: ORG_ID, ...FILTER }).set(API_KEY);
+      expect(hashed.status).toBe(200);
+      expect(hashed.text).toBe(probed.text);
+    } finally {
+      delete process.env.SUBTREE_COSTS_HASH_ROOTS;
+    }
+  });
+
   it("filters by campaign", async () => {
     const res = await request(app).get("/internal/runs/subtree-costs").query({ orgId: ORG_ID, campaignId: "camp-2" }).set(API_KEY);
     expect(res.status).toBe(200);
