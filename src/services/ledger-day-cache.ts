@@ -74,7 +74,7 @@ export const daysOf = (since: string, until: string): string[] => {
 
 const versionSql = (where: SQL) => sql`
   SELECT to_char(day, 'YYYY-MM-DD') AS day,
-         computed_at::text || '|' || consumed_sources::text || '|' || start_days::text AS version
+         computed_at::text || '|' || COALESCE(units_at::text, '') || '|' || consumed_sources::text || '|' || start_days::text AS version
   FROM cost_ledger_computed_days
   WHERE allocation_version = ${ALLOCATION_VERSION} AND ${where}`;
 

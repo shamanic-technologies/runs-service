@@ -1956,6 +1956,109 @@ export interface OutcomeCostRow {
   reuseMoney: Money;
 }
 
+/** A stored row with every count at 0 under row `r`'s tags (money read off `r`). */
+const blank = (kind: OutcomeCostRow["kind"], r: any): OutcomeCostRow => ({
+  kind,
+  outcomeKey: r.outcome_key ?? null,
+  consumedOutcomeKey: null,
+  organizationId: r.org ?? null,
+  costOrganizationId: r.cost_org ?? null,
+  supportFunction: r.support_function ?? null,
+  abnormalReason: r.abnormal_reason ?? null,
+  tags: tagsOf(r),
+  serviceName: r.service_name ?? null,
+  ownerServiceName: r.owner_service_name ?? null,
+  lossLine: r.loss_line ?? null,
+  pipeTarget: r.pipe_target ?? null,
+  factory: r.factory ?? null,
+  sourceOrganizationId: null,
+  sourceTags: null,
+  runStartDay: r.run_start_day ?? null,
+  sourceDay: null,
+  sourceRunStartDay: null,
+  n: fx(0),
+  quantity: fx(0),
+  reuses: fx(0),
+  unknown: fx(0),
+  money: { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) },
+  reuseMoney: ZERO(),
+});
+
+/**
+ * LEDGER-SIGNUP-UNITS-1110: the day's UNIT rows (kinds produced_count + produced_elsewhere, no money):
+ * our lead-state reaches, another factory's reaches, and the declared occurrences +1 on their declaration
+ * day / -1 on their reversal day. Read only from the day's facts and the declaring runs' tags, never from
+ * the allocation: the full compute and the units refresh (refreshLedgerDayUnits) build them here alike.
+ */
+async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs): Promise<OutcomeCostRow[]> {
+  const out: OutcomeCostRow[] = [];
+  // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state,
+  // only the reaches our outreach produced (OUR-FACTORY-OUTCOMES-1027).
+  const reached = (await tx.execute(sql`
+    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids, COUNT(*)::text AS n
+    FROM lead_state_reaches
+    WHERE removed_at IS NULL
+      -- OUR-FACTORY-OUTCOMES-1027: another factory's reach (or one with no proof) is no unit of ours.
+      AND caused_by_outreach IS TRUE
+      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3
+  `)) as any[];
+  for (const r of reached) {
+    out.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
+  }
+  // LEDGER-OTHER-FACTORY-1107 (owner 2026-11-07: the TOTAL Units per outcome, every source): the reaches of
+  // another factory (or with no proof of ours) that day, one Unit per lead x brand x state, in their own kind:
+  // none of our cost, in no unit cost (our cost per outcome divides produced_count only).
+  const elsewhere = (await tx.execute(sql`
+    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids,
+           CASE WHEN caused_by_outreach IS FALSE THEN 'another_factory' ELSE 'no_proof' END AS factory, COUNT(*)::text AS n
+    FROM lead_state_reaches
+    WHERE removed_at IS NULL
+      AND caused_by_outreach IS NOT TRUE
+      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    GROUP BY 1, 2, 3, 4
+  `)) as any[];
+  for (const r of elsewhere) {
+    out.push({ ...blank("produced_elsewhere", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
+  }
+  // LEDGER-REVERSAL-1107: an occurrence counts +1 on the day it was declared and, once its declaring
+  // service reversed it, -1 on the reversal's day (a counter-entry under the same tags): a range
+  // covering both nets to zero, a range ending before the reversal still reads it.
+  const declared = (await tx.execute(sql`
+    SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
+           r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
+           SUM(o.sign)::text AS n, SUM(o.sign * o.quantity)::text AS quantity
+    FROM (
+      SELECT o.run_id, o.outcome_key, o.quantity, 1 AS sign
+      FROM run_outcomes o
+      WHERE o.direction = 'produced'
+        AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+        AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      UNION ALL
+      SELECT o.run_id, o.outcome_key, o.quantity, -1 AS sign
+      FROM run_outcome_reversals v
+      JOIN run_outcomes o ON o.id = v.occurrence_id
+      WHERE o.direction = 'produced'
+        AND v.reversed_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
+        AND v.reversed_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+    ) o
+    CROSS JOIN LATERAL (
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at
+      FROM runs WHERE id = o.run_id OFFSET 0
+    ) r
+    -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
+    WHERE NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+    HAVING SUM(o.sign) <> 0 OR SUM(o.sign * o.quantity) <> 0
+  `)) as any[];
+  for (const r of declared) {
+    out.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
+  }
+  return out;
+}
+
 export async function computeLedgerDay(day: string, versions: VendorCostVersion[], inputs?: AllocationInputs): Promise<LedgerDay> {
   const allocationInputs = inputs ?? (await fetchAllocationInputs());
   // Background work: EVERY read of the day runs in one read-only transaction on
@@ -2034,32 +2137,6 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     o.reuseCount += 1;
   }
   const outcomeCosts: OutcomeCostRow[] = [];
-  const blank = (kind: OutcomeCostRow["kind"], r: any): OutcomeCostRow => ({
-    kind,
-    outcomeKey: r.outcome_key ?? null,
-    consumedOutcomeKey: null,
-    organizationId: r.org ?? null,
-    costOrganizationId: r.cost_org ?? null,
-    supportFunction: r.support_function ?? null,
-    abnormalReason: r.abnormal_reason ?? null,
-    tags: tagsOf(r),
-    serviceName: r.service_name ?? null,
-    ownerServiceName: r.owner_service_name ?? null,
-    lossLine: r.loss_line ?? null,
-    pipeTarget: r.pipe_target ?? null,
-    factory: r.factory ?? null,
-    sourceOrganizationId: null,
-    sourceTags: null,
-    runStartDay: r.run_start_day ?? null,
-    sourceDay: null,
-    sourceRunStartDay: null,
-    n: fx(0),
-    quantity: fx(0),
-    reuses: fx(0),
-    unknown: fx(0),
-    money: { gross: fx(r.gross), net: fx(r.net), vendor: fx(r.vendor), unpricedGross: fx(r.unpriced) },
-    reuseMoney: ZERO(),
-  });
   for (const r of row.produced_cost as any[]) outcomeCosts.push(blank("produced_cost", r));
   // 'none' rows: n = distinct spending runs (the reconciliation's undeclared run count).
   for (const r of row.none_cost as any[]) {
@@ -2071,70 +2148,8 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   }
   // v5: abnormal loss per reason and the parallel family, under the paying run's tags (n = distinct paying runs).
   for (const r of [...(row.abnormal_cost as any[]), ...(row.parallel_cost as any[])]) outcomeCosts.push({ ...blank(r.kind, r), n: fx(r.runs) });
-  // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state,
-  // only the reaches our outreach produced (OUR-FACTORY-OUTCOMES-1027).
-  const reached = (await tx.execute(sql`
-    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids, COUNT(*)::text AS n
-    FROM lead_state_reaches
-    WHERE removed_at IS NULL
-      -- OUR-FACTORY-OUTCOMES-1027: another factory's reach (or one with no proof) is no unit of ours.
-      AND caused_by_outreach IS TRUE
-      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-    GROUP BY 1, 2, 3
-  `)) as any[];
-  for (const r of reached) {
-    outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
-  }
-  // LEDGER-OTHER-FACTORY-1107 (owner 2026-11-07: the TOTAL Units per outcome, every source): the reaches of
-  // another factory (or with no proof of ours) that day, one Unit per lead x brand x state, in their own kind:
-  // none of our cost, in no unit cost (our cost per outcome divides produced_count only).
-  const elsewhere = (await tx.execute(sql`
-    SELECT state AS outcome_key, organization_id::text AS org, ARRAY[brand_id]::text[] AS brand_ids,
-           CASE WHEN caused_by_outreach IS FALSE THEN 'another_factory' ELSE 'no_proof' END AS factory, COUNT(*)::text AS n
-    FROM lead_state_reaches
-    WHERE removed_at IS NULL
-      AND caused_by_outreach IS NOT TRUE
-      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-    GROUP BY 1, 2, 3, 4
-  `)) as any[];
-  for (const r of elsewhere) {
-    outcomeCosts.push({ ...blank("produced_elsewhere", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.n), money: ZERO() });
-  }
-  // LEDGER-REVERSAL-1107: an occurrence counts +1 on the day it was declared and, once its declaring
-  // service reversed it, -1 on the reversal's day (a counter-entry under the same tags): a range
-  // covering both nets to zero, a range ending before the reversal still reads it.
-  const declared = (await tx.execute(sql`
-    SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
-           r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
-           SUM(o.sign)::text AS n, SUM(o.sign * o.quantity)::text AS quantity
-    FROM (
-      SELECT o.run_id, o.outcome_key, o.quantity, 1 AS sign
-      FROM run_outcomes o
-      WHERE o.direction = 'produced'
-        AND o.declared_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-        AND o.declared_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-      UNION ALL
-      SELECT o.run_id, o.outcome_key, o.quantity, -1 AS sign
-      FROM run_outcome_reversals v
-      JOIN run_outcomes o ON o.id = v.occurrence_id
-      WHERE o.direction = 'produced'
-        AND v.reversed_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-        AND v.reversed_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
-    ) o
-    CROSS JOIN LATERAL (
-      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at
-      FROM runs WHERE id = o.run_id OFFSET 0
-    ) r
-    -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
-    WHERE NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
-    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
-    HAVING SUM(o.sign) <> 0 OR SUM(o.sign * o.quantity) <> 0
-  `)) as any[];
-  for (const r of declared) {
-    outcomeCosts.push({ ...blank("produced_count", { ...r, cost_org: r.org }), n: fx(r.n), quantity: fx(r.quantity), money: ZERO() });
-  }
+  // LEDGER-SIGNUP-UNITS-1110: the day's Units (count rows, no money), one builder shared with the units refresh.
+  outcomeCosts.push(...(await ledgerDayUnitRows(tx, day, inputs)));
   const consumingKeys = await anchorKeysOf(consumptions.map((c) => c.runId), inputs, tx);
   const stateRoutes = await stateInputRoutes(tx, consumptions.map((c) => c.id), inputs);
   const consumed = new Map<string, OutcomeCostRow>();
@@ -2227,6 +2242,41 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
   };
 }
 
+/** Inserts a day's outcome rows (the caller deletes what they replace, in the same transaction). */
+async function insertOutcomeCostRows(tx: Exec, day: string, rows: OutcomeCostRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  await tx.execute(sql`
+    INSERT INTO outcome_cost_days (
+      day, allocation_version, kind, outcome_key, consumed_outcome_key, organization_id, cost_organization_id,
+      brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
+      gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
+      source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
+      run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target, factory
+    )
+    SELECT ${day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
+           x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
+           x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt, x.fy
+    FROM jsonb_to_recordset(${JSON.stringify(
+      rows.map((o) => ({
+        kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
+        brands: o.tags.brandIds, cmp: o.tags.campaignId, wf: o.tags.workflowSlug, ft: o.tags.featureSlug,
+        n: o.n, q: o.quantity, ru: o.reuses, up: o.unknown,
+        g: o.money.gross, ne: o.money.net, v: o.money.vendor, u: o.money.unpricedGross,
+        rg: o.reuseMoney.gross, rn: o.reuseMoney.net, rv: o.reuseMoney.vendor, rup: o.reuseMoney.unpricedGross,
+        sorg: o.sourceOrganizationId, sbrands: o.sourceTags?.brandIds ?? null, scmp: o.sourceTags?.campaignId ?? null,
+        swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
+        sf: o.supportFunction,
+        rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
+        aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget, fy: o.factory,
+      })),
+    )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
+                    n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
+                    rg numeric, rn numeric, rv numeric, rup numeric,
+                    sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
+                    aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text, fy text)
+  `);
+}
+
 /** Replaces one stored day (under an advisory lock: two processes never interleave a day). */
 export async function storeLedgerDay(d: LedgerDay): Promise<void> {
   await db.transaction(async (tx) => {
@@ -2277,38 +2327,7 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
         )}::jsonb) AS x(org uuid, pk text, wf text, cmp text, units bigint, g numeric, n numeric, v numeric, u numeric)
       `);
     }
-    if (d.outcomeCosts.length > 0) {
-      await tx.execute(sql`
-        INSERT INTO outcome_cost_days (
-          day, allocation_version, kind, outcome_key, consumed_outcome_key, organization_id, cost_organization_id,
-          brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
-          gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
-          source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-          run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target, factory
-        )
-        SELECT ${d.day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
-               x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-               x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt, x.fy
-        FROM jsonb_to_recordset(${JSON.stringify(
-          d.outcomeCosts.map((o) => ({
-            kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
-            brands: o.tags.brandIds, cmp: o.tags.campaignId, wf: o.tags.workflowSlug, ft: o.tags.featureSlug,
-            n: o.n, q: o.quantity, ru: o.reuses, up: o.unknown,
-            g: o.money.gross, ne: o.money.net, v: o.money.vendor, u: o.money.unpricedGross,
-            rg: o.reuseMoney.gross, rn: o.reuseMoney.net, rv: o.reuseMoney.vendor, rup: o.reuseMoney.unpricedGross,
-            sorg: o.sourceOrganizationId, sbrands: o.sourceTags?.brandIds ?? null, scmp: o.sourceTags?.campaignId ?? null,
-            swf: o.sourceTags?.workflowSlug ?? null, sft: o.sourceTags?.featureSlug ?? null,
-            sf: o.supportFunction,
-            rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
-            aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget, fy: o.factory,
-          })),
-        )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
-                        n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
-                        rg numeric, rn numeric, rv numeric, rup numeric,
-                        sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                        aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text, fy text)
-      `);
-    }
+    await insertOutcomeCostRows(tx, d.day, d.outcomeCosts);
     if (d.orgs.length > 0) {
       await tx.execute(sql`
         INSERT INTO cost_ledger_days (
@@ -2352,11 +2371,95 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, other_factories, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, other_factories = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, units_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, other_factories, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, units_at = EXCLUDED.units_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, other_factories = true, stale = false
     `);
   });
+}
+
+/**
+ * LEDGER-SIGNUP-UNITS-1110: a stale PAST day's Units, brought current without waiting for its full recompute.
+ *
+ * Why: a reversal is a counter-entry on ITS day (today, recomputed every tick) while the Unit it withdraws sits
+ * on its declaration day; a back-dated declaration lands on a past day that waits in the paced backfill (3-8 min
+ * a day, 180 of 282 days stale on 2026-11-10). So the ledger served every withdrawal and only the Units of the
+ * days recomputed since: Distribute.you signup 480 made beside 620 withdrawn (728 made in fact, 108 standing),
+ * the dashboard read "0 from us". Units are counts read from the day's facts alone (ledgerDayUnitRows, no
+ * allocation): this rewrites ONLY the day's count rows (produced_count + produced_elsewhere) and stamps
+ * `units_at`; the money rows and `computed_at` stay as they were, so the day stays stale until its full
+ * recompute, which writes the same count rows (byte for byte) and resets `units_at`.
+ * Returns false when the day was (re)computed after this read began (nothing written).
+ */
+export async function refreshLedgerDayUnits(day: string, inputs: AllocationInputs): Promise<boolean> {
+  const read = await statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    await tx.execute(sql`SET LOCAL statement_timeout = '900s'`);
+    const [t] = (await tx.execute(sql`SELECT now() AS at`)) as any[];
+    return { at: new Date(t.at), rows: await ledgerDayUnitRows(tx, day, inputs) };
+  });
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cost_ledger_day'), hashtext(${day}))`);
+    const [c] = (await tx.execute(sql`
+      SELECT computed_at, units_at FROM cost_ledger_computed_days WHERE day = ${day}::date AND allocation_version = ${ALLOCATION_VERSION}
+    `)) as any[];
+    if (!c || new Date(c.computed_at) >= read.at || (c.units_at && new Date(c.units_at) >= read.at)) return false;
+    await tx.execute(sql`
+      DELETE FROM outcome_cost_days
+      WHERE day = ${day}::date AND allocation_version = ${ALLOCATION_VERSION} AND kind IN ('produced_count', 'produced_elsewhere')
+    `);
+    await insertOutcomeCostRows(tx, day, read.rows);
+    // The ledger read cache keys a day on computed_at AND units_at (ledger-day-cache.ts): this re-reads it.
+    await tx.execute(sql`
+      UPDATE cost_ledger_computed_days SET units_at = ${read.at.toISOString()}::timestamptz
+      WHERE day = ${day}::date AND allocation_version = ${ALLOCATION_VERSION}
+    `);
+    return true;
+  });
+}
+
+/**
+ * LEDGER-SIGNUP-UNITS-1110: the stale stored days among `days` whose Units a fact recorded after their last
+ * count (GREATEST(computed_at, units_at)) moves: a produced declaration on that day, a reversal dated that
+ * day, a lead state reached that day changed, an occurrence of that day voided or relabelled. One grouped
+ * read per fact source from the oldest mark (the recording indexes).
+ */
+export async function daysWithMovedUnits(days: string[]): Promise<string[]> {
+  if (days.length === 0) return [];
+  const rows = (await db.execute(sql`
+    WITH d AS MATERIALIZED (
+      SELECT day, GREATEST(computed_at, COALESCE(units_at, computed_at)) AS mark FROM cost_ledger_computed_days
+      WHERE allocation_version = ${ALLOCATION_VERSION} AND stale AND day = ANY(${`{${days.join(",")}}`}::date[])
+    ),
+    since AS MATERIALIZED (SELECT MIN(mark) AS at FROM d),
+    f AS (
+      SELECT (declared_at AT TIME ZONE 'UTC')::date AS day, MAX(COALESCE(recorded_at, declared_at)) AS at
+      FROM run_outcomes WHERE direction = 'produced' AND COALESCE(recorded_at, declared_at) > (SELECT at FROM since) GROUP BY 1
+      UNION ALL
+      SELECT (reversed_at AT TIME ZONE 'UTC')::date, MAX(recorded_at)
+      FROM run_outcome_reversals WHERE recorded_at > (SELECT at FROM since) GROUP BY 1
+      UNION ALL
+      SELECT (reached_at AT TIME ZONE 'UTC')::date, MAX(changed_at)
+      FROM lead_state_reaches WHERE changed_at > (SELECT at FROM since) AND reached_at IS NOT NULL GROUP BY 1
+      UNION ALL
+      -- a void deletes the occurrences: its items carry their declaration instant
+      SELECT (it.declared_at AT TIME ZONE 'UTC')::date, MAX(e.occurred_at)
+      FROM outcome_declaration_events e CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(declared_at timestamptz)
+      WHERE e.event_type IN ('outcomes.voided', 'outcomes.voided_scoped') AND e.occurred_at > (SELECT at FROM since) GROUP BY 1
+      UNION ALL
+      -- a relabel moves the occurrence to another key on its declaration day (and its reversal day)
+      SELECT (x.at_day AT TIME ZONE 'UTC')::date, MAX(e.occurred_at)
+      FROM outcome_declaration_events e CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(id uuid)
+      CROSS JOIN LATERAL (
+        SELECT o.declared_at AS at_day FROM run_outcomes o WHERE o.id = it.id
+        UNION ALL
+        SELECT v.reversed_at FROM run_outcome_reversals v WHERE v.occurrence_id = it.id
+      ) x
+      WHERE e.event_type = 'outcomes.relabeled' AND e.occurred_at > (SELECT at FROM since) GROUP BY 1
+    )
+    SELECT to_char(d.day, 'YYYY-MM-DD') AS day FROM d JOIN f ON f.day = d.day WHERE f.at > d.mark GROUP BY d.day ORDER BY d.day DESC
+  `)) as any[];
+  return rows.map((r) => r.day as string);
 }
 
 // ---------------------------------------------------------------------------
@@ -2947,6 +3050,19 @@ export async function refreshLedgerDays(
   const due = await daysToCompute(now, firstDay, true);
   const recentDays = new Set(Array.from({ length: RECOMPUTE_RECENT_DAYS }, (_, i) => addDays(utcDay(now), -i)));
   const days = (recentOnly ? due.filter((d) => recentDays.has(d)) : due).slice(0, maxDays);
+  // LEDGER-SIGNUP-UNITS-1110: the stale past days' Units first (seconds a day), their money waits for the full
+  // recompute below or the paced backfill: a withdrawal (today) is never served beside a Unit still missing.
+  const unitsDays = await daysWithMovedUnits(due.filter((d) => !recentDays.has(d)));
+  let unitsRefreshed = 0;
+  for (const day of unitsDays) {
+    if (Date.now() - started >= budgetMs / 2) break;
+    try {
+      if (await refreshLedgerDayUnits(day, inputs)) unitsRefreshed++;
+    } catch (err) {
+      console.error(`[Runs Service] cost ledger units of ${day} failed (retried next tick):`, err);
+    }
+  }
+  if (unitsDays.length > 0) console.log(`[Runs Service] cost ledger units: ${unitsRefreshed} of ${unitsDays.length} stale past days brought current in ${Date.now() - started}ms`);
   const computed: string[] = [];
   const failed: string[] = [];
   for (const day of days) {

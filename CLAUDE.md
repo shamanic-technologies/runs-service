@@ -1079,7 +1079,7 @@ read refreshes it, recomputed synchronously only past `maxStaleMs`; failures nev
 kept; 64 MB per cache. Used by `GET /internal/runs/subtree-costs` (fresh 10 min, stale up to 6 h, 280 s compute budget;
 lead-serve reads 12-43 s for 33211c62, 94-120 s for 75d7e3e8 = 500 at the old 120 s) and `GET /{v1,internal}/brands/:brandId/ledger/runs` (fresh 30 s, up to 5 min; the page is
 now picked BEFORE its marks/parents join: the parent probe ran for every run of the window). Kill switch `READ_CACHE=off`
-(tests run with it off; guard `tests/unit/read-cache.test.ts`). subtree-costs roots come off `idx_runs_org_service_task_cover` (migration 0107, (org, service, task) INCLUDE the
+(tests run with it off; guard `tests/unit/read-cache.test.ts`). subtree-costs roots come off `idx_runs_org_service_task_cover` (migration 0108, (org, service, task) INCLUDE the
 read's columns: Doc Dinners' 112,718 lead-serve runs spent 115 s of 145 s on heap pages); past 20,000 roots the read sets
 `enable_nestloop = off` (stores hash-joined, one sequential scan each, same body: guard in `run-subtree-costs.test.ts`).
 
@@ -1302,6 +1302,14 @@ A declared Unit stays on the ledger after the fact behind it is taken back (prod
   `not_occurrence_declarer`; not found / x-org-id mismatch / reversedAt outside [declaration, now] = 422 `invalid_reversals`. Replay =
   200 `already_reversed`, the first reversal stands (row locks: two racing calls write once). Final: a fact that comes back is a NEW Unit.
 - Guard: `tests/integration/outcome-reversal.test.ts`.
+- **Units of a stale past day are current every tick (LEDGER-SIGNUP-UNITS-1110, migration 0108)**: a withdrawal sits on today
+  (recomputed each tick), a back-dated Unit on a past day waiting for the paced backfill (3-8 min a day). lead-service re-declared and
+  withdrew each Distribute.you signup ~7 times (728 made, 620 withdrawn, 108 standing): the ledger served 484 made beside -620 and the
+  dashboard read 0. Each tick, BEFORE full days (half the budget), `daysWithMovedUnits` (stale stored days a declaration / reversal /
+  reach / void / relabel recorded after `GREATEST(computed_at, units_at)` moves) -> `refreshLedgerDayUnits` rewrites ONLY that day's
+  `produced_count` + `produced_elsewhere` rows from `ledgerDayUnitRows` (the builder the full compute uses) and stamps `units_at`;
+  `computed_at` and money untouched, the day stays stale. The read cache version includes `units_at`. Not covered (full recompute
+  only): a run's tags changed after the fact. Guard: `tests/integration/ledger-units-refresh.test.ts` (fails without the pass).
 
 ## Backfill — declaring the outcomes of PAST runs (migration 0060, COST-BACKFILL-1023-RUNS)
 
