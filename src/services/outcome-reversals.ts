@@ -96,7 +96,14 @@ export async function reverseOccurrences(
                CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(id uuid)
                WHERE e.run_id = o.run_id AND e.event_type = 'outcomes.declared' AND it.id = o.id AND e.source_service IS NOT NULL
                LIMIT 1
-             ), r.service_name) AS declarer
+             ), r.service_name) AS declarer,
+             r.service_name AS run_service,
+             EXISTS (
+               SELECT 1 FROM outcome_declaration_events e
+               CROSS JOIN LATERAL jsonb_to_recordset(e.payload->'items') AS it(id uuid)
+               WHERE e.run_id = o.run_id AND e.event_type = 'outcomes.declared' AND it.id = o.id
+                 AND e.payload->>'runOwnerHolds' = 'true'
+             ) AS run_owner_holds
       FROM jsonb_to_recordset(${JSON.stringify(keyed.map((k, ord) => ({ ...k, ord })))}::jsonb)
         AS k(ord int, run_id uuid, outcome_key text, subject_service text, subject_id text)
       JOIN run_outcomes o
@@ -123,7 +130,8 @@ export async function reverseOccurrences(
       const ref = { runId: k.run_id, outcomeKey: k.outcome_key, subjectService: k.subject_service, subjectId: k.subject_id };
       const f = byOrd.get(ord);
       if (!f) return refusals.push({ ...ref, reason: "occurrence_not_found", message: "no produced occurrence of this key and subject on this run" }), null;
-      if (f.declarer !== callerService) {
+      // RUN-DOOR-DECLARER-1110: a row declared over a run door is held by its declarer AND the run's owner.
+      if (f.declarer !== callerService && !(f.run_owner_holds && f.run_service === callerService)) {
         return refusals.push({ ...ref, reason: "not_occurrence_declarer", message: `declared by ${f.declarer}: only the declaring service reverses it` }), null;
       }
       if (callerOrgId && f.org_id !== callerOrgId) return refusals.push({ ...ref, reason: "run_org_mismatch" }), null;

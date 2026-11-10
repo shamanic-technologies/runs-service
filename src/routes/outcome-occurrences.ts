@@ -126,15 +126,20 @@ async function handleDeclare(req: Request, res: Response, orgRequired: boolean) 
       return;
     }
     // A fact dated before its run's start (spend-free run only): the run's own service only.
+    // RUN-DOOR-DECLARER-1110: the declarer is the CALLING service (x-service-name, the
+    // identity the org void route already trusts), the run's own service when absent.
+    const caller = req.platformServiceName?.trim() || (req.headers["x-service-name"] as string | undefined)?.trim() || undefined;
     if (effective.beforeStart) {
-      const caller = req.platformServiceName ?? (req.headers["x-service-name"] as string | undefined)?.trim();
       if (caller !== run.service_name) {
         res.status(403).json({ error: "not_run_owner", details: { runServiceName: run.service_name, callerServiceName: caller ?? null } });
         return;
       }
     }
     if (await isRunOutcomesVoided(id)) throw new RunOutcomesVoidedError(id);
-    const occurrences = await declareRunOutcomes(id, parsed.data, req.platformServiceName ?? run.service_name, effective.at, run.service_name);
+    // A service declaring over the ORG door on another service's run (a run door) holds its
+    // rows; the run's owner keeps holding them too, as it did when it was recorded as the declarer.
+    const runOwnerHolds = orgRequired && caller !== undefined && caller !== run.service_name;
+    const occurrences = await declareRunOutcomes(id, parsed.data, caller ?? run.service_name, effective.at, run.service_name, runOwnerHolds);
     const recordedCount = occurrences.filter((o) => o.status === "recorded").length;
     const performerStatedCount = occurrences.filter((o) => o.status === "performer_stated").length;
     res.status(recordedCount + performerStatedCount > 0 ? 201 : 200).json({
