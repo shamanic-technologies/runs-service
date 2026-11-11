@@ -33,11 +33,18 @@ if (!connectionString) {
 // these queries runs long enough for compiled expressions to repay that.
 const POOL_RECYCLE = { idle_timeout: 60, max_lifetime: 300 } as const;
 
+// `runs.defer_run_rollups` (SEND-RUN-LATENCY-1111, migration 0109): a run opened (or a status change)
+// on this pool appends its run-count rollup +1s to `run_rollup_deltas` instead of upserting shared
+// rollup rows that stay locked until COMMIT; services/run-rollup-drain.ts folds them in ~1 s. Every
+// other connection (scripts, tests, the stats/read pools) keeps the synchronous triggers. Kill switch
+// `RUN_ROLLUP_DEFER=off` (the drain keeps running and folds whatever is queued).
+export const RUN_ROLLUPS_DEFERRED = process.env.RUN_ROLLUP_DEFER !== "off" && process.env.NODE_ENV !== "test";
+
 export const sql = postgres(connectionString, {
   ...POOL_RECYCLE,
   max: 20,
   connect_timeout: 10,
-  connection: { jit: "off" },
+  connection: { jit: "off", ...(RUN_ROLLUPS_DEFERRED ? { "runs.defer_run_rollups": "on" } : {}) },
 });
 export const db = drizzle(sql, { schema });
 

@@ -172,6 +172,11 @@ export async function rebuildRollup(
     try {
       await a`SET LOCAL lock_timeout = '10s'`;
       await a.unsafe(`LOCK TABLE ${(spec.lockTables ?? ["runs", "runs_costs"]).join(", ")} IN SHARE ROW EXCLUSIVE MODE`);
+      // Queued run +1s (run_rollup_deltas, SEND-RUN-LATENCY-1111) belong to runs committed so far, so
+      // they are in the snapshot below: fold them now, under the lock (no new run can queue one), or the
+      // aggregate AND the later drain would both count them. The drain's advisory lock waits for an
+      // in-flight in-process batch.
+      await a`SELECT drain_run_rollup_deltas(NULL)`;
       for (const stamp of [spec.name, ...(spec.alsoStamps ?? [])]) await a`DELETE FROM stats_rollups WHERE name = ${stamp}`;
       for (const table of spec.tables) await a.unsafe(`DELETE FROM ${table}`);
       const [{ snapshot }] = await a`SELECT pg_export_snapshot() AS snapshot`;
