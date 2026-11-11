@@ -177,6 +177,9 @@ export async function rebuildRollup(
       // aggregate AND the later drain would both count them. The drain's advisory lock waits for an
       // in-flight in-process batch.
       await a`SELECT drain_run_rollup_deltas(NULL)`;
+      // Same for queued cost rollup calls (cost_rollup_deltas, SEND-RUN-LATENCY-1111-COST): applied
+      // now, before the clear, so none of them is added on top of the aggregate later.
+      await a`SELECT drain_cost_rollup_deltas(NULL, false)`;
       for (const stamp of [spec.name, ...(spec.alsoStamps ?? [])]) await a`DELETE FROM stats_rollups WHERE name = ${stamp}`;
       for (const table of spec.tables) await a.unsafe(`DELETE FROM ${table}`);
       const [{ snapshot }] = await a`SELECT pg_export_snapshot() AS snapshot`;

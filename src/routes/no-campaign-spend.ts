@@ -73,6 +73,14 @@ router.get("/internal/org-no-campaign-total", requireInternalAuth, async (req, r
         FROM org_no_campaign_days d
        WHERE d.organization_id = ${org_id}::uuid
          AND d.day >= ${firstFullDay}::date
+      -- + the org's calls still queued by deferring writes (cost_rollup_deltas, migration 0110): the
+      -- drain moves a call to the table in one transaction, this statement sees it in exactly one place.
+      UNION ALL
+      SELECT (q.a->>2)::numeric, (q.a->>3)::numeric, (q.a->>4)::numeric, (q.a->>5)::numeric
+        FROM cost_rollup_deltas q
+       WHERE q.org = ${org_id}::uuid
+         AND q.fn = 'org_no_campaign_days_add'
+         AND q.day >= ${firstFullDay}::date
       ${slice}
     )
     SELECT COALESCE(SUM(pg), 0)::text AS spent,
