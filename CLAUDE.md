@@ -45,6 +45,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
 - `src/services/run-subtree-cost.ts` + `src/services/stats-rollup-subtree-cost.ts` — `include=subtreeCost` from `run_subtree_costs` (migration 0086). See "Subtree cost per run".
+- `src/services/run-rollup-drain.ts` — folds queued run-count +1s into the rollups (~1 s). See "A run open takes no shared rollup lock".
 - `src/services/run-events-retention.ts` — 30-day retention sweep for the `run_events` leaf telemetry log. Started after `app.listen()`, every 6h. Never touches the bronze lifecycle logs.
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
@@ -1544,6 +1545,28 @@ features-service Research `readWorkflowRuns`).
   byte-identical either way (guard: `tests/integration/run-subtree-costs-rollup.test.ts`, red if a trigger is off).
 - **Readiness**: `scripts/rebuild-stats-rollup.ts subtree_cost` after the deploy (prod: inside the container against `dist/`).
   TRUNCATE in global-setup. `GET /v1/runs/:id` and batch still walk; subtree-costs + vendor read it (above).
+
+## A run open takes no shared rollup lock (migration 0109, SEND-RUN-LATENCY-1111)
+
+Opening a run fired six AFTER INSERT triggers upserting SHARED rollup rows (per org x day / hour, the fleet day x status
+counter, the feature x workflow counter), each locked until COMMIT: every open of the same org queued behind the previous
+writer's remaining triggers + commit flush. Prod 2026-11-11 lock-wait log: waits on `stats_rollup_audience_runs` /
+`stats_rollup_org_hour` / `stats_rollup_platform_cost_day` rows; postmark run opens p99 4.8 s, max 182 s (14 days).
+- **Write pool sets `runs.defer_run_rollups = on`** (`src/db/index.ts`, kill switch `RUN_ROLLUP_DEFER=off`): a new run's
+  +1s and the day x status counter's moves (completion) are APPENDED to `run_rollup_deltas` (no conflict). Every other
+  session (scripts, tests, stats/read pools) keeps the synchronous triggers byte for byte (`run_rollups_deferred()`).
+- **`drain_run_rollup_deltas(limit)`** (in-process `services/run-rollup-drain.ts`, ~1 s, first tick at listen) deletes and
+  applies a batch in ONE transaction, aggregated per key (sum, min, max): nothing lost, nothing twice. Advisory lock = one
+  drain at a time; tables in the synchronous writers' lock order, rows in key order; `lock_timeout` 800 ms < the 1 s
+  `deadlock_timeout`, so a cycle with a batch writer aborts the drain (retried next tick), never the writer.
+- **Exact by commutativity**: every delta is a +/-1 on a sum or a min/max widening; synchronous moves / deletes / cost writes
+  add their own deltas in any order. min/max repair stays conservative (count != run_count while a +1 is queued = left stale).
+- **Run-count reads lag an open by ~1-2 s** (the seven run-count rollups only; money, billing totals, ledger untouched).
+- **A rebuild drains the queue under its table lock** (`rebuildRollup`, before clearing): a queued +1 belongs to a run in
+  the snapshot, so the aggregate AND a later drain would both count it. TRUNCATE in global-setup.
+- Guard: `tests/integration/run-rollup-deltas.test.ts` (deferred + drain == synchronous rows; rebuild with a queued +1;
+  red without the rebuild drain). Replay: `.context`-style burst of bronze inserts (open/cost/complete, 32 writers).
+- Not deferred: cost-write rollups (membership logic reads live rows; `org_projected_totals` per org is the first hot row).
 
 ## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
 
