@@ -23,11 +23,19 @@ export interface OrgProjectedTotal {
 }
 
 export async function readOrgProjectedTotal(executor: Executor, orgId: string): Promise<OrgProjectedTotal> {
+  // Row + the org's calls still queued by deferring cost writes (cost_rollup_deltas, migration 0110,
+  // SEND-RUN-LATENCY-1111-COST), in ONE statement: the drain moves a call from the queue to the row in
+  // one transaction, so a committed cost is counted exactly once at any instant.
   const stamped = (await executor.execute(sql`
-    SELECT t.total_cost_in_usd_cents::text AS spent_cents,
-           t.net_cost_in_usd_cents::text   AS net_spent_cents
+    SELECT (COALESCE(t.total_cost_in_usd_cents, 0) + COALESCE(q.gross, 0))::text AS spent_cents,
+           (COALESCE(t.net_cost_in_usd_cents, 0)   + COALESCE(q.net, 0))::text   AS net_spent_cents
       FROM stats_rollups s
       LEFT JOIN org_projected_totals t ON t.organization_id = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT SUM((d.a->>2)::numeric) AS gross, SUM((d.a->>3)::numeric) AS net
+          FROM cost_rollup_deltas d
+         WHERE d.org = ${orgId} AND d.fn = 'org_projected_totals_add'
+      ) q ON true
      WHERE s.name = ${ORG_PROJECTED_ROLLUP_NAME}
   `)) as Array<{ spent_cents: string | null; net_spent_cents: string | null }>;
   if (stamped.length > 0) {

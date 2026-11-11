@@ -45,7 +45,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/services/cost-resolver.ts` — Resolves unit costs from costs-service
 - `src/services/billing.ts` — billing-service client. `notifyUsage` only — fire-and-forget cache-invalidation hint after each `runs_costs` write. Failures log to Railway; lifecycle never blocks. Truth lives in `GET /internal/org-usage-total` (billing-service re-reads on every authorize).
 - `src/services/run-subtree-cost.ts` + `src/services/stats-rollup-subtree-cost.ts` — `include=subtreeCost` from `run_subtree_costs` (migration 0086). See "Subtree cost per run".
-- `src/services/run-rollup-drain.ts` — folds queued run-count +1s into the rollups (~1 s). See "A run open takes no shared rollup lock".
+- `src/services/run-rollup-drain.ts` — folds queued run-count +1s (0109) and queued cost rollup calls (0110) into the rollups (~1 s). See "A run open takes no shared rollup lock" + "A cost write takes no shared rollup lock".
 - `src/services/run-events-retention.ts` — 30-day retention sweep for the `run_events` leaf telemetry log. Started after `app.listen()`, every 6h. Never touches the bronze lifecycle logs.
 - `src/db/schema.ts` — Drizzle ORM schema (organizations, users, runs, runs_costs)
 - `src/db/index.ts` — Database connection
@@ -1566,7 +1566,33 @@ writer's remaining triggers + commit flush. Prod 2026-11-11 lock-wait log: waits
   the snapshot, so the aggregate AND a later drain would both count it. TRUNCATE in global-setup.
 - Guard: `tests/integration/run-rollup-deltas.test.ts` (deferred + drain == synchronous rows; rebuild with a queued +1;
   red without the rebuild drain). Replay: `.context`-style burst of bronze inserts (open/cost/complete, 32 writers).
-- Not deferred: cost-write rollups (membership logic reads live rows; `org_projected_totals` per org is the first hot row).
+- Cost-write rollups: see "A cost write takes no shared rollup lock" (0110).
+
+## A cost write takes no shared rollup lock (migration 0110, SEND-RUN-LATENCY-1111-COST)
+
+One cost row fired ~20 AFTER triggers upserting SHARED rows (org lifetime totals, org x day/hour groups, the fleet day, the
+feature x workflow group, every ancestor's subtree row: postmark's 1,245 sends of 2026-11-10 sat under 14 parent runs),
+each locked until COMMIT. Prod cost write p99 2.18 s, max 216 s (14 days).
+- **Decisions stay in the write, under a PER-RUN lock** (`pg_advisory_xact_lock(52052, hashtext(run_id))`, the 0052 key):
+  run-count membership ("another row of the run" checks of 0049/0052/0053/0096/0099) and whether a cost counts in
+  `org_actual_totals` / the actual part of `org_no_campaign_days` (the run's status). They read only one run and its cost
+  rows, so `a_cost_rollups_lock_run` (first AFTER trigger on runs_costs, after the FK check) and `a_runs_rollups_lock_run`
+  (first BEFORE UPDATE/DELETE trigger on runs) serialize every writer that can change them, in every session.
+- **Effects are queued**: the 22 leaf helpers (`X_add...`, pure upserts) are wrappers; with `runs.defer_cost_rollups = on`
+  (write pool, kill switch `COST_ROLLUP_DEFER=off`) a call is appended to `cost_rollup_deltas` (fn, jsonb args), else it
+  runs `X_apply` (the original body) as before. `org_actual_totals_lock` is a no-op when deferring.
+  `drain_cost_rollup_deltas(limit, yield)` applies queued calls one by one with `X_apply` (min/max and stale flags exactly as
+  synchronous) and deletes them in the same transaction; same worker tick as the run queue, run queue first (they share rows).
+- **Exact by commutativity**: every call adds; a run move / delete reads the run's LIVE cost rows (queued ones included) and
+  the queued call carries the keys the row had when written. **Exception handled: a run DELETE or RE-PARENT applies the
+  queue first** inside its transaction (subtree triggers skip a run with no item row, and delete the run's own rows).
+- **Billing never misses a committed cost**: `org-usage-total` (+ the usage hint), `org-actual-total`,
+  `org-no-campaign-total` read row + the org's queued calls (`cost_rollup_deltas.org`, indexed) in ONE statement. Every other
+  rollup (stats, subtree costs) lags a write by ~1-2 s. A zero `org_actual_totals` row may be missing (reads: '0').
+- **Rebuilds** drain both queues under their table lock. TRUNCATE in global-setup. ~24 queued calls per cost row.
+- Guard: `tests/integration/cost-rollup-deltas.test.ts` (SYNC vs DEFERRED org, every cost lifecycle + move / re-parent /
+  delete: every rollup identical after the drain, billing equal while queued; 20 concurrent rows of one run counted once,
+  costs racing their run's completion counted once; red without the per-run lock or the in-delete flush).
 
 ## Run creation never queues behind run-tree reads (read pool, 2026-10-17)
 

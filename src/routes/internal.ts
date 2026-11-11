@@ -252,12 +252,21 @@ router.get("/internal/org-actual-total", requireInternalAuth, async (req, res) =
 
   const { org_id } = parsed.data;
 
+  // Row + the org's calls still queued by deferring writes (cost_rollup_deltas, migration 0110,
+  // SEND-RUN-LATENCY-1111-COST), in ONE statement: never a committed charge missing, never twice.
   const result = await db.execute(sql`
-    SELECT total_cost_in_usd_cents::text AS total,
-           net_cost_in_usd_cents::text AS net,
-           (total_cost_in_usd_cents = 0) AS is_zero
-      FROM org_actual_totals
-     WHERE organization_id = ${org_id}
+    SELECT v.total::text AS total, v.net::text AS net, (v.total = 0) AS is_zero
+      FROM (
+        SELECT COALESCE(t.total_cost_in_usd_cents, 0) + COALESCE(q.gross, 0) AS total,
+               COALESCE(t.net_cost_in_usd_cents, 0)   + COALESCE(q.net, 0)   AS net
+          FROM (SELECT 1) one
+          LEFT JOIN org_actual_totals t ON t.organization_id = ${org_id}
+          LEFT JOIN LATERAL (
+            SELECT SUM((d.a->>1)::numeric) AS gross, SUM((d.a->>2)::numeric) AS net
+              FROM cost_rollup_deltas d
+             WHERE d.org = ${org_id}::uuid AND d.fn = 'org_actual_totals_add'
+          ) q ON true
+      ) v
   `);
 
   const row = (result as any[])[0];

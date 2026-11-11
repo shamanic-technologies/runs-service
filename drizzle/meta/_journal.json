@@ -771,6 +771,13 @@
       "when": 1784276120000,
       "tag": "0109_run_rollup_deltas",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1784276180000,
+      "tag": "0110_cost_rollup_deltas",
+      "breakpoints": true
     }
   ]
 }
