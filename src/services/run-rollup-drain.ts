@@ -18,6 +18,25 @@ const BATCH = 2_000;
 /** A tick stops after this many batches (a backlog after an outage drains over several ticks). */
 const MAX_BATCHES_PER_TICK = 50;
 
+/**
+ * Applies `cost_rollup_deltas` (SEND-RUN-LATENCY-1111-COST, migration 0110): the rollup effects of
+ * cost writes (and run updates) made on the write pool, queued instead of upserting shared rows.
+ * Same protocol: each batch deletes what it applies in its own transaction, one drain at a time.
+ * Calls are applied one by one with the original helper (min/max and stale flags behave exactly as
+ * in the synchronous write), ~24 per cost row.
+ */
+const COST_BATCH = 2_000;
+
+export async function drainCostRollupDeltas(sql = defaultSql, maxBatches = MAX_BATCHES_PER_TICK): Promise<number> {
+  let total = 0;
+  for (let i = 0; i < maxBatches; i++) {
+    const [{ n }] = await sql<{ n: number }[]>`SELECT drain_cost_rollup_deltas(${COST_BATCH}) AS n`;
+    total += Number(n);
+    if (Number(n) < COST_BATCH) break;
+  }
+  return total;
+}
+
 export async function drainRunRollupDeltas(sql = defaultSql, maxBatches = MAX_BATCHES_PER_TICK): Promise<number> {
   let total = 0;
   for (let i = 0; i < maxBatches; i++) {
@@ -37,11 +56,18 @@ export function startRunRollupDrain(): void {
   const tick = async () => {
     if (running) return;
     running = true;
+    // Run then cost queue, one after the other: both write the same rollup rows (org_hour, task_day,
+    // audience runs), two drains in parallel would wait on each other.
     try {
       await drainRunRollupDeltas();
     } catch (err) {
       // Nothing is lost: the deltas stay queued and the next tick retries.
       console.error("[runs-service] run rollup drain failed, retrying next tick:", err);
+    }
+    try {
+      await drainCostRollupDeltas();
+    } catch (err) {
+      console.error("[runs-service] cost rollup drain failed, retrying next tick:", err);
     } finally {
       running = false;
     }

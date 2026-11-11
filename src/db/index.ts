@@ -40,11 +40,23 @@ const POOL_RECYCLE = { idle_timeout: 60, max_lifetime: 300 } as const;
 // `RUN_ROLLUP_DEFER=off` (the drain keeps running and folds whatever is queued).
 export const RUN_ROLLUPS_DEFERRED = process.env.RUN_ROLLUP_DEFER !== "off" && process.env.NODE_ENV !== "test";
 
+// `runs.defer_cost_rollups` (SEND-RUN-LATENCY-1111-COST, migration 0110): a cost write (and any run
+// update) on this pool appends its rollup effects to `cost_rollup_deltas` instead of upserting shared
+// rollup rows (org lifetime totals, org x day groups, the fleet day, every ancestor's subtree row) that
+// stay locked until COMMIT; the same drain applies them in ~1 s. Decisions (run-count membership, the
+// run's status for org_actual_totals) stay in the write under a per-run lock. Billing totals read row +
+// queued calls, so they never miss a committed cost. Kill switch `COST_ROLLUP_DEFER=off`.
+export const COST_ROLLUPS_DEFERRED = process.env.COST_ROLLUP_DEFER !== "off" && process.env.NODE_ENV !== "test";
+
 export const sql = postgres(connectionString, {
   ...POOL_RECYCLE,
   max: 20,
   connect_timeout: 10,
-  connection: { jit: "off", ...(RUN_ROLLUPS_DEFERRED ? { "runs.defer_run_rollups": "on" } : {}) },
+  connection: {
+    jit: "off",
+    ...(RUN_ROLLUPS_DEFERRED ? { "runs.defer_run_rollups": "on" } : {}),
+    ...(COST_ROLLUPS_DEFERRED ? { "runs.defer_cost_rollups": "on" } : {}),
+  },
 });
 export const db = drizzle(sql, { schema });
 
