@@ -25,6 +25,7 @@ import { startRunEventsRetention } from "./services/run-events-retention.js";
 import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
 import { startCostLedgerRefresh } from "./services/outcome-ledger.js";
 import { startLifecycleArchive } from "./services/lifecycle-archive.js";
+import { startRunRollupDrain } from "./services/run-rollup-drain.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -91,6 +92,9 @@ if (process.env.NODE_ENV !== "test") {
         // deleted (services/lifecycle-archive.ts, BOX-DISK-1101): first tick ~60 s after
         // boot, then every 6 h; the boundary moves monthly. Kill switch LIFECYCLE_ARCHIVE_DISABLED.
         startLifecycleArchive();
+        // Queued run-count +1s folded into the rollups every ~1 s (services/run-rollup-drain.ts,
+        // SEND-RUN-LATENCY-1111): first tick right away, it drains whatever the last process left.
+        startRunRollupDrain();
       });
     })
     .catch((err) => {
