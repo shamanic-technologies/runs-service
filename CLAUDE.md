@@ -765,6 +765,10 @@ consumer's and the producer's) and `/internal/stats/outcome-costs` groups by `sc
 - **Day flag `script_slugs`**: a day computed before 0111 lists in daysMissing for a script read only (other reads
   unchanged) until the refresher recomputes it; days before 2026-11-05 (no Engine run outside a workflow) were
   flagged true by the migration.
+- **An ALTER on `runs` crash-loops the boot when it loses its lock**: 0111's `ADD COLUMN` under `lock_timeout 10s`
+  timed out against live traffic, the process exited and restarted 4 times (~2 min of ECONNREFUSED fleet-wide) while
+  `deploy.log` said `healthy`. Next column on `runs` (or any hot table): retry INSIDE the migration (a `DO` block
+  looping on `lock_not_available` with a short `lock_timeout`), never a restart loop.
 - **History**: `POST /internal/runs/script-statements` `{items:[{rootRunId, scriptSlug}] ≤500, reason, statedBy}`,
   the feature-slug-correction doctrine (bronze `run.script_stated` per run, fills NULL only, walk stops under a run
   stating another script; a root already named keeps it, `alreadyNamed`: state roots in run-start order and the
