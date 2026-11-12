@@ -1738,7 +1738,7 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
     WHERE r.id IN (SELECT id FROM t)`;
 }
 
-interface ResolvedConsumption {
+export interface ResolvedConsumption {
   id: string;
   runId: string;
   outcomeKey: string;
@@ -1783,7 +1783,7 @@ const tagsOf = (r: any): RunTags => ({
 /** What runs a read: the stats pool for a request, the day's long-timeout transaction for the refresher. */
 type Exec = { execute: (query: SQL) => Promise<unknown> };
 
-async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promise<ResolvedConsumption[]> {
+export async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promise<ResolvedConsumption[]> {
   const rows = (await exec.execute(resolvedConsumptionsSql(targetSql))) as any[];
   return rows.map((r) => ({
     id: r.id,

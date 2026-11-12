@@ -18,6 +18,7 @@ import vendorCostRoutes from "../../src/routes/vendor-costs.js";
 import taskUnitsRoutes from "../../src/routes/task-units.js";
 import outcomeOccurrenceRoutes from "../../src/routes/outcome-occurrences.js";
 import brandLedgerRoutes from "../../src/routes/brand-ledger.js";
+import serviceCallsRoutes from "../../src/routes/service-calls.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,6 +56,7 @@ export function createTestApp() {
   app.use(taskUnitsRoutes);
   app.use(outcomeOccurrenceRoutes);
   app.use(brandLedgerRoutes);
+  app.use(serviceCallsRoutes);
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
   });
