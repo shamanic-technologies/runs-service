@@ -783,6 +783,22 @@ v0.83.35, DIS-373). `POST /internal/runs/feature-slug-corrections` (staff, api-k
 - Guard: `tests/integration/feature-slug-corrections.test.ts` (rollup == live after
   correction).
 
+## Script of a run — each script measured apart (migration 0111, MON-SCRIPT-PRICES-2-1111)
+
+`runs.script_slug` = the stored script a run works for (`<outcome>/<dynasty>/v<version>`, workflow-service's name).
+Stated on `POST /v1/runs` `scriptSlug` by the writer opening a script run; a child inherits its parent's and the
+OUTERMOST script wins (a script nested in another is part of the outer one's production, never a 409). The ledger
+stores it beside workflow_slug (`outcome_cost_days.script_slug` / `source_script_slug`, the anchor's / spender's /
+consumer's and the producer's) and `/internal/stats/outcome-costs` groups by `scriptSlug` / `sourceScriptSlug`
+(filter `scriptSlug`): features-service splits a pipe's no-workflow production per script.
+- **Day flag `script_slugs`**: a day computed before 0111 lists in daysMissing for a script read only (other reads
+  unchanged) until the refresher recomputes it; days before 2026-11-05 (no Engine run outside a workflow) were
+  flagged true by the migration.
+- **History**: `POST /internal/runs/script-statements` `{items:[{rootRunId, scriptSlug}] ≤500, reason, statedBy}`,
+  the feature-slug-correction doctrine (bronze `run.script_stated` per run, fills NULL only, walk stops under a run
+  stating another script; a root already named keeps it, `alreadyNamed`: state roots in run-start order and the
+  outermost script wins), then flags every stored day from the earliest stated run's start for recompute.
+
 ## Dashboard v2 reads — precomputed where a scan cannot be fast (migration 0040)
 
 Measured in prod 2026-10-08 (owner org 91e76989, box at load ~27): staff margin

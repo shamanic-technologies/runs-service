@@ -101,6 +101,11 @@
             "type": "string",
             "nullable": true
           },
+          "scriptSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "The stored script this run works for (`<outcome>/<dynasty>/v<version>`): its own, else its outermost script ancestor's. Null = no script."
+          },
           "serviceName": {
             "type": "string"
           },
@@ -239,6 +244,12 @@
             "type": "string",
             "minLength": 1,
             "description": "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels."
+          },
+          "scriptSlug": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*\\/[A-Za-z0-9_-]+\\/v[1-9][0-9]*$",
+            "description": "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict). The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
+            "example": "email_sent/dy_cold_email/v5"
           },
           "serviceName": {
             "type": "string",
@@ -1053,6 +1064,84 @@
           "featureSlug",
           "reason",
           "correctedBy"
+        ]
+      },
+      "ScriptStatementResponse": {
+        "type": "object",
+        "properties": {
+          "statedRuns": {
+            "type": "integer"
+          },
+          "daysToRecompute": {
+            "type": "integer",
+            "description": "Stored ledger days flagged for recompute (a script read lists them in daysMissing until the refresher stores them again)."
+          },
+          "alreadyNamed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "scriptSlug": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "runId",
+                "scriptSlug"
+              ]
+            },
+            "description": "Roots that already name ANOTHER script (an outer script's statement or their writer named it): kept, the outermost script wins."
+          }
+        },
+        "required": [
+          "statedRuns",
+          "daysToRecompute",
+          "alreadyNamed"
+        ]
+      },
+      "ScriptStatementRequest": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "rootRunId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "scriptSlug": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*\\/[A-Za-z0-9_-]+\\/v[1-9][0-9]*$"
+                }
+              },
+              "required": [
+                "rootRunId",
+                "scriptSlug"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 500
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statedBy": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "items",
+          "reason",
+          "statedBy"
         ]
       },
       "BrandTransferMovedUsageResponse": {
@@ -12253,6 +12342,54 @@
         }
       }
     },
+    "/internal/runs/script-statements": {
+      "post": {
+        "summary": "Name the stored script recorded run subtrees worked for (MON-SCRIPT-PRICES-2-1111)",
+        "description": "The writer of script runs (workflow-service) states, on history recorded before runs carried a script (migration 0111), which script each root run executed: `<outcome>/<dynasty>/v<version>`. For each root and its descendants, every run whose script_slug is NULL gets the root's: one bronze run.script_stated event per run (payload: scriptSlug, reason, statedBy: the audit trail), projected onto runs.script_slug. The walk does not descend below a run stating another script; a root already naming another script keeps it (`alreadyNamed`), and a run reached from two roots takes the outer one's: the OUTERMOST script wins, as at write (state roots in run-start order). Cost amounts never move; the stored ledger days from the earliest stated run's start are recomputed (a script read lists them in daysMissing until then). Idempotent: a re-run states nothing. 404 when a root does not exist, 400 when one root is named with two scripts (nothing written).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScriptStatementRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptStatementResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or one root named with two scripts (rootRunIds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "A root run does not exist (missingRunIds)"
+          }
+        }
+      }
+    },
     "/internal/brand-transfers/moved-usage": {
       "get": {
         "summary": "Platform usage moved by brand transfers (for balance-neutral billing)",
@@ -17649,10 +17786,10 @@
           {
             "schema": {
               "type": "string",
-              "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section."
+              "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section. MON-SCRIPT-PRICES-2-1111 (0111): scriptSlug = the stored script (`<outcome>/<dynasty>/v<version>`) the row's run works for (its own, else its outermost script ancestor's; null = no script); sourceScriptSlug = the script of the run that PRODUCED the consumed occurrence (consumed section only). A day computed before 0111 is listed in daysMissing for a read using either (or the scriptSlug filter) until the refresher recomputes it."
             },
             "required": false,
-            "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section.",
+            "description": "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section. MON-SCRIPT-PRICES-2-1111 (0111): scriptSlug = the stored script (`<outcome>/<dynasty>/v<version>`) the row's run works for (its own, else its outermost script ancestor's; null = no script); sourceScriptSlug = the script of the run that PRODUCED the consumed occurrence (consumed section only). A day computed before 0111 is listed in daysMissing for a read using either (or the scriptSlug filter) until the refresher recomputes it.",
             "name": "groupBy",
             "in": "query"
           },
@@ -17752,6 +17889,16 @@
             "required": false,
             "description": "The row's run's service (declaring / consuming / spending run).",
             "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The row's run's stored script (`<outcome>/<dynasty>/v<version>`, 0111)."
+            },
+            "required": false,
+            "description": "The row's run's stored script (`<outcome>/<dynasty>/v<version>`, 0111).",
+            "name": "scriptSlug",
             "in": "query"
           },
           {

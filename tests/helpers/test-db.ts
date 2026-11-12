@@ -30,6 +30,7 @@ export async function insertTestRun(data: {
   brandProfileId?: string;
   audienceId?: string;
   workflowContext?: string;
+  scriptSlug?: string;
   userId?: string;
   parentRunId?: string;
   status?: string;
@@ -50,6 +51,7 @@ export async function insertTestRun(data: {
       brandProfileId: data.brandProfileId || null,
       audienceId: data.audienceId || null,
       workflowContext: data.workflowContext || null,
+      scriptSlug: data.scriptSlug || null,
       userId: data.userId || null,
       parentRunId: data.parentRunId || null,
       status: data.status || "running",

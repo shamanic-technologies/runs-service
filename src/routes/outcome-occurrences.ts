@@ -1173,7 +1173,7 @@ router.get("/internal/stats/outcome-coverage", requireInternalAuth, async (req, 
 /** Every query param the totals read understands: anything else is a 400, never a cut silently dropped. */
 const OUTCOME_COST_QUERY_PARAMS = new Set([
   "groupBy", "since", "until", "outcomeKey", "orgId", "costOrgId", "brandId", "campaignId", "workflowSlug", "featureSlug",
-  "audienceId", "serviceName",
+  "audienceId", "serviceName", "scriptSlug",
   "runStartUntil", "sourceDayUntil", "sourceRunStartUntil",
 ]);
 
@@ -1222,6 +1222,7 @@ router.get("/internal/stats/outcome-costs", requireInternalAuth, async (req, res
         featureSlug: q.featureSlug,
         audienceId: q.audienceId,
         serviceName: q.serviceName,
+        scriptSlug: q.scriptSlug,
         outcomeKey: q.outcomeKey ? normalizeOutcomeKey(q.outcomeKey) : undefined,
         runStartUntil: q.runStartUntil,
         sourceDayUntil: q.sourceDayUntil,
