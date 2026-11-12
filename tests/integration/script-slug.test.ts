@@ -60,7 +60,7 @@ describe("a run names its script (MON-SCRIPT-PRICES-2-1111)", () => {
     await closeDb();
   });
 
-  it("POST /v1/runs stores the stated script; a child inherits it; a nested script rides the OUTER one", async () => {
+  it("POST /v1/runs stores the stated script; a child inherits it; a nested script rides the OUTER one, a same-Engine candidate names itself", async () => {
     const headers = getAuthHeaders({ orgId: ORG });
     const bad = await request(app).post("/v1/runs").set(headers).send({ serviceName: "workflow", taskName: "script:x", scriptSlug: "not a script" });
     expect(bad.status).toBe(400);
@@ -72,6 +72,11 @@ describe("a run names its script (MON-SCRIPT-PRICES-2-1111)", () => {
     const nested = await request(app).post("/v1/runs").set({ ...headers, "x-run-id": child.body.id }).send({ serviceName: "workflow", taskName: "script:email_found/dy_verify", scriptSlug: "email_found/dy_verify/v2" });
     expect(nested.status).toBe(201);
     expect(nested.body.scriptSlug).toBe(A);
+    // a candidate of the SAME Engine tried under it (the Rating's fallthrough) names itself; its children follow it
+    const fallback = await request(app).post("/v1/runs").set({ ...headers, "x-run-id": outer.body.id }).send({ serviceName: "workflow", taskName: "script:email_sent/dy_b", scriptSlug: B });
+    expect(fallback.body.scriptSlug).toBe(B);
+    const underFallback = await request(app).post("/v1/runs").set({ ...headers, "x-run-id": fallback.body.id }).send({ serviceName: "chat-service", taskName: "complete" });
+    expect(underFallback.body.scriptSlug).toBe(B);
     const none = await request(app).post("/v1/runs").set(headers).send({ serviceName: "svc", taskName: "t" });
     expect(none.body.scriptSlug).toBeNull();
   });

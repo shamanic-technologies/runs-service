@@ -55,6 +55,10 @@ import {
 } from "../services/cost-aggregator.js";
 import { pgErrorCode } from "../db/pg-error.js";
 
+/** Two stored scripts (`<outcome>/<dynasty>/v<n>`) of one Engine: the same outcome. */
+export const sameEngineScript = (child: string | null, parent: string): boolean =>
+  child !== null && child.slice(0, child.indexOf("/")) === parent.slice(0, parent.indexOf("/"));
+
 const router = Router();
 
 // RUN_TREE_PLAN_NOTE — every run-tree read below walks a subtree with
@@ -225,8 +229,10 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
       if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
       if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
-      // MON-SCRIPT-PRICES-2-1111: the OUTERMOST script wins (a script nested in another is part of its production).
-      if (parentRun.scriptSlug) resolvedScriptSlug = parentRun.scriptSlug;
+      // MON-SCRIPT-PRICES-2-1111: the OUTERMOST script wins (a script nested in another is part of its production),
+      // except a script of the SAME Engine (outcome): a competing candidate tried under it (the Rating's fallthrough)
+      // names itself.
+      if (parentRun.scriptSlug && !sameEngineScript(resolvedScriptSlug, parentRun.scriptSlug)) resolvedScriptSlug = parentRun.scriptSlug;
       if (!resolvedUserId) resolvedUserId = parentRun.userId;
       resolvedAttribution = inheritAttribution(resolvedAttribution, parentRun);
     }
