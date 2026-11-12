@@ -16,6 +16,9 @@ export const runs = pgTable(
     brandProfileId: text("brand_profile_id"),
     audienceId: text("audience_id"),
     workflowContext: text("workflow_context"),
+    // The stored script this run works for (`<outcome>/<dynasty>/v<version>`, migration 0111): stated by the
+    // writer opening a script run, inherited by its children, the outermost script of a chain wins.
+    scriptSlug: text("script_slug"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
     status: text("status").notNull().default("running"),

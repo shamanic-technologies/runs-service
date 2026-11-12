@@ -46,10 +46,16 @@ export const OUTCOME_COST_DIMENSIONS = [
   // UTC day its producing run started (a reply grouped by the day of the send it answers).
   "sourceDay",
   "sourceRunStartDay",
+  // MON-SCRIPT-PRICES-2-1111 (0111): the stored script the row's run works for (declaring / consuming / spending
+  // run), and the script of the run that PRODUCED the consumed occurrence (consumed section only).
+  "scriptSlug",
+  "sourceScriptSlug",
 ] as const;
 export type OutcomeCostDimension = (typeof OUTCOME_COST_DIMENSIONS)[number];
 
 const isSource = (d: OutcomeCostDimension) => d.startsWith("source");
+/** Dimensions stored from migration 0111 on: a day computed before is missing for a read using them. */
+const SCRIPT_DIMENSIONS: readonly OutcomeCostDimension[] = ["scriptSlug", "sourceScriptSlug"];
 /** Dimensions stored from migration 0067 on: a day stored before is missing for a read using them. */
 const START_DAY_DIMENSIONS: readonly OutcomeCostDimension[] = ["runStartDay", "sourceDay", "sourceRunStartDay"];
 
@@ -71,6 +77,8 @@ export interface OutcomeCostFilters {
   featureSlug?: string;
   audienceId?: string;
   serviceName?: string;
+  /** The stored script (`<outcome>/<dynasty>/v<version>`) the row's run works for (0111). */
+  scriptSlug?: string;
   outcomeKey?: string;
   /** Inclusive UTC day: only rows whose run started on or before it (every section). */
   runStartUntil?: string;
@@ -82,6 +90,8 @@ export interface OutcomeCostFilters {
 /** The read needs rows carrying their run-start / source days (0067). */
 const needsStartDays = (groupBy: OutcomeCostDimension[], f: OutcomeCostFilters) =>
   groupBy.some((d) => START_DAY_DIMENSIONS.includes(d)) || !!(f.runStartUntil || f.sourceDayUntil || f.sourceRunStartUntil);
+/** The read needs rows carrying their script (0111). */
+const needsScripts = (groupBy: OutcomeCostDimension[], f: OutcomeCostFilters) => groupBy.some((d) => SCRIPT_DIMENSIONS.includes(d)) || !!f.scriptSlug;
 
 const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId" | "sourceBrandId">, string> = {
   outcomeKey: "outcome_key",
@@ -101,6 +111,8 @@ const COLUMN: Record<Exclude<OutcomeCostDimension, "brandId" | "sourceBrandId">,
   runStartDay: "run_start_day",
   sourceDay: "source_day",
   sourceRunStartDay: "source_run_start_day",
+  scriptSlug: "script_slug",
+  sourceScriptSlug: "source_script_slug",
 };
 
 const dimExpr = (d: OutcomeCostDimension): string =>
@@ -160,6 +172,7 @@ function baseSql(
   startDays: boolean,
   consumedSection: boolean,
   groupsBySourceBrand = false,
+  scripts = false,
 ): SQL {
   const where: SQL[] = [
     sql`d.allocation_version = ${ALLOCATION_VERSION}`,
@@ -173,6 +186,7 @@ function baseSql(
   if (f.featureSlug) where.push(sql`d.feature_slug = ${f.featureSlug}`);
   if (f.audienceId) where.push(sql`d.audience_id = ${f.audienceId}`);
   if (f.serviceName) where.push(sql`d.service_name = ${f.serviceName}`);
+  if (f.scriptSlug) where.push(sql`d.script_slug = ${f.scriptSlug}`);
   if (f.outcomeKey && outcomeCol) where.push(sql`${sql.raw(`d.${outcomeCol}`)} = ${f.outcomeKey}`);
   // `@>` (same rows as `= ANY` for a non-null brand) can use the brand_ids GIN index.
   if (f.brandId && !groupsByBrand) where.push(sql`d.brand_ids @> ARRAY[${f.brandId}]::text[]`);
@@ -186,6 +200,10 @@ function baseSql(
   if (startDays) {
     where.push(sql`EXISTS (SELECT 1 FROM cost_ledger_computed_days c
       WHERE c.day = d.day AND c.allocation_version = d.allocation_version AND c.start_days)`);
+  }
+  if (scripts) {
+    where.push(sql`EXISTS (SELECT 1 FROM cost_ledger_computed_days c
+      WHERE c.day = d.day AND c.allocation_version = d.allocation_version AND c.script_slugs)`);
   }
   const brand = groupsByBrand
     ? sql`CROSS JOIN LATERAL unnest(CASE WHEN cardinality(d.brand_ids) > 0 THEN d.brand_ids ELSE ARRAY[NULL]::text[] END) AS b(brand_id)`
@@ -354,6 +372,7 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
   // Source dimensions group the consumed section only (produced and scope have no consumed occurrence).
   const sourced = groupBy.some(isSource);
   const startDays = needsStartDays(groupBy, f);
+  const scripts = needsScripts(groupBy, f);
   const all = groupBy.map((name) => ({ name, expr: dimExpr(name) }));
   const dims = all.filter((d) => !isSource(d.name as OutcomeCostDimension));
   const nonOutcome = dims.filter((d) => d.name !== "outcomeKey");
@@ -366,7 +385,7 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
   const abnormalDims = [{ name: "abnormalReason", expr: "x.abnormal_reason" }, ...dims];
   const elsewhereDims = [{ name: "factory", expr: "x.factory" }, ...dims];
   const from = (kinds: string[], outcomeCol: string | null, consumedSection = false, bySourceBrand = false) => (days: DaySelection) =>
-    baseSql(kinds, byBrand, f, days, outcomeCol, sourced, startDays, consumedSection, bySourceBrand);
+    baseSql(kinds, byBrand, f, days, outcomeCol, sourced, startDays, consumedSection, bySourceBrand, scripts);
   const sections: Section[] = [
     {
       name: "produced",
@@ -428,6 +447,8 @@ export async function readOutcomeCostTotals(groupBy: OutcomeCostDimension[], f: 
       AND other_factories
       AND (consumed_sources OR NOT ${sourced})
       AND (start_days OR NOT ${startDays})
+      -- one computed before 0111 carries no script (MON-SCRIPT-PRICES-2-1111): missing for a script read
+      AND (script_slugs OR NOT ${scripts})
   `)) as any[];
   const split = new Map(computed.map((r) => [r.day as string, r.support_split === true]));
   const daysStale = await staleDaysIn(since, until);
