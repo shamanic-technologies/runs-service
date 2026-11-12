@@ -757,7 +757,8 @@ v0.83.35, DIS-373). `POST /internal/runs/feature-slug-corrections` (staff, api-k
 
 `runs.script_slug` = the stored script a run works for (`<outcome>/<dynasty>/v<version>`, workflow-service's name).
 Stated on `POST /v1/runs` `scriptSlug` by the writer opening a script run; a child inherits its parent's and the
-OUTERMOST script wins (a script nested in another is part of the outer one's production, never a 409). The ledger
+OUTERMOST script wins (a script nested in another is part of the outer one's production, never a 409), except a
+script of the SAME Engine (outcome) under another: a Rating fallthrough candidate names itself. The ledger
 stores it beside workflow_slug (`outcome_cost_days.script_slug` / `source_script_slug`, the anchor's / spender's /
 consumer's and the producer's) and `/internal/stats/outcome-costs` groups by `scriptSlug` / `sourceScriptSlug`
 (filter `scriptSlug`): features-service splits a pipe's no-workflow production per script.
