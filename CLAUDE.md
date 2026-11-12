@@ -26,6 +26,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/health.ts` — Health check endpoint
+- `src/routes/service-calls.ts` + `src/services/service-calls.ts` + `src/services/decision-units.ts` — every call of one service (fleet, history then changes) + Units per decision. See "Every call of one service".
 - `src/routes/brand-ledger.ts` + `src/services/brand-ledger.ts` — the books of one brand + its production orders: staff `GET /internal/brands/:brandId/ledger(/runs)` (brand-wide, every org, vendor figures) and the CUSTOMER twin `GET /v1/brands/:brandId/ledger(/runs)` (FACTORY-USER-LEDGER-1102: `requireApiKey`, only the x-org-id org's runs and stored rows, keyed on the RUN's org `outcome_cost_days.organization_id` / `runs.organization_id`; billed gross + net only, never `vendorCents`/`unpricedGrossCents`). A brand id is held by several orgs (29/188 in prod): never serve a customer the staff read. Per brand, the orgs' figures add up to the staff read. Guard: `tests/integration/brand-ledger-customer.test.ts`. Default `since` = the brand's OWN first spend day (in the caller's org for the customer twin; `firstBrandSpendDay`, consumption rollup 0090), never the fleet's: a brand born 2026-10-27 listed ~270 pre-birth days as missing (LEDGER-BRAND-SINCE-1106). A STALE stored day is served at its last computed figures and listed in `daysStale`; `daysMissing` = never stored (LEDGER-BRAND-SINCE-1106-B: instantly's later sends declare on runs charged days earlier and re-staled every day 10-21..11-06 within minutes of each recompute, a $315 brand read $0).
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/task-units.ts` + `src/services/stats-rollup-task-units.ts` — `GET /internal/stats/costs/task-units` (fleet charged runs/orgs/units per task × asking service, migration 0049). See "Task units".
@@ -803,6 +804,26 @@ consumer's and the producer's) and `/internal/stats/outcome-costs` groups by `sc
   the feature-slug-correction doctrine (bronze `run.script_stated` per run, fills NULL only, walk stops under a run
   stating another script; a root already named keeps it, `alreadyNamed`: state roots in run-start order and the
   outermost script wins), then flags every stored day from the earliest stated run's start for recompute.
+
+## Every call of one service + the Units of each decision (LLM-RATING-PER-ENGINE-1112-RUNS)
+
+features-service's GTM Factory Rating rates each LLM per Engine from EVERY chat-service call the fleet made (owner 2026-11-12:
+no past stats lost). Nothing here knows what an LLM or a model is: the caller names the service, chat-service maps cost names.
+- **`GET /internal/stats/service-calls?serviceName[&taskNames][&cursor][&limit<=5000]`** (`services/service-calls.ts`): phase
+  HISTORY = silver runs of the service started <= H0 (first page's instant), (started_at, id) order, a page spans <= 1 day of
+  starts (walks `idx_runs_started_status`, ~0.3 s for chat-service); then CHANGES = runs a bronze fact touched (run / cost
+  lifecycle, a support mark on the run) in windows (a, b] <= 1 h ending `SERVICE_CALLS_LAG_MS` (2 min) before now, served whole
+  (upsert). Each call: tags, script / workflow, `rootRunId`, `decisionRunId` (`decisionOf`: nearest run naming a script, up
+  while the parent names the same; else the same for a workflow; else the top run), `supportFunction` (nearest mark, self or
+  ancestor), every cost line with billed / net / vendor (null = unknown). Cursor opaque, bound to the filter; > 30 days = 410
+  (bronze past ~90 days lives in R2). Not re-served: a mark stated later on an ANCESTOR, a brand transfer (no bronze fact).
+- **`POST /internal/stats/decision-units {decisionRunIds <= 200}`** (`services/decision-units.ts`): OWN Units = produced
+  occurrences on the decision's work (walk down while a child keeps the decision's script; or its workflow with no script; a
+  child opening another script is its own decision), DOWNSTREAM = one hop: a consumption the ledger's rule resolves
+  (`resolveConsumptions`) to an own Unit credits what the consuming run's anchor produced for the SAME subject (the reply).
+  Reversed Units are in no list. **`GET /internal/stats/decision-units/changes?cursor`**: decisions named by outcome facts
+  recorded in the window (the run's own + the producers of its consumptions); cursor absent = start now.
+- Guard: `tests/integration/service-calls.test.ts`.
 
 ## Dashboard v2 reads — precomputed where a scan cannot be fast (migration 0040)
 

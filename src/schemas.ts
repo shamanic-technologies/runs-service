@@ -4214,3 +4214,155 @@ registry.registerPath({
   security: [{ apiKey: [] }],
   responses: { 200: { description: "{ state } (null before any backfill since boot)" }, 401: { description: "Unauthorized" } },
 });
+
+// --- LLM-RATING-PER-ENGINE-1112-RUNS: every call of one service + the Units of each decision ---
+
+export const ServiceCallsQuerySchema = z
+  .object({
+    serviceName: z.string().openapi({ description: "REQUIRED. The service whose runs are served (the run's own service_name), e.g. 'chat-service' for every LLM call the fleet made." }),
+    taskNames: z.string().optional().openapi({ description: "Comma-separated task names of those runs (max 100), e.g. 'complete,platform-complete,judgments,platform-judgments'. Absent = every task." }),
+    cursor: z.string().optional().openapi({ description: "The `nextCursor` a previous page served (opaque, bound to serviceName + taskNames). Absent = start: the first page of the whole history." }),
+    limit: z.string().optional().openapi({ description: "Runs per page, 1..5000 (default 1000). A page may hold fewer (a quiet window): follow nextCursor, never stop on a short page." }),
+  })
+  .openapi("ServiceCallsQuery");
+
+const CallCostLineSchema = z
+  .object({
+    costId: z.string(),
+    costName: z.string().openapi({ description: "As the run declared it, e.g. 'anthropic-sonnet-5.5-tokens-output'. Which model / LLM a name is: chat-service states it." }),
+    costSource: z.enum(["platform", "org"]).openapi({ description: "'platform' = our vendor account, 'org' = the customer's own key." }),
+    status: z.enum(["actual", "provisioned", "cancelled", "refunded"]).openapi({ description: "'actual' = charged; 'provisioned' = a hold not yet settled; 'cancelled' = never happened (a released hold); 'refunded' = happened, not charged (real spend = actual + refunded)." }),
+    quantity: z.string().openapi({ description: "Units of the cost name (tokens, searches, images…), decimal string." }),
+    unitCostInUsdCents: z.string().openapi({ description: "Billed unit price frozen at write." }),
+    totalCostInUsdCents: z.string().openapi({ description: "Billed gross = quantity x unit, decimal string (scale 10)." }),
+    netCostInUsdCents: z.string().openapi({ description: "Billed net of the org usage discount frozen at write (= gross when none)." }),
+    vendorUnitCostInUsdCents: z.string().nullable().openapi({ description: "What one unit cost US at the vendor (costs-service's price version this row froze). null = unknown: the row's billed amount has no vendor figure, never fold it in at the billed price." }),
+    vendorTotalCostInUsdCents: z.string().nullable().openapi({ description: "quantity x vendor unit, scale 10; null when the vendor cost is unknown." }),
+    createdAt: z.string(),
+  })
+  .openapi("ServiceCallCostLine");
+
+const ServiceCallSchema = z
+  .object({
+    runId: z.string(),
+    parentRunId: z.string().nullable(),
+    serviceName: z.string(),
+    taskName: z.string(),
+    status: z.string().openapi({ description: "running | completed | failed (as the run states now)." }),
+    startedAt: z.string(),
+    completedAt: z.string().nullable(),
+    orgId: z.string().nullable().openapi({ description: "The run's org; null on an org-less platform run (a platform call made for a caller's run keeps no org: read the decision's)." }),
+    brandIds: z.array(z.string()).nullable(),
+    campaignId: z.string().nullable(),
+    featureSlug: z.string().nullable(),
+    workflowSlug: z.string().nullable().openapi({ description: "The workflow the run works for (workflow era), as stated or inherited." }),
+    scriptSlug: z.string().nullable().openapi({ description: "The stored script the run works for (`<outcome>/<dynasty>/v<version>`), as stated or inherited; null = no script (workflow era, or a platform call made for a caller's run: read the decision's)." }),
+    rootRunId: z.string().nullable().openapi({ description: "The top-level run of its tree (often a campaign tick holding many decisions). null when the tree is deeper than 64 levels." }),
+    decisionRunId: z.string().nullable().openapi({ description: "The decision this call was part of: the run that opened its script (nearest run naming a script, then up while the parent names the same script), else the run that opened its workflow, else the top-level run. Units: POST /internal/stats/decision-units. null when the tree is too deep to tell." }),
+    decisionBasis: z.enum(["script", "workflow", "root"]).nullable(),
+    supportFunction: z.string().nullable().openapi({ description: "Support mark of the run itself or its nearest marked ancestor (staff_experiment, platform_llm, copilot, product_feature, …): work that is never production evidence. null = none. runs-service holds no other 'dry run' fact: a writer states a dry run by this mark; a run without a campaign shows campaignId null." }),
+    costs: z.array(CallCostLineSchema).openapi({ description: "Every cost line of the run itself (all statuses), oldest first. [] when it declared none." }),
+  })
+  .openapi("ServiceCall");
+
+export const ServiceCallsResponseSchema = z
+  .object({
+    calls: z.array(ServiceCallSchema).openapi({ description: "History phase: runs started up to the instant the first page was served, in start order. Changes phase: every run a fact touched in the window (created, completed, a cost added / settled / cancelled / refunded / re-priced, a support mark on the run), served WHOLE: upsert by runId." }),
+    nextCursor: z.string().openapi({ description: "Pass it back as `cursor`. Keep it after `caughtUp`: calling it later serves only what changed since." }),
+    phase: z.enum(["history", "changes"]),
+    caughtUp: z.boolean().openapi({ description: "true = nothing left up to ~2 minutes ago (facts younger than that are served on a later call, once their writes have committed)." }),
+    coveredUntil: z.string().openapi({ description: "Every fact recorded up to this instant has been served once the caller has read this page." }),
+  })
+  .openapi("ServiceCallsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/service-calls",
+  summary: "Every run of one service, fleet-wide, whole history then only what changed: cost lines (billed, net, vendor), script / workflow / campaign, decision run, support mark (service-auth only)",
+  description:
+    "LLM-RATING-PER-ENGINE-1112: features-service rates each LLM per Engine from every chat-service call the fleet ever made. Phase 1 (history) pages through every run of `serviceName` started up to the instant the first page was served, oldest first; phase 2 (changes) then serves every run of that service a recorded fact touched since, window by window, whole again. A cursor older than 30 days answers 410 (its facts may be archived): restart without one. Not re-served by the changes phase: a support mark stated later on an ANCESTOR, a brand transfer. The vendor cost reveals our margin: service-auth only.",
+  security: [{ apiKey: [] }],
+  request: { query: ServiceCallsQuerySchema },
+  responses: {
+    200: { description: "One page", content: { "application/json": { schema: ServiceCallsResponseSchema } } },
+    400: { description: "Missing serviceName, bad taskNames / limit, or a cursor not served for this filter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    410: { description: "Cursor older than 30 days: restart without a cursor", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "costs-service's vendor catalogue could not be read", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const DecisionUnitsRequestSchema = z
+  .object({
+    decisionRunIds: z.array(z.string().uuid()).min(1).max(200).openapi({ description: "The decisionRunId values service-calls served (1..200)." }),
+  })
+  .openapi("DecisionUnitsRequest");
+
+const DecisionUnitSchema = z
+  .object({
+    occurrenceId: z.string(),
+    runId: z.string().openapi({ description: "The run that declared it (a child of the decision for an own Unit: the social publish under a script run)." }),
+    outcomeKey: z.string(),
+    subjectService: z.string(),
+    subjectId: z.string(),
+    quantity: z.string(),
+    declaredAt: z.string(),
+    credit: z.enum(["own", "downstream"]).openapi({ description: "'own' = declared by the decision's own work. 'downstream' = produced for the same subject by the run that consumed one of the decision's own Units (a reply judged on the lead an email was sent to), one hop." }),
+    via: z
+      .object({ occurrenceId: z.string(), outcomeKey: z.string(), consumptionId: z.string(), consumingRunId: z.string() })
+      .nullable()
+      .openapi({ description: "Downstream only: the decision's own Unit the consumption resolved to (the ledger's rule: latest same-key production of that subject at or before it)." }),
+  })
+  .openapi("DecisionUnit");
+
+export const DecisionUnitsResponseSchema = z
+  .object({
+    decisions: z.array(
+      z.object({
+        decisionRunId: z.string(),
+        found: z.boolean().openapi({ description: "false = no such run (no Units)." }),
+        units: z.array(DecisionUnitSchema).openapi({ description: "Standing Units only: a Unit its declarer reversed, or a voided declaration, is in no list. Own first (declaration order), then downstream." }),
+      }),
+    ),
+  })
+  .openapi("DecisionUnitsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/stats/decision-units",
+  summary: "The outcome Units each decision produced, own and one hop downstream, credited like the ledger (service-auth only)",
+  description:
+    "A decision's own work = the decision run and its descendants still working for it (same script; or same workflow and no script; or, for a top-level decision, neither): a child opening another script is its own decision. Downstream = what the run consuming one of those Units (resolved by the ledger's consumption rule, subject equivalences included) produced for the same subject, through its anchor (itself, else the nearest ancestor that produced; a support mark stops it).",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: DecisionUnitsRequestSchema } } } },
+  responses: {
+    200: { description: "Units per decision, in request order", content: { "application/json": { schema: DecisionUnitsResponseSchema } } },
+    400: { description: "decisionRunIds missing, empty, > 200 or not UUIDs", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const DecisionChangesResponseSchema = z
+  .object({
+    decisionRunIds: z.array(z.string()).openapi({ description: "Decisions whose Units may have moved in the window: re-read them with POST /internal/stats/decision-units." }),
+    nextCursor: z.string(),
+    caughtUp: z.boolean(),
+    coveredUntil: z.string(),
+  })
+  .openapi("DecisionChangesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/decision-units/changes",
+  summary: "Decisions whose Units may have moved since the cursor (service-auth only)",
+  description:
+    "Every outcome fact recorded in the window (declaration, reversal, void, re-date, relabel) names the decision of the run it was recorded on and, for each consumption on that run, the decision that produced what it consumed. Cursor absent = start now with nothing listed: take it BEFORE the first decision-units read. Windows of up to 6 h, ending ~2 minutes before now; follow nextCursor until caughtUp. A cursor older than 30 days answers 410.",
+  security: [{ apiKey: [] }],
+  request: { query: z.object({ cursor: z.string().optional() }) },
+  responses: {
+    200: { description: "Changed decisions", content: { "application/json": { schema: DecisionChangesResponseSchema } } },
+    400: { description: "Not a cursor this read served", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    410: { description: "Cursor older than 30 days", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
