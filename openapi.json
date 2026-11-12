@@ -11379,6 +11379,378 @@
           "days",
           "outcomes"
         ]
+      },
+      "ServiceCallsResponse": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceCall"
+            },
+            "description": "History phase: runs started up to the instant the first page was served, in start order. Changes phase: every run a fact touched in the window (created, completed, a cost added / settled / cancelled / refunded / re-priced, a support mark on the run), served WHOLE: upsert by runId."
+          },
+          "nextCursor": {
+            "type": "string",
+            "description": "Pass it back as `cursor`. Keep it after `caughtUp`: calling it later serves only what changed since."
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "history",
+              "changes"
+            ]
+          },
+          "caughtUp": {
+            "type": "boolean",
+            "description": "true = nothing left up to ~2 minutes ago (facts younger than that are served on a later call, once their writes have committed)."
+          },
+          "coveredUntil": {
+            "type": "string",
+            "description": "Every fact recorded up to this instant has been served once the caller has read this page."
+          }
+        },
+        "required": [
+          "calls",
+          "nextCursor",
+          "phase",
+          "caughtUp",
+          "coveredUntil"
+        ]
+      },
+      "ServiceCall": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "parentRunId": {
+            "type": "string",
+            "nullable": true
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "taskName": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "running | completed | failed (as the run states now)."
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "completedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "orgId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The run's org; null on an org-less platform run (a platform call made for a caller's run keeps no org: read the decision's)."
+          },
+          "brandIds": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "campaignId": {
+            "type": "string",
+            "nullable": true
+          },
+          "featureSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "workflowSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "The workflow the run works for (workflow era), as stated or inherited."
+          },
+          "scriptSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "The stored script the run works for (`<outcome>/<dynasty>/v<version>`), as stated or inherited; null = no script (workflow era, or a platform call made for a caller's run: read the decision's)."
+          },
+          "rootRunId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The top-level run of its tree (often a campaign tick holding many decisions). null when the tree is deeper than 64 levels."
+          },
+          "decisionRunId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The decision this call was part of: the run that opened its script (nearest run naming a script, then up while the parent names the same script), else the run that opened its workflow, else the top-level run. Units: POST /internal/stats/decision-units. null when the tree is too deep to tell."
+          },
+          "decisionBasis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "script",
+              "workflow",
+              "root",
+              null
+            ]
+          },
+          "supportFunction": {
+            "type": "string",
+            "nullable": true,
+            "description": "Support mark of the run itself or its nearest marked ancestor (staff_experiment, platform_llm, copilot, product_feature, …): work that is never production evidence. null = none. runs-service holds no other 'dry run' fact: a writer states a dry run by this mark; a run without a campaign shows campaignId null."
+          },
+          "costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceCallCostLine"
+            },
+            "description": "Every cost line of the run itself (all statuses), oldest first. [] when it declared none."
+          }
+        },
+        "required": [
+          "runId",
+          "parentRunId",
+          "serviceName",
+          "taskName",
+          "status",
+          "startedAt",
+          "completedAt",
+          "orgId",
+          "brandIds",
+          "campaignId",
+          "featureSlug",
+          "workflowSlug",
+          "scriptSlug",
+          "rootRunId",
+          "decisionRunId",
+          "decisionBasis",
+          "supportFunction",
+          "costs"
+        ]
+      },
+      "ServiceCallCostLine": {
+        "type": "object",
+        "properties": {
+          "costId": {
+            "type": "string"
+          },
+          "costName": {
+            "type": "string",
+            "description": "As the run declared it, e.g. 'anthropic-sonnet-5.5-tokens-output'. Which model / LLM a name is: chat-service states it."
+          },
+          "costSource": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "org"
+            ],
+            "description": "'platform' = our vendor account, 'org' = the customer's own key."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "actual",
+              "provisioned",
+              "cancelled",
+              "refunded"
+            ],
+            "description": "'actual' = charged; 'provisioned' = a hold not yet settled; 'cancelled' = never happened (a released hold); 'refunded' = happened, not charged (real spend = actual + refunded)."
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Units of the cost name (tokens, searches, images…), decimal string."
+          },
+          "unitCostInUsdCents": {
+            "type": "string",
+            "description": "Billed unit price frozen at write."
+          },
+          "totalCostInUsdCents": {
+            "type": "string",
+            "description": "Billed gross = quantity x unit, decimal string (scale 10)."
+          },
+          "netCostInUsdCents": {
+            "type": "string",
+            "description": "Billed net of the org usage discount frozen at write (= gross when none)."
+          },
+          "vendorUnitCostInUsdCents": {
+            "type": "string",
+            "nullable": true,
+            "description": "What one unit cost US at the vendor (costs-service's price version this row froze). null = unknown: the row's billed amount has no vendor figure, never fold it in at the billed price."
+          },
+          "vendorTotalCostInUsdCents": {
+            "type": "string",
+            "nullable": true,
+            "description": "quantity x vendor unit, scale 10; null when the vendor cost is unknown."
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "costId",
+          "costName",
+          "costSource",
+          "status",
+          "quantity",
+          "unitCostInUsdCents",
+          "totalCostInUsdCents",
+          "netCostInUsdCents",
+          "vendorUnitCostInUsdCents",
+          "vendorTotalCostInUsdCents",
+          "createdAt"
+        ]
+      },
+      "DecisionUnitsResponse": {
+        "type": "object",
+        "properties": {
+          "decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "decisionRunId": {
+                  "type": "string"
+                },
+                "found": {
+                  "type": "boolean",
+                  "description": "false = no such run (no Units)."
+                },
+                "units": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DecisionUnit"
+                  },
+                  "description": "Standing Units only: a Unit its declarer reversed, or a voided declaration, is in no list. Own first (declaration order), then downstream."
+                }
+              },
+              "required": [
+                "decisionRunId",
+                "found",
+                "units"
+              ]
+            }
+          }
+        },
+        "required": [
+          "decisions"
+        ]
+      },
+      "DecisionUnit": {
+        "type": "object",
+        "properties": {
+          "occurrenceId": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string",
+            "description": "The run that declared it (a child of the decision for an own Unit: the social publish under a script run)."
+          },
+          "outcomeKey": {
+            "type": "string"
+          },
+          "subjectService": {
+            "type": "string"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "declaredAt": {
+            "type": "string"
+          },
+          "credit": {
+            "type": "string",
+            "enum": [
+              "own",
+              "downstream"
+            ],
+            "description": "'own' = declared by the decision's own work. 'downstream' = produced for the same subject by the run that consumed one of the decision's own Units (a reply judged on the lead an email was sent to), one hop."
+          },
+          "via": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "occurrenceId": {
+                "type": "string"
+              },
+              "outcomeKey": {
+                "type": "string"
+              },
+              "consumptionId": {
+                "type": "string"
+              },
+              "consumingRunId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "occurrenceId",
+              "outcomeKey",
+              "consumptionId",
+              "consumingRunId"
+            ],
+            "description": "Downstream only: the decision's own Unit the consumption resolved to (the ledger's rule: latest same-key production of that subject at or before it)."
+          }
+        },
+        "required": [
+          "occurrenceId",
+          "runId",
+          "outcomeKey",
+          "subjectService",
+          "subjectId",
+          "quantity",
+          "declaredAt",
+          "credit",
+          "via"
+        ]
+      },
+      "DecisionUnitsRequest": {
+        "type": "object",
+        "properties": {
+          "decisionRunIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "minItems": 1,
+            "maxItems": 200,
+            "description": "The decisionRunId values service-calls served (1..200)."
+          }
+        },
+        "required": [
+          "decisionRunIds"
+        ]
+      },
+      "DecisionChangesResponse": {
+        "type": "object",
+        "properties": {
+          "decisionRunIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Decisions whose Units may have moved in the window: re-read them with POST /internal/stats/decision-units."
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "caughtUp": {
+            "type": "boolean"
+          },
+          "coveredUntil": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decisionRunIds",
+          "nextCursor",
+          "caughtUp",
+          "coveredUntil"
+        ]
       }
     },
     "parameters": {}
@@ -18482,6 +18854,205 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/stats/service-calls": {
+      "get": {
+        "summary": "Every run of one service, fleet-wide, whole history then only what changed: cost lines (billed, net, vendor), script / workflow / campaign, decision run, support mark (service-auth only)",
+        "description": "LLM-RATING-PER-ENGINE-1112: features-service rates each LLM per Engine from every chat-service call the fleet ever made. Phase 1 (history) pages through every run of `serviceName` started up to the instant the first page was served, oldest first; phase 2 (changes) then serves every run of that service a recorded fact touched since, window by window, whole again. A cursor older than 30 days answers 410 (its facts may be archived): restart without one. Not re-served by the changes phase: a support mark stated later on an ANCESTOR, a brand transfer. The vendor cost reveals our margin: service-auth only.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "REQUIRED. The service whose runs are served (the run's own service_name), e.g. 'chat-service' for every LLM call the fleet made."
+            },
+            "required": true,
+            "description": "REQUIRED. The service whose runs are served (the run's own service_name), e.g. 'chat-service' for every LLM call the fleet made.",
+            "name": "serviceName",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated task names of those runs (max 100), e.g. 'complete,platform-complete,judgments,platform-judgments'. Absent = every task."
+            },
+            "required": false,
+            "description": "Comma-separated task names of those runs (max 100), e.g. 'complete,platform-complete,judgments,platform-judgments'. Absent = every task.",
+            "name": "taskNames",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The `nextCursor` a previous page served (opaque, bound to serviceName + taskNames). Absent = start: the first page of the whole history."
+            },
+            "required": false,
+            "description": "The `nextCursor` a previous page served (opaque, bound to serviceName + taskNames). Absent = start: the first page of the whole history.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Runs per page, 1..5000 (default 1000). A page may hold fewer (a quiet window): follow nextCursor, never stop on a short page."
+            },
+            "required": false,
+            "description": "Runs per page, 1..5000 (default 1000). A page may hold fewer (a quiet window): follow nextCursor, never stop on a short page.",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceCallsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing serviceName, bad taskNames / limit, or a cursor not served for this filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "410": {
+            "description": "Cursor older than 30 days: restart without a cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "costs-service's vendor catalogue could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/decision-units": {
+      "post": {
+        "summary": "The outcome Units each decision produced, own and one hop downstream, credited like the ledger (service-auth only)",
+        "description": "A decision's own work = the decision run and its descendants still working for it (same script; or same workflow and no script; or, for a top-level decision, neither): a child opening another script is its own decision. Downstream = what the run consuming one of those Units (resolved by the ledger's consumption rule, subject equivalences included) produced for the same subject, through its anchor (itself, else the nearest ancestor that produced; a support mark stops it).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionUnitsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Units per decision, in request order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "decisionRunIds missing, empty, > 200 or not UUIDs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/stats/decision-units/changes": {
+      "get": {
+        "summary": "Decisions whose Units may have moved since the cursor (service-auth only)",
+        "description": "Every outcome fact recorded in the window (declaration, reversal, void, re-date, relabel) names the decision of the run it was recorded on and, for each consumption on that run, the decision that produced what it consumed. Cursor absent = start now with nothing listed: take it BEFORE the first decision-units read. Windows of up to 6 h, ending ~2 minutes before now; follow nextCursor until caughtUp. A cursor older than 30 days answers 410.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Changed decisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionChangesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a cursor this read served",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "410": {
+            "description": "Cursor older than 30 days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
