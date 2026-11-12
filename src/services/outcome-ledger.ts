@@ -895,11 +895,12 @@ function stateRoutingSql(): SQL {
              ar.organization_id AS a_org, ar.service_name AS a_service, ar.task_name AS a_task, ar.campaign_id AS a_campaign,
              ar.workflow_slug AS a_workflow, ar.feature_slug AS a_feature, ar.brand_ids AS a_brands, ar.audience_id AS a_audience,
              ar.started_at AS a_started, to_char((ar.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS a_start_day, ar.pool_key AS a_pool,
+             ar.script_slug AS a_script,
              EXISTS (SELECT 1 FROM st WHERE st.step_key = s.outcome_key) AS reaches_state
       FROM base_shares s
       CROSS JOIN LATERAL (SELECT subject_service, subject_id, declared_at FROM run_outcomes WHERE id = s.occurrence_id OFFSET 0) o
       CROSS JOIN LATERAL (
-        SELECT organization_id, service_name, task_name, campaign_id, workflow_slug, feature_slug, brand_ids, audience_id, started_at,
+        SELECT organization_id, service_name, task_name, campaign_id, workflow_slug, feature_slug, brand_ids, audience_id, started_at, script_slug,
                ${poolKeySql("")} AS pool_key
         FROM runs WHERE id = s.anchor_id OFFSET 0
       ) ar
@@ -1304,10 +1305,10 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     -- the walk): the PK probes are the cost of this statement on a cold cache.
     day_runs AS MATERIALIZED (
       SELECT d.run_id, r.organization_id, r.service_name, r.task_name, r.parent_run_id,
-             r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id, r.started_at
+             r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug, r.audience_id, r.started_at, r.script_slug
       FROM (SELECT DISTINCT run_id FROM b) d
       CROSS JOIN LATERAL (
-        SELECT organization_id, service_name, task_name, parent_run_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, started_at
+        SELECT organization_id, service_name, task_name, parent_run_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, started_at, script_slug
         FROM runs WHERE id = d.run_id OFFSET 0
       ) r
     ),
@@ -1315,7 +1316,7 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       SELECT b.run_id, COALESCE(b.rc_org, dr.organization_id) AS org_id,
              COALESCE(b.rc_org, dr.organization_id)::text AS org_key,
              dr.service_name, dr.task_name, b.gross, b.net,
-             dr.organization_id AS run_org, dr.brand_ids, dr.campaign_id, dr.workflow_slug, dr.feature_slug, dr.audience_id,
+             dr.organization_id AS run_org, dr.brand_ids, dr.campaign_id, dr.workflow_slug, dr.feature_slug, dr.audience_id, dr.script_slug,
              ${poolKeySql("dr.")} AS pool_key,
              to_char((dr.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
              ${vj.vendor} AS vendor, ${vj.unpriced} AS unpriced
@@ -1502,29 +1503,29 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
     -- none under the tags of the run that spent.
     anchor_runs AS MATERIALIZED (
       SELECT a.anchor_id, r.organization_id, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
-             r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day
+             r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day, r.script_slug
       FROM anchors a
       CROSS JOIN LATERAL (
-        SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at
+        SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at, script_slug
         FROM runs WHERE id = a.anchor_id OFFSET 0
       ) r
     ),
     produced_cost AS (
       SELECT s.outcome_key, ar.organization_id::text AS org, s.org_key AS cost_org, ar.brand_ids, ar.campaign_id,
-             ar.workflow_slug, ar.feature_slug, ar.run_start_day, ar.audience_id, ar.service_name, ${sums("s", "m")}
+             ar.workflow_slug, ar.feature_slug, ar.run_start_day, ar.audience_id, ar.service_name, ar.script_slug, ${sums("s", "m")}
       FROM shares s JOIN anchor_runs ar ON ar.anchor_id = s.anchor_id
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
     ),
     none_cost AS (
       SELECT x.org, x.cost_org, x.brand_ids, x.campaign_id, x.workflow_slug, x.feature_slug, x.support_function,
-             x.run_start_day, x.audience_id, x.service_name, x.owner_service, x.loss_line, x.pipe_target, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
+             x.run_start_day, x.audience_id, x.service_name, x.owner_service, x.loss_line, x.pipe_target, x.script_slug, COUNT(DISTINCT x.run_id) AS runs, ${sums("x", "m")}
       FROM (
         SELECT c.run_org::text AS org, c.org_key AS cost_org, c.brand_ids, c.campaign_id, c.workflow_slug, c.feature_slug,
                sp.kind AS support_function, c.run_start_day, c.audience_id, c.service_name, wt.owner_service,
                (sp.kind IS NULL AND EXISTS (SELECT 1 FROM loss_lines ll WHERE ll.run_id = c.run_id AND ll.org_key IS NOT DISTINCT FROM c.org_key)) AS loss_line,
                -- The pipe this spend works for (weighted-average price): its run's pipe output; support never.
                CASE WHEN sp.kind IS NULL THEN (SELECT ps.target FROM ps WHERE ps.workflow_slug = c.workflow_slug AND ps.feature_slug = c.feature_slug LIMIT 1) END AS pipe_target,
-               c.run_id, c.gross, c.net, c.vendor, c.unpriced
+               c.run_id, c.gross, c.net, c.vendor, c.unpriced, c.script_slug
         FROM costed c
         LEFT JOIN support_of sp ON sp.run_id = c.run_id
         LEFT JOIN walk_top wt ON wt.run_id = c.run_id
@@ -1532,30 +1533,30 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
         UNION ALL
         -- v5 unpooled state loss: under the paying (anchor) run's tags; it carries a workflow, so it reads as unpooled loss.
         SELECT t.a_org::text, u.org_key, t.a_brands, t.a_campaign, t.a_workflow, t.a_feature, NULL::text, t.a_start_day,
-               t.a_audience, t.a_service, t.a_service, true, u.next_state, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced
+               t.a_audience, t.a_service, t.a_service, true, u.next_state, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced, t.a_script
         FROM state_unpooled u JOIN atags t ON t.anchor_id = u.anchor_id
         WHERE u.is_primary
       ) x
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
     ),
     -- v5: abnormal loss (in no unit cost) and the other family's view of the routed spend, under the paying run's tags.
     abnormal_cost AS (
       SELECT a.reason, a.outcome_key, t.a_org::text AS org, a.org_key AS cost_org, t.a_brands AS brand_ids, t.a_campaign AS campaign_id,
              t.a_workflow AS workflow_slug, t.a_feature AS feature_slug, t.a_start_day AS run_start_day, t.a_audience AS audience_id,
-             t.a_service AS service_name, COUNT(DISTINCT a.anchor_id) AS runs, ${sums("a", "m")}
+             t.a_service AS service_name, t.a_script AS script_slug, COUNT(DISTINCT a.anchor_id) AS runs, ${sums("a", "m")}
       FROM abnormal_rows a JOIN atags t ON t.anchor_id = a.anchor_id
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
     ),
     parallel_cost AS (
       SELECT p.kind, p.outcome_key, t.a_org::text AS org, p.org_key AS cost_org, t.a_brands AS brand_ids, t.a_campaign AS campaign_id,
              t.a_workflow AS workflow_slug, t.a_feature AS feature_slug, t.a_start_day AS run_start_day, t.a_audience AS audience_id,
-             t.a_service AS service_name, COUNT(DISTINCT p.anchor_id) AS runs, ${sums("p", "m")}
+             t.a_service AS service_name, t.a_script AS script_slug, COUNT(DISTINCT p.anchor_id) AS runs, ${sums("p", "m")}
       FROM (
         SELECT 'parallel_cost' AS kind, s.outcome_key, s.org_key, s.anchor_id, s.gross, s.net, s.vendor, s.unpriced FROM parallel_shares s
         UNION ALL
         SELECT 'parallel_none', u.next_state, u.org_key, u.anchor_id, u.gross, u.net, u.vendor, u.unpriced FROM state_unpooled u WHERE NOT u.is_primary
       ) p JOIN atags t ON t.anchor_id = p.anchor_id
-      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
     ),
     support_split AS (
       SELECT c.org_key, sp.kind, ${sums("c", "s")}
@@ -1604,12 +1605,12 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       COALESCE((SELECT json_agg(json_build_object(
         'kind', 'abnormal', 'abnormal_reason', a.reason, 'outcome_key', a.outcome_key, 'org', a.org, 'cost_org', a.cost_org, 'brand_ids', a.brand_ids,
         'campaign_id', a.campaign_id, 'workflow_slug', a.workflow_slug, 'feature_slug', a.feature_slug, 'run_start_day', a.run_start_day,
-        'audience_id', a.audience_id, 'service_name', a.service_name, 'runs', a.runs,
+        'audience_id', a.audience_id, 'service_name', a.service_name, 'script_slug', a.script_slug, 'runs', a.runs,
         'gross', a.m_gross::text, 'net', a.m_net::text, 'vendor', a.m_vendor::text, 'unpriced', a.m_unpriced::text)) FROM abnormal_cost a), '[]'::json) AS abnormal_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'kind', p.kind, 'outcome_key', p.outcome_key, 'org', p.org, 'cost_org', p.cost_org, 'brand_ids', p.brand_ids,
         'campaign_id', p.campaign_id, 'workflow_slug', p.workflow_slug, 'feature_slug', p.feature_slug, 'run_start_day', p.run_start_day,
-        'audience_id', p.audience_id, 'service_name', p.service_name, 'runs', p.runs,
+        'audience_id', p.audience_id, 'service_name', p.service_name, 'script_slug', p.script_slug, 'runs', p.runs,
         'gross', p.m_gross::text, 'net', p.m_net::text, 'vendor', p.m_vendor::text, 'unpriced', p.m_unpriced::text)) FROM parallel_cost p), '[]'::json) AS parallel_cost,
       (SELECT COUNT(*) FROM routed WHERE is_primary) AS routed_shares,
       COALESCE((SELECT json_agg(row_to_json(cov) ORDER BY cov.service_name, cov.task_name) FROM cov), '[]'::json) AS coverage,
@@ -1620,12 +1621,12 @@ export function ledgerDaySql(day: string, versions: VendorCostVersion[], inputs:
       COALESCE((SELECT json_agg(json_build_object(
         'outcome_key', p.outcome_key, 'org', p.org, 'cost_org', p.cost_org, 'brand_ids', p.brand_ids, 'campaign_id', p.campaign_id,
         'workflow_slug', p.workflow_slug, 'feature_slug', p.feature_slug, 'run_start_day', p.run_start_day,
-        'audience_id', p.audience_id, 'service_name', p.service_name,
+        'audience_id', p.audience_id, 'service_name', p.service_name, 'script_slug', p.script_slug,
         'gross', p.m_gross::text, 'net', p.m_net::text, 'vendor', p.m_vendor::text, 'unpriced', p.m_unpriced::text)) FROM produced_cost p), '[]'::json) AS produced_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'org', n.org, 'cost_org', n.cost_org, 'brand_ids', n.brand_ids, 'campaign_id', n.campaign_id,
         'workflow_slug', n.workflow_slug, 'feature_slug', n.feature_slug, 'support_function', n.support_function, 'run_start_day', n.run_start_day,
-        'audience_id', n.audience_id, 'service_name', n.service_name, 'owner_service_name', n.owner_service, 'loss_line', n.loss_line, 'pipe_target', n.pipe_target, 'runs', n.runs,
+        'audience_id', n.audience_id, 'service_name', n.service_name, 'owner_service_name', n.owner_service, 'loss_line', n.loss_line, 'pipe_target', n.pipe_target, 'script_slug', n.script_slug, 'runs', n.runs,
         'gross', n.m_gross::text, 'net', n.m_net::text, 'vendor', n.m_vendor::text, 'unpriced', n.m_unpriced::text)) FROM none_cost n), '[]'::json) AS none_cost,
       COALESCE((SELECT json_agg(json_build_object(
         'org_id', l.org_key, 'pool_key', l.pool_key, 'workflow_slug', l.workflow_slug, 'campaign_id', l.campaign_id,
@@ -1721,18 +1722,18 @@ function resolvedConsumptionsSql(targetSql: SQL): SQL {
       FROM res
     )
     SELECT r.id, r.run_id, r.outcome_key, r.producer_id, r.producer_run_id, (r.producer_id IS NOT NULL AND r.rn > 1) AS reuse,
-           cr.organization_id AS org_id, cr.brand_ids, cr.campaign_id, cr.workflow_slug, cr.feature_slug, cr.audience_id, cr.service_name,
+           cr.organization_id AS org_id, cr.brand_ids, cr.campaign_id, cr.workflow_slug, cr.feature_slug, cr.audience_id, cr.service_name, cr.script_slug,
            pr.organization_id AS src_org_id, pr.brand_ids AS src_brand_ids, pr.campaign_id AS src_campaign_id,
-           pr.workflow_slug AS src_workflow_slug, pr.feature_slug AS src_feature_slug, pr.audience_id AS src_audience_id,
+           pr.workflow_slug AS src_workflow_slug, pr.feature_slug AS src_feature_slug, pr.audience_id AS src_audience_id, pr.script_slug AS src_script_slug,
            to_char((cr.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
            to_char((r.producer_declared_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS src_day,
            to_char((pr.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS src_run_start_day
     FROM ranked r
     CROSS JOIN LATERAL (
-      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at FROM runs WHERE id = r.run_id OFFSET 0
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at, script_slug FROM runs WHERE id = r.run_id OFFSET 0
     ) cr
     LEFT JOIN LATERAL (
-      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, started_at FROM runs WHERE id = r.producer_run_id OFFSET 0
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, started_at, script_slug FROM runs WHERE id = r.producer_run_id OFFSET 0
     ) pr ON TRUE
     WHERE r.id IN (SELECT id FROM t)`;
 }
@@ -1766,6 +1767,8 @@ export interface RunTags {
   featureSlug: string | null;
   /** The run's audience (the one its lead was served under). */
   audienceId: string | null;
+  /** The stored script the run works for (`<outcome>/<dynasty>/v<version>`, 0111), null = no script. */
+  scriptSlug: string | null;
 }
 
 const tagsOf = (r: any): RunTags => ({
@@ -1774,6 +1777,7 @@ const tagsOf = (r: any): RunTags => ({
   workflowSlug: r.workflow_slug ?? null,
   featureSlug: r.feature_slug ?? null,
   audienceId: r.audience_id ?? null,
+  scriptSlug: r.script_slug ?? null,
 });
 
 /** What runs a read: the stats pool for a request, the day's long-timeout transaction for the refresher. */
@@ -1795,7 +1799,7 @@ async function resolveConsumptions(targetSql: SQL, exec: Exec = statsDb): Promis
     sourceTags: r.producer_run_id
       ? {
           brandIds: r.src_brand_ids ?? null, campaignId: r.src_campaign_id ?? null, workflowSlug: r.src_workflow_slug ?? null,
-          featureSlug: r.src_feature_slug ?? null, audienceId: r.src_audience_id ?? null,
+          featureSlug: r.src_feature_slug ?? null, audienceId: r.src_audience_id ?? null, scriptSlug: r.src_script_slug ?? null,
         }
       : null,
     runStartDay: r.run_start_day ?? null,
@@ -2028,7 +2032,7 @@ async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs
   // covering both nets to zero, a range ending before the reversal still reads it.
   const declared = (await tx.execute(sql`
     SELECT o.outcome_key, r.organization_id::text AS org, r.brand_ids, r.campaign_id, r.workflow_slug, r.feature_slug,
-           r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day,
+           r.audience_id, r.service_name, to_char((r.started_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS run_start_day, r.script_slug,
            SUM(o.sign)::text AS n, SUM(o.sign * o.quantity)::text AS quantity
     FROM (
       SELECT o.run_id, o.outcome_key, o.quantity, 1 AS sign
@@ -2045,12 +2049,12 @@ async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs
         AND v.reversed_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
     ) o
     CROSS JOIN LATERAL (
-      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at
+      SELECT organization_id, brand_ids, campaign_id, workflow_slug, feature_slug, audience_id, service_name, started_at, script_slug
       FROM runs WHERE id = o.run_id OFFSET 0
     ) r
     -- A lead STATE's units are lead-service's first reaches (above), never a declared event of the same key.
     WHERE NOT (o.outcome_key = ANY(${`{${stateKeysOf(inputs).join(",")}}`}::text[]))
-    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
     HAVING SUM(o.sign) <> 0 OR SUM(o.sign * o.quantity) <> 0
   `)) as any[];
   for (const r of declared) {
@@ -2168,11 +2172,11 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     for (const part of splitConsumption(keys, std)) {
       const k = JSON.stringify([
         part.outcomeKey, consumedKey, c.orgId, c.tags.brandIds, c.tags.campaignId, c.tags.workflowSlug, c.tags.featureSlug,
-        c.tags.audienceId, c.serviceName, c.sourceOrgId, c.sourceTags, c.runStartDay, c.sourceDay, c.sourceRunStartDay,
+        c.tags.audienceId, c.tags.scriptSlug, c.serviceName, c.sourceOrgId, c.sourceTags, c.runStartDay, c.sourceDay, c.sourceRunStartDay,
       ]);
       if (!consumed.has(k)) {
         consumed.set(k, {
-          ...blank("consumed", { outcome_key: part.outcomeKey, org: c.orgId, cost_org: c.orgId, ...{ brand_ids: c.tags.brandIds, campaign_id: c.tags.campaignId, workflow_slug: c.tags.workflowSlug, feature_slug: c.tags.featureSlug, audience_id: c.tags.audienceId, service_name: c.serviceName, run_start_day: c.runStartDay } }),
+          ...blank("consumed", { outcome_key: part.outcomeKey, org: c.orgId, cost_org: c.orgId, ...{ brand_ids: c.tags.brandIds, campaign_id: c.tags.campaignId, workflow_slug: c.tags.workflowSlug, feature_slug: c.tags.featureSlug, audience_id: c.tags.audienceId, script_slug: c.tags.scriptSlug, service_name: c.serviceName, run_start_day: c.runStartDay } }),
           consumedOutcomeKey: consumedKey,
           sourceOrganizationId: c.sourceOrgId,
           sourceTags: c.sourceTags,
@@ -2196,7 +2200,7 @@ async function computeLedgerDayIn(tx: Exec, day: string, versions: VendorCostVer
     ...blank("consumed", { outcome_key: r.state, org: r.org, cost_org: r.org, brand_ids: [r.brand_id] }),
     consumedOutcomeKey: r.lower,
     sourceOrganizationId: r.org,
-    sourceTags: { brandIds: [r.brand_id], campaignId: null, workflowSlug: null, featureSlug: null, audienceId: null },
+    sourceTags: { brandIds: [r.brand_id], campaignId: null, workflowSlug: null, featureSlug: null, audienceId: null, scriptSlug: null },
     sourceDay: r.lower_day,
     n: fx(r.n),
     money: ZERO(),
@@ -2251,11 +2255,13 @@ async function insertOutcomeCostRows(tx: Exec, day: string, rows: OutcomeCostRow
       brand_ids, campaign_id, workflow_slug, feature_slug, n, quantity, reuses, unknown_provenance,
       gross, net, vendor, unpriced_gross, reuse_gross, reuse_net, reuse_vendor, reuse_unpriced_gross,
       source_organization_id, source_brand_ids, source_campaign_id, source_workflow_slug, source_feature_slug, support_function,
-      run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target, factory
+      run_start_day, source_day, source_run_start_day, audience_id, source_audience_id, service_name, abnormal_reason, owner_service_name, loss_line, pipe_target, factory,
+      script_slug, source_script_slug
     )
     SELECT ${day}::date, ${ALLOCATION_VERSION}, x.kind, x.ok, x.ck, x.org, x.corg, x.brands, x.cmp, x.wf, x.ft,
            x.n, x.q, x.ru, x.up, x.g, x.ne, x.v, x.u, x.rg, x.rn, x.rv, x.rup,
-           x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt, x.fy
+           x.sorg, x.sbrands, x.scmp, x.swf, x.sft, x.sf, x.rsd, x.sd, x.srsd, x.aud, x.saud, x.svc, x.ar, x.osvc, x.ll, x.pt, x.fy,
+           x.sc, x.ssc
     FROM jsonb_to_recordset(${JSON.stringify(
       rows.map((o) => ({
         kind: o.kind, ok: o.outcomeKey, ck: o.consumedOutcomeKey, org: o.organizationId, corg: o.costOrganizationId,
@@ -2268,12 +2274,13 @@ async function insertOutcomeCostRows(tx: Exec, day: string, rows: OutcomeCostRow
         sf: o.supportFunction,
         rsd: o.runStartDay, sd: o.sourceDay, srsd: o.sourceRunStartDay,
         aud: o.tags.audienceId, saud: o.sourceTags?.audienceId ?? null, svc: o.serviceName, ar: o.abnormalReason, osvc: o.ownerServiceName, ll: o.lossLine, pt: o.pipeTarget, fy: o.factory,
+        sc: o.tags.scriptSlug, ssc: o.sourceTags?.scriptSlug ?? null,
       })),
     )}::jsonb) AS x(kind text, ok text, ck text, org uuid, corg uuid, brands text[], cmp text, wf text, ft text,
                     n numeric, q numeric, ru numeric, up numeric, g numeric, ne numeric, v numeric, u numeric,
                     rg numeric, rn numeric, rv numeric, rup numeric,
                     sorg uuid, sbrands text[], scmp text, swf text, sft text, sf text, rsd date, sd date, srsd date,
-                    aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text, fy text)
+                    aud text, saud text, svc text, ar text, osvc text, ll boolean, pt text, fy text, sc text, ssc text)
   `);
 }
 
@@ -2371,9 +2378,9 @@ export async function storeLedgerDay(d: LedgerDay): Promise<void> {
       `);
     }
     await tx.execute(sql`
-      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, units_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, other_factories, stale)
-      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, true, false)
-      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, units_at = EXCLUDED.units_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, other_factories = true, stale = false
+      INSERT INTO cost_ledger_computed_days (day, allocation_version, computed_at, units_at, outcome_costs, consumed_sources, support_split, start_days, loss_occurrences, owner_service, state_ladder, loss_lines, anchor_spend, state_inputs, pipe_units, our_factory, other_factories, script_slugs, stale)
+      VALUES (${d.day}::date, ${ALLOCATION_VERSION}, ${d.computedAt.toISOString()}::timestamptz, ${d.computedAt.toISOString()}::timestamptz, true, true, true, true, true, true, true, true, true, true, true, true, true, true, false)
+      ON CONFLICT (day, allocation_version) DO UPDATE SET computed_at = EXCLUDED.computed_at, units_at = EXCLUDED.units_at, outcome_costs = true, consumed_sources = true, support_split = true, start_days = true, loss_occurrences = true, owner_service = true, state_ladder = true, loss_lines = true, anchor_spend = true, state_inputs = true, pipe_units = true, our_factory = true, other_factories = true, script_slugs = true, stale = false
     `);
   });
 }
@@ -2967,7 +2974,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   const [t] = (await db.execute(sql`SELECT now() AS at`)) as any[];
   const sweptAt = new Date(t.at);
   const rows = (await db.execute(sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units, our_factory, other_factories FROM cost_ledger_computed_days
+    SELECT to_char(day, 'YYYY-MM-DD') AS day, computed_at, stale, loss_occurrences, anchor_spend, state_ladder, state_inputs, pipe_units, our_factory, other_factories, script_slugs FROM cost_ledger_computed_days
     WHERE allocation_version = ${ALLOCATION_VERSION} AND day >= ${first}::date
       -- a day stored before the outcome totals (0058), the consumed sources (0063),
       -- the support split (0064) or the run-start / source days (0067) is recomputed
@@ -2987,7 +2994,7 @@ export async function daysToCompute(now = new Date(), firstDay?: string, persist
   for (const day of noLossShares) out.add(day);
   // Days stored before the state ladder (0078): the outcome-costs read lists them missing, recomputed with stale days.
   // Same for days computed before only OUR reaches counted (0084, OUR-FACTORY-OUTCOMES-1027).
-  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units || !r.our_factory || !r.other_factories).map((r) => r.day as string));
+  const noLadder = new Set(rows.filter((r) => !r.state_ladder || !r.state_inputs || !r.pipe_units || !r.our_factory || !r.other_factories || !r.script_slugs).map((r) => r.day as string));
   for (const day of noLadder) out.add(day);
   // Recent days first (they feed today's monitor), then days never computed,
   // then stale days, each newest first. Missing before stale: while producers

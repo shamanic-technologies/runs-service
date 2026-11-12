@@ -48,6 +48,7 @@ export const RunSchema = z
     brandProfileId: z.string().uuid().nullable(),
     audienceId: z.string().uuid().nullable(),
     workflowContext: z.string().nullable(),
+    scriptSlug: z.string().nullable().optional().openapi({ description: "The stored script this run works for (`<outcome>/<dynasty>/v<version>`): its own, else its outermost script ancestor's. Null = no script." }),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -92,6 +93,9 @@ export const RunSupportOnCreateSchema = z
   })
   .openapi("RunSupportOnCreate");
 
+/** A stored script's name: `<outcome>/<dynasty>/v<version>` (workflow-service `scriptSlug`). */
+export const SCRIPT_SLUG_RE = /^[a-z][a-z0-9_]*\/[A-Za-z0-9_-]+\/v[1-9][0-9]*$/;
+
 export const CreateRunRequestSchema = z
   .object({
     brandIds: z.array(z.string().uuid()).min(1).optional().openapi({ deprecated: true, description: "Deprecated: use x-brand-id header (CSV) instead. Kept for backwards compatibility; header takes precedence." }),
@@ -102,6 +106,11 @@ export const CreateRunRequestSchema = z
     brandProfileId: z.string().uuid().optional().openapi({ description: "Optional real brand-profile attribution ID. Header x-brand-profile-id takes precedence when present." }),
     audienceId: z.string().uuid().optional().openapi({ description: "Optional audience attribution ID (human-service org-scoped saved filter-set, audience.id). Header x-audience-id takes precedence when present. Inherited from the parent run when not set." }),
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
+    scriptSlug: z.string().regex(SCRIPT_SLUG_RE).optional().openapi({
+      description:
+        "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict). The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
+      example: "email_sent/dy_cold_email/v5",
+    }),
     serviceName: z.string().min(1),
     taskName: z.string().min(1),
     support: RunSupportOnCreateSchema.optional().openapi({
@@ -852,6 +861,41 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: { description: "A root run does not exist (missingRunIds)" },
     409: { description: "A root run already states another feature slug (conflictingRuns)" },
+  },
+});
+
+export const ScriptStatementRequestSchema = z
+  .object({
+    items: z
+      .array(z.object({ rootRunId: z.string().uuid(), scriptSlug: z.string().regex(SCRIPT_SLUG_RE) }).strict())
+      .min(1)
+      .max(500),
+    reason: z.string().trim().min(1),
+    statedBy: z.string().trim().min(1),
+  })
+  .openapi("ScriptStatementRequest");
+
+export const ScriptStatementResponseSchema = z
+  .object({
+    statedRuns: z.number().int(),
+    daysToRecompute: z.number().int().openapi({ description: "Stored ledger days flagged for recompute (a script read lists them in daysMissing until the refresher stores them again)." }),
+    alreadyNamed: z.array(z.object({ runId: z.string().uuid(), scriptSlug: z.string() })).openapi({ description: "Roots that already name ANOTHER script (an outer script's statement or their writer named it): kept, the outermost script wins." }),
+  })
+  .openapi("ScriptStatementResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/runs/script-statements",
+  summary: "Name the stored script recorded run subtrees worked for (MON-SCRIPT-PRICES-2-1111)",
+  description:
+    "The writer of script runs (workflow-service) states, on history recorded before runs carried a script (migration 0111), which script each root run executed: `<outcome>/<dynasty>/v<version>`. For each root and its descendants, every run whose script_slug is NULL gets the root's: one bronze run.script_stated event per run (payload: scriptSlug, reason, statedBy: the audit trail), projected onto runs.script_slug. The walk does not descend below a run stating another script; a root already naming another script keeps it (`alreadyNamed`), and a run reached from two roots takes the outer one's: the OUTERMOST script wins, as at write (state roots in run-start order). Cost amounts never move; the stored ledger days from the earliest stated run's start are recomputed (a script read lists them in daysMissing until then). Idempotent: a re-run states nothing. 404 when a root does not exist, 400 when one root is named with two scripts (nothing written).",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: ScriptStatementRequestSchema } } } },
+  responses: {
+    200: { description: "Statement recorded", content: { "application/json": { schema: ScriptStatementResponseSchema } } },
+    400: { description: "Invalid request, or one root named with two scripts (rootRunIds)", content: { "application/json": { schema: ValidationErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "A root run does not exist (missingRunIds)" },
   },
 });
 
@@ -3814,7 +3858,7 @@ registry.registerPath({
   security: [{ apiKey: [] }],
   request: {
     query: z.object({
-      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section." }),
+      groupBy: z.string().optional().openapi({ description: "Comma list of outcomeKey, day, orgId, costOrgId, brandId, campaignId, workflowSlug, featureSlug, audienceId, serviceName, sourceAudienceId, sourceOrgId, sourceBrandId, sourceCampaignId, sourceWorkflowSlug, sourceFeatureSlug, sourceDay, sourceRunStartDay (source* = the producing run / occurrence of the consumed occurrence; consumed section only), runStartDay (UTC day the row's run started). Empty = one group per section. MON-SCRIPT-PRICES-2-1111 (0111): scriptSlug = the stored script (`<outcome>/<dynasty>/v<version>`) the row's run works for (its own, else its outermost script ancestor's; null = no script); sourceScriptSlug = the script of the run that PRODUCED the consumed occurrence (consumed section only). A day computed before 0111 is listed in daysMissing for a read using either (or the scriptSlug filter) until the refresher recomputes it." }),
       since: z.string().optional().openapi({ description: "YYYY-MM-DD (default: the first stored day)." }),
       until: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive (default: today UTC)." }),
       outcomeKey: z.string().optional(),
@@ -3826,6 +3870,7 @@ registry.registerPath({
       featureSlug: z.string().optional(),
       audienceId: z.string().optional().openapi({ description: "The row's run's audience (the one its lead was served under)." }),
       serviceName: z.string().optional().openapi({ description: "The row's run's service (declaring / consuming / spending run)." }),
+      scriptSlug: z.string().optional().openapi({ description: "The row's run's stored script (`<outcome>/<dynasty>/v<version>`, 0111)." }),
       runStartUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive: only rows whose run started on or before this UTC day (every section)." }),
       sourceDayUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive, consumed section only: the consumed occurrence was declared on or before this UTC day." }),
       sourceRunStartUntil: z.string().optional().openapi({ description: "YYYY-MM-DD inclusive, consumed section only: the run that produced the consumed occurrence started on or before this UTC day." }),

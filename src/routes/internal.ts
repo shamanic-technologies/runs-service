@@ -7,6 +7,7 @@ import { requireInternalAuth } from "../middleware/auth.js";
 import { logRunLifecycle } from "../services/bronze.js";
 import { transferBrand, movedUsage } from "../services/brand-transfer.js";
 import { correctFeatureSlug } from "../services/feature-slug-correction.js";
+import { stateScripts } from "../services/script-statement.js";
 import { lifecycleArchiveStats } from "../services/lifecycle-archive.js";
 import { readOrgProjectedTotal } from "../services/org-projected-totals.js";
 import {
@@ -17,6 +18,7 @@ import {
   OrgActualTotalQuerySchema,
   DeleteRunsByOrgParamsSchema,
   FeatureSlugCorrectionRequestSchema,
+  ScriptStatementRequestSchema,
 } from "../schemas.js";
 
 const router = Router();
@@ -109,6 +111,35 @@ router.post("/internal/runs/feature-slug-corrections", requireInternalAuth, asyn
     });
   } catch (err) {
     console.error("[runs-service] Error in POST /internal/runs/feature-slug-corrections:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /internal/runs/script-statements — name the stored script recorded run subtrees worked for
+// (MON-SCRIPT-PRICES-2-1111). Bronze event per run, projected by the trigger; rule in services/script-statement.ts.
+router.post("/internal/runs/script-statements", requireInternalAuth, async (req, res) => {
+  const parsed = ScriptStatementRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    const r = await stateScripts(parsed.data);
+    if (r.kind === "ambiguous") {
+      res.status(400).json({ error: "A root run is named with two scripts", rootRunIds: r.rootRunIds });
+      return;
+    }
+    if (r.kind === "missing") {
+      res.status(404).json({ error: "Run not found", missingRunIds: r.missingRunIds });
+      return;
+    }
+    console.log(
+      `[runs-service] script-statements: ${r.statedRuns} runs under ${parsed.data.items.length} roots by ${parsed.data.statedBy} ` +
+        `(${parsed.data.reason}); ${r.alreadyNamed.length} roots already named; ${r.daysToRecompute} ledger days to recompute`,
+    );
+    res.json({ statedRuns: r.statedRuns, daysToRecompute: r.daysToRecompute, alreadyNamed: r.alreadyNamed });
+  } catch (err) {
+    console.error("[runs-service] Error in POST /internal/runs/script-statements:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

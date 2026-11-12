@@ -115,6 +115,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       brandProfileId,
       audienceId,
       workflowContext,
+      scriptSlug,
       serviceName,
       taskName,
       idempotencyKey,
@@ -146,6 +147,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     let resolvedCampaignId = req.headerCampaignId || campaignId || null;
     let resolvedWorkflowSlug = req.headerWorkflowSlug || workflowSlug || null;
     let resolvedFeatureSlug = req.headerFeatureSlug || featureSlug || null;
+    let resolvedScriptSlug = scriptSlug ?? null;
     let resolvedOrgId = req.orgId;
     let resolvedUserId = req.userId || null;
     let resolvedAttribution = requestAttribution(req, {
@@ -166,6 +168,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           brandProfileId: runs.brandProfileId,
           audienceId: runs.audienceId,
           workflowContext: runs.workflowContext,
+          scriptSlug: runs.scriptSlug,
           organizationId: runs.organizationId,
           userId: runs.userId,
         })
@@ -222,6 +225,8 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       if (!resolvedCampaignId) resolvedCampaignId = parentRun.campaignId;
       if (!resolvedWorkflowSlug) resolvedWorkflowSlug = parentRun.workflowSlug;
       if (!resolvedFeatureSlug) resolvedFeatureSlug = parentRun.featureSlug;
+      // MON-SCRIPT-PRICES-2-1111: the OUTERMOST script wins (a script nested in another is part of its production).
+      if (parentRun.scriptSlug) resolvedScriptSlug = parentRun.scriptSlug;
       if (!resolvedUserId) resolvedUserId = parentRun.userId;
       resolvedAttribution = inheritAttribution(resolvedAttribution, parentRun);
     }
@@ -247,6 +252,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       workflowSlug: resolvedWorkflowSlug,
       featureSlug: resolvedFeatureSlug,
       ...resolvedAttribution,
+      scriptSlug: resolvedScriptSlug,
       serviceName,
       taskName,
       idempotencyKey: idempotencyKey ?? null,
