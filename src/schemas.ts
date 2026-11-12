@@ -108,7 +108,7 @@ export const CreateRunRequestSchema = z
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
     scriptSlug: z.string().regex(SCRIPT_SLUG_RE).optional().openapi({
       description:
-        "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict). The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
+        "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict), except a script of the SAME Engine (same outcome): a competing candidate tried under it names itself. The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
       example: "email_sent/dy_cold_email/v5",
     }),
     serviceName: z.string().min(1),
