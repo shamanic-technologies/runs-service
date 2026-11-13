@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getInternalAuthHeaders, getPlatformAuthHeaders } from "../helpers/test-app.js";
-import { cleanTestData, closeDb, insertTestRun } from "../helpers/test-db.js";
+import { cleanTestData, closeDb, insertTestRun, insertTestRunCost } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { sql } from "drizzle-orm";
 import { buildOutcomeChains } from "../../src/services/outcome-chains.js";
@@ -18,6 +18,7 @@ const SENT = "chn1113_sent";
 const INTERESTED = "chn1113_interested";
 const W_V1 = "chn1113_written/dy_writer/v1";
 const W_V2 = "chn1113_written/dy_writer/v2";
+const NESTED = "chn1113_other/dy_nested/v1";
 
 const stepCatalogue = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
@@ -55,7 +56,18 @@ describe("SCRIPT-VALUE-RATING-1113: outcome chains", () => {
     const w2 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], status: "completed", startedAt: at("2026-11-11T09:00:00Z") });
     // A writer decision that produced nothing still counts as a run.
     const w3 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], status: "failed", startedAt: at("2026-11-11T10:00:00Z") });
-    Object.assign(ids, { w1: w1.id, w1child: w1child.id, w2: w2.id, w3: w3.id });
+    // A script opened under the v1 decision's own work is its own decision: it pays its own way.
+    const nested = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: NESTED, brandIds: [B1], parentRunId: w1child.id, status: "completed", startedAt: at("2026-11-10T09:00:02Z") });
+    const nestedChild = await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", scriptSlug: NESTED, parentRunId: nested.id, status: "completed", startedAt: at("2026-11-10T09:00:03Z") });
+    Object.assign(ids, { w1: w1.id, w1child: w1child.id, w2: w2.id, w3: w3.id, nested: nested.id, nestedChild: nestedChild.id });
+    // v1 decision: 10 charged on itself + 5 held on its child (net 4); a cancelled 50 is no spend. Nested: 100 + 7.
+    const cost = (runId: string, total: string, extra: Record<string, string> = {}) =>
+      insertTestRunCost({ runId, costName: "chn1113-tokens", quantity: "1", unitCostInUsdCents: total, totalCostInUsdCents: total, ...extra });
+    await cost(w1.id, "10");
+    await cost(w1.id, "50", { status: "cancelled" });
+    await cost(w1child.id, "5", { status: "provisioned", netCostInUsdCents: "4" });
+    await cost(nested.id, "100");
+    await cost(nestedChild.id, "7");
     for (const [k, brand] of [["1", B1], ["2", B1], ["3", B2]] as const) {
       const s = await insertTestRun({ organizationId: ORG, serviceName: "instantly-service", taskName: "send", brandIds: [brand], workflowSlug: "chn1113-send", status: "completed", startedAt: at("2026-11-11T12:00:00Z") });
       ids[`send${k}`] = s.id;
@@ -129,21 +141,63 @@ describe("SCRIPT-VALUE-RATING-1113: outcome chains", () => {
 
   it("script reach: per script run and day, what its chain reached two hops up", async () => {
     const v = await get(`/internal/stats/outcome-chains/script-reach?scriptDynasties=chn1113_written/dy_writer`);
+    const zero = { costInUsdCents: "0", netCostInUsdCents: "0" };
     expect(v.groups).toEqual([
-      { scriptSlug: W_V1, day: "2026-11-10", producedOutcomes: [WRITTEN], reachedOutcomes: [INTERESTED, SENT], runs: 1 },
-      { scriptSlug: W_V2, day: "2026-11-11", producedOutcomes: [], reachedOutcomes: [], runs: 1 },
-      { scriptSlug: W_V2, day: "2026-11-11", producedOutcomes: [WRITTEN], reachedOutcomes: [SENT], runs: 1 },
+      { scriptSlug: W_V1, day: "2026-11-10", producedOutcomes: [WRITTEN], reachedOutcomes: [INTERESTED, SENT], runs: 1, costInUsdCents: "15.0000000000", netCostInUsdCents: "14.0000000000" },
+      { scriptSlug: W_V2, day: "2026-11-11", producedOutcomes: [], reachedOutcomes: [], runs: 1, ...zero },
+      { scriptSlug: W_V2, day: "2026-11-11", producedOutcomes: [WRITTEN], reachedOutcomes: [SENT], runs: 1, ...zero },
+    ]);
+    const nested = await get(`/internal/stats/outcome-chains/script-reach?scriptSlugs=${NESTED}`);
+    expect(nested.groups).toEqual([
+      { scriptSlug: NESTED, day: "2026-11-10", producedOutcomes: [], reachedOutcomes: [], runs: 1, costInUsdCents: "107.0000000000", netCostInUsdCents: "107.0000000000" },
     ]);
     const d = await get(`/internal/stats/outcome-chains/script-reach?scriptDynasties=chn1113_written/dy_writer&groupBy=dynasty&brandId=${B2}&since=2026-11-11&until=2026-11-11`);
     expect(d.groups).toEqual([
-      { scriptDynasty: "chn1113_written/dy_writer", day: "2026-11-11", producedOutcomes: [], reachedOutcomes: [], runs: 1 },
-      { scriptDynasty: "chn1113_written/dy_writer", day: "2026-11-11", producedOutcomes: [WRITTEN], reachedOutcomes: [SENT], runs: 1 },
+      { scriptDynasty: "chn1113_written/dy_writer", day: "2026-11-11", producedOutcomes: [], reachedOutcomes: [], runs: 1, ...zero },
+      { scriptDynasty: "chn1113_written/dy_writer", day: "2026-11-11", producedOutcomes: [WRITTEN], reachedOutcomes: [SENT], runs: 1, ...zero },
     ]);
     const one = await get(`/internal/stats/outcome-chains/script-reach?scriptSlugs=${W_V1}`);
     expect(one.groups.map((g: any) => g.scriptSlug)).toEqual([W_V1]);
   });
 
+  it("a reported Unit resolves to the script decision that made it, in script-reach terms", async () => {
+    const resolve = async (units: unknown[]) => {
+      const res = await request(app).post("/internal/stats/outcome-chains/unit-decisions").set(H).send({ units });
+      expect(res.status).toBe(200);
+      return res.body.units as any[];
+    };
+    // A Unit declared after the last build, on a new decision.
+    const late = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], status: "completed", startedAt: at("2026-11-12T09:00:00Z") });
+    ids.late = late.id;
+    expect((await declare("workflow", [{ runId: late.id, produced: [{ outcomeKey: WRITTEN, ...lead("4") }] }])).status).toBe(201);
+
+    const out = await resolve([
+      { outcomeKey: WRITTEN, ...lead("1") },
+      { outcomeKey: WRITTEN, ...lead("2") }, // declared by the v1 decision's child
+      { outcomeKey: SENT, ...lead("1") }, // the send run names no script
+      { outcomeKey: WRITTEN, ...lead("1"), at: "2026-01-01T00:00:00Z" }, // not declared yet then
+      { outcomeKey: WRITTEN, ...lead("nobody") },
+      { outcomeKey: WRITTEN, ...lead("4") },
+    ]);
+    expect(out.map((u) => [u.status, u.decisionRunId])).toEqual([
+      ["script_decision", ids.w1],
+      ["script_decision", ids.w1],
+      ["no_script", null],
+      ["no_unit", null],
+      ["no_unit", null],
+      ["not_in_build", ids.late],
+    ]);
+    expect(out[0].decision).toEqual({
+      scriptSlug: W_V1, day: "2026-11-10", brandIds: [B1], producedOutcomes: [WRITTEN], reachedOutcomes: [INTERESTED, SENT],
+      costInUsdCents: "15.0000000000", netCostInUsdCents: "14.0000000000",
+    });
+    expect(out[1].runId).toBe(ids.w1child);
+    expect((await request(app).post("/internal/stats/outcome-chains/unit-decisions").set(H).send({ units: [] })).status).toBe(400);
+    expect((await request(app).post("/internal/stats/outcome-chains/unit-decisions").set(H).send({ units: [{ outcomeKey: WRITTEN }] })).status).toBe(400);
+  });
+
   it("a reversed Unit leaves every figure; the changes feed serves exactly the rows that moved", async () => {
+    await buildOutcomeChains(); // takes in the Unit the previous test declared
     // Full copy first, then the cursor.
     let cursor: string | undefined;
     let full: any = { consumed: [], steps: [], reach: [] };

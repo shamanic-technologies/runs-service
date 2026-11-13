@@ -4426,6 +4426,8 @@ export const ScriptReachResponseSchema = z
         producedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of the run's own standing Units ([] = it produced none)." }),
         reachedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of every Unit its chain reached through the edges, any depth (its own Units excluded; [] = nothing consumed them into a Unit)." }),
         runs: z.number().int(),
+        costInUsdCents: z.string().openapi({ description: "What those runs cost, billed gross USD cents (decimal string): each decision run's subtree, incurred (actual + provisioned), minus the subtrees of script decisions opened under its own runs (they are their own decisions)." }),
+        netCostInUsdCents: z.string().openapi({ description: "Same on the frozen net basis (after the org's usage discount)." }),
       }),
     ),
   })
@@ -4477,6 +4479,8 @@ export const OutcomeChainChangesResponseSchema = z
         producedOutcomes: z.array(z.string()),
         reachedOutcomes: z.array(z.string()),
         runs: z.number().int(),
+        costInUsdCents: z.string(),
+        netCostInUsdCents: z.string(),
         updatedAt: z.string(),
       }),
     ),
@@ -4496,6 +4500,69 @@ registry.registerPath({
   responses: {
     200: { description: "Changed rows", content: { "application/json": { schema: OutcomeChainChangesResponseSchema } } },
     400: { description: "Bad cursor or limit", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not built yet", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const UnitDecisionsRequestSchema = z
+  .object({
+    units: z
+      .array(
+        z.object({
+          outcomeKey: z.string(),
+          subjectService: z.string(),
+          subjectId: z.string(),
+          at: z.string().optional().openapi({ description: "Report time (ISO). The Unit standing then is resolved. Default now." }),
+        }),
+      )
+      .openapi({ description: "1..500 Units, named the ledger's way." }),
+  })
+  .openapi("UnitDecisionsRequest");
+
+export const UnitDecisionsResponseSchema = z
+  .object({
+    builtAt: z.string(),
+    units: z.array(
+      z.object({
+        outcomeKey: z.string(),
+        subjectService: z.string(),
+        subjectId: z.string(),
+        at: z.string(),
+        status: z.enum(["script_decision", "no_script", "no_unit", "not_in_build"]).openapi({
+          description: "script_decision = decision below is its script-reach row key; no_script = the run that declared the Unit names no script; no_unit = no standing Unit at `at`; not_in_build = a script decision opened after the last build (ask again after the next one).",
+        }),
+        occurrenceId: z.string().nullable(),
+        runId: z.string().nullable().openapi({ description: "The run that declared the Unit." }),
+        decisionRunId: z.string().nullable(),
+        decision: z
+          .object({
+            scriptSlug: z.string(),
+            day: z.string(),
+            brandIds: z.array(z.string()),
+            producedOutcomes: z.array(z.string()),
+            reachedOutcomes: z.array(z.string()),
+            costInUsdCents: z.string(),
+            netCostInUsdCents: z.string(),
+          })
+          .nullable()
+          .openapi({ description: "The decision as the last build counted it: exactly one of the `runs` of the script-reach row with this key (scriptSlug, day, brandIds, producedOutcomes, reachedOutcomes), and its share of that row's cost." }),
+      }),
+    ),
+  })
+  .openapi("UnitDecisionsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/stats/outcome-chains/unit-decisions",
+  summary: "The script decision that made each named Unit, in script-reach terms (service-auth only)",
+  description:
+    "Per Unit: the produced occurrence standing at `at` (same key, same canonical subject incl. stated equivalences, latest declared at or before it, not reversed by then), the run that declared it, and its decision: that run must name a script (own Units = Units of script runs, as in the build), the decision being its topmost ancestor naming the same script.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: UnitDecisionsRequestSchema } } } },
+  responses: {
+    200: { description: "One answer per Unit, in request order", content: { "application/json": { schema: UnitDecisionsResponseSchema } } },
+    400: { description: "units missing, empty, > 500 or malformed", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     503: { description: "Not built yet", content: { "application/json": { schema: ErrorSchema } } },
   },

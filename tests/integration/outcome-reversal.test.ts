@@ -60,8 +60,10 @@ async function performerCount(until: string) {
   return { group: res.body.groups[0]?.count ?? 0, total: res.body.totals.count };
 }
 
+// Scoped to this file's org: other files of the shard reverse Units too (service-calls, outcome-chains).
 const reversedEvents = async () =>
-  Number(((await db.execute(sql`SELECT count(*)::int AS n FROM outcome_declaration_events WHERE event_type = 'outcomes.reversed'`)) as any[])[0].n);
+  Number(((await db.execute(sql`SELECT count(*)::int AS n FROM outcome_declaration_events WHERE event_type = 'outcomes.reversed'
+    AND run_id IN (SELECT id FROM runs WHERE organization_id = ${ORG}::uuid)`)) as any[])[0].n);
 
 describe("LEDGER-REVERSAL-1107: the declaring service reverses a produced occurrence", () => {
   let runId: string;
