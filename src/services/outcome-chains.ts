@@ -153,22 +153,34 @@ reached AS (
   WHERE w.occ_id IS NULL
   GROUP BY 1
 ),
+-- What a decision cost: its run's subtree (run_subtree_costs, 0086), minus the subtrees of the script decisions
+-- opened under its own runs (a nested script is its own decision and pays its own way). Incurred = actual + provisioned.
+nested_cost AS (
+  SELECT d.decision_id, sum(c.gross_actual + c.gross_provisioned) AS gross, sum(c.net_actual + c.net_provisioned) AS net
+  FROM roots r JOIN dec d ON d.run_id = r.parent_run_id JOIN run_subtree_costs c ON c.run_id = r.id
+  GROUP BY 1
+),
 reach AS (
-  SELECT s.script_slug, to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+  SELECT s.id, s.script_slug, to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
          COALESCE(ARRAY(SELECT DISTINCT b FROM unnest(s.brand_ids) b WHERE b IS NOT NULL ORDER BY b), '{}') AS brands,
-         COALESCE(ok.keys, '{}') AS produced, COALESCE(rc.keys, '{}') AS reached
+         COALESCE(ok.keys, '{}') AS produced, COALESCE(rc.keys, '{}') AS reached,
+         COALESCE(c.gross_actual + c.gross_provisioned, 0) - COALESCE(n.gross, 0) AS cost,
+         COALESCE(c.net_actual + c.net_provisioned, 0) - COALESCE(n.net, 0) AS net_cost
   FROM roots s
   LEFT JOIN own_keys ok ON ok.decision_id = s.id
   LEFT JOIN reached rc ON rc.decision_id = s.id
+  LEFT JOIN run_subtree_costs c ON c.run_id = s.id
+  LEFT JOIN nested_cost n ON n.decision_id = s.id
 )
 SELECT 'consumed' AS t, jsonb_build_object('from_outcome', x_key, 'brand_ids', to_jsonb(brands), 'consumed_units', n) AS r FROM consumed
 UNION ALL
 SELECT 'steps', jsonb_build_object('from_outcome', t.x_key, 'to_outcome', t.y_key, 'brand_ids', to_jsonb(t.brands), 'led_units', t.n, 'led_units_by_performer', k.by_kind)
 FROM steps_total t JOIN steps_kind k ON k.x_key = t.x_key AND k.y_key = t.y_key AND k.brands = t.brands
 UNION ALL
-SELECT 'reach', jsonb_build_object('script_slug', script_slug, 'day', day, 'brand_ids', to_jsonb(brands), 'produced_outcomes', to_jsonb(produced),
-                                   'reached_outcomes', to_jsonb(reached), 'runs', count(*)::int)
-FROM reach GROUP BY script_slug, day, brands, produced, reached
+SELECT 'decision', jsonb_build_object('decision_run_id', id, 'script_slug', script_slug, 'day', day, 'brand_ids', to_jsonb(brands),
+                                      'produced_outcomes', to_jsonb(produced), 'reached_outcomes', to_jsonb(reached),
+                                      'cost', cost::text, 'net_cost', net_cost::text)
+FROM reach
 `);
 
 export interface OutcomeChainBuild {
@@ -219,17 +231,25 @@ async function writeTable(tx: any, table: OutcomeChainTable, rows: unknown[], st
     )
     SELECT (SELECT count(*) FROM up) + (SELECT count(*) FROM gone) AS changed`
         : sql`
-    WITH n AS (SELECT * FROM jsonb_to_recordset(${json}::jsonb) AS x(script_slug text, day date, brand_ids text[], produced_outcomes text[], reached_outcomes text[], runs int)),
+    -- Grouped from the decisions this build just wrote (writeDecisions), never from the payload.
+    WITH n AS MATERIALIZED (
+      SELECT script_slug, day, brand_ids, produced_outcomes, reached_outcomes, count(*)::int AS runs,
+             sum(cost_in_usd_cents) AS cost, sum(net_cost_in_usd_cents) AS net_cost
+      FROM script_chain_decisions GROUP BY 1, 2, 3, 4, 5
+    ),
     up AS (
-      INSERT INTO script_chain_reach (script_slug, day, brand_ids, produced_outcomes, reached_outcomes, runs, updated_at)
-      SELECT script_slug, day, brand_ids, produced_outcomes, reached_outcomes, runs, ${stamp}::timestamptz FROM n
-      ON CONFLICT (script_slug, day, brand_ids, produced_outcomes, reached_outcomes) DO UPDATE SET runs = EXCLUDED.runs, updated_at = EXCLUDED.updated_at
-      WHERE script_chain_reach.runs IS DISTINCT FROM EXCLUDED.runs
+      INSERT INTO script_chain_reach (script_slug, day, brand_ids, produced_outcomes, reached_outcomes, runs, cost_in_usd_cents, net_cost_in_usd_cents, updated_at)
+      SELECT script_slug, day, brand_ids, produced_outcomes, reached_outcomes, runs, cost, net_cost, ${stamp}::timestamptz FROM n
+      ON CONFLICT (script_slug, day, brand_ids, produced_outcomes, reached_outcomes) DO UPDATE
+        SET runs = EXCLUDED.runs, cost_in_usd_cents = EXCLUDED.cost_in_usd_cents, net_cost_in_usd_cents = EXCLUDED.net_cost_in_usd_cents,
+            updated_at = EXCLUDED.updated_at
+      WHERE (script_chain_reach.runs, script_chain_reach.cost_in_usd_cents, script_chain_reach.net_cost_in_usd_cents)
+            IS DISTINCT FROM (EXCLUDED.runs, EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents)
       RETURNING 1
     ),
     gone AS (
-      UPDATE script_chain_reach t SET runs = 0, updated_at = ${stamp}::timestamptz
-      WHERE t.runs <> 0
+      UPDATE script_chain_reach t SET runs = 0, cost_in_usd_cents = 0, net_cost_in_usd_cents = 0, updated_at = ${stamp}::timestamptz
+      WHERE (t.runs <> 0 OR t.cost_in_usd_cents <> 0 OR t.net_cost_in_usd_cents <> 0)
         AND NOT EXISTS (SELECT 1 FROM n WHERE n.script_slug = t.script_slug AND n.day = t.day AND n.brand_ids = t.brand_ids
                                           AND n.produced_outcomes = t.produced_outcomes AND n.reached_outcomes = t.reached_outcomes)
       RETURNING 1
@@ -237,6 +257,30 @@ async function writeTable(tx: any, table: OutcomeChainTable, rows: unknown[], st
     SELECT (SELECT count(*) FROM up) + (SELECT count(*) FROM gone) AS changed`;
   const [r] = (await tx.execute(q)) as Array<{ changed: string | number }>;
   return Number(r.changed);
+}
+
+/** Every decision's row key + cost (script_chain_decisions): upsert what moved, delete what no build produces. */
+async function writeDecisions(tx: any, rows: unknown[], stamp: string): Promise<void> {
+  await tx.execute(sql`
+    WITH n AS MATERIALIZED (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+        AS x(decision_run_id uuid, script_slug text, day date, brand_ids text[], produced_outcomes text[], reached_outcomes text[], cost numeric, net_cost numeric)
+    ),
+    up AS (
+      INSERT INTO script_chain_decisions (decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost_in_usd_cents, net_cost_in_usd_cents, updated_at)
+      SELECT decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost, net_cost, ${stamp}::timestamptz FROM n
+      ON CONFLICT (decision_run_id) DO UPDATE
+        SET script_slug = EXCLUDED.script_slug, day = EXCLUDED.day, brand_ids = EXCLUDED.brand_ids, produced_outcomes = EXCLUDED.produced_outcomes,
+            reached_outcomes = EXCLUDED.reached_outcomes, cost_in_usd_cents = EXCLUDED.cost_in_usd_cents,
+            net_cost_in_usd_cents = EXCLUDED.net_cost_in_usd_cents, updated_at = EXCLUDED.updated_at
+      WHERE (script_chain_decisions.script_slug, script_chain_decisions.day, script_chain_decisions.brand_ids, script_chain_decisions.produced_outcomes,
+             script_chain_decisions.reached_outcomes, script_chain_decisions.cost_in_usd_cents, script_chain_decisions.net_cost_in_usd_cents)
+            IS DISTINCT FROM (EXCLUDED.script_slug, EXCLUDED.day, EXCLUDED.brand_ids, EXCLUDED.produced_outcomes, EXCLUDED.reached_outcomes,
+                              EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents)
+      RETURNING 1
+    ),
+    gone AS (DELETE FROM script_chain_decisions t WHERE NOT EXISTS (SELECT 1 FROM n WHERE n.decision_run_id = t.decision_run_id) RETURNING 1)
+    SELECT (SELECT count(*) FROM up) + (SELECT count(*) FROM gone) AS changed`);
 }
 
 const RUN_ATTRS_RECHECK = 50_000;
@@ -273,13 +317,16 @@ export async function buildOutcomeChains(): Promise<OutcomeChainBuild | null> {
   building = true;
   try {
     const t0 = Date.now();
+    const [stamped] = (await db.execute(sql`SELECT EXISTS (SELECT 1 FROM stats_rollups WHERE name = 'subtree_cost') AS ok`)) as Array<{ ok: boolean }>;
+    // A decision's cost is read off run_subtree_costs (0086): an unstamped rollup would price every decision wrong.
+    if (!stamped.ok) throw new Error("run_subtree_costs is not stamped (subtree_cost): rebuild it before building outcome chains");
     await refreshRunAttrs();
     const rows = (await statsDb.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`);
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${BUILD_TIMEOUT}'`));
       return tx.execute(OUTCOME_CHAIN_BUILD_SQL);
-    })) as Array<{ t: OutcomeChainTable; r: unknown }>;
-    const by: Record<OutcomeChainTable, unknown[]> = { consumed: [], steps: [], reach: [] };
+    })) as Array<{ t: OutcomeChainTable | "decision"; r: unknown }>;
+    const by: Record<OutcomeChainTable | "decision", unknown[]> = { consumed: [], steps: [], reach: [], decision: [] };
     for (const row of rows) by[row.t].push(row.r);
 
     return await db.transaction(async (tx) => {
@@ -290,14 +337,16 @@ export async function buildOutcomeChains(): Promise<OutcomeChainBuild | null> {
         SELECT to_char(GREATEST(clock_timestamp(), (SELECT max(built_at) + interval '1 millisecond' FROM outcome_chain_builds)) AT TIME ZONE 'UTC',
                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS stamp`)) as Array<{ stamp: string }>;
       let changed = 0;
+      await writeDecisions(tx, by.decision, s.stamp);
       for (const t of OUTCOME_CHAIN_TABLES) changed += await writeTable(tx, t, by[t], s.stamp);
+      const [rc] = (await tx.execute(sql`SELECT count(*)::int AS n FROM script_chain_reach WHERE runs > 0`)) as Array<{ n: number }>;
       const build: OutcomeChainBuild = {
         builtAt: s.stamp,
         durationMs: Date.now() - t0,
         changedRows: changed,
         consumedRows: by.consumed.length,
         stepRows: by.steps.length,
-        reachRows: by.reach.length,
+        reachRows: rc.n,
       };
       await tx.execute(sql`
         INSERT INTO outcome_chain_builds (built_at, duration_ms, changed_rows, consumed_rows, step_rows, reach_rows)
@@ -424,10 +473,11 @@ export async function readScriptReach(f: ScriptReachFilter) {
     if (f.until) where.push(sql`day <= ${f.until}::date`);
     const key = f.groupBy === "dynasty" ? DYNASTY_SQL : sql.raw("script_slug");
     const rows = (await tx.execute(sql`
-      SELECT ${key} AS script, to_char(day, 'YYYY-MM-DD') AS day, produced_outcomes, reached_outcomes, sum(runs)::int AS runs
+      SELECT ${key} AS script, to_char(day, 'YYYY-MM-DD') AS day, produced_outcomes, reached_outcomes, sum(runs)::int AS runs,
+             sum(cost_in_usd_cents)::text AS cost, sum(net_cost_in_usd_cents)::text AS net_cost
       FROM script_chain_reach WHERE ${sql.join(where, sql` AND `)}
       GROUP BY 1, 2, 3, 4
-      ORDER BY 1, 2, 3, 4`)) as Array<{ script: string; day: string; produced_outcomes: string[]; reached_outcomes: string[]; runs: number }>;
+      ORDER BY 1, 2, 3, 4`)) as Array<{ script: string; day: string; produced_outcomes: string[]; reached_outcomes: string[]; runs: number; cost: string; net_cost: string }>;
     return {
       builtAt: build.builtAt,
       brandId: f.brandId,
@@ -438,6 +488,8 @@ export async function readScriptReach(f: ScriptReachFilter) {
         producedOutcomes: r.produced_outcomes,
         reachedOutcomes: r.reached_outcomes,
         runs: r.runs,
+        costInUsdCents: r.cost,
+        netCostInUsdCents: r.net_cost,
       })),
     };
   });
@@ -480,7 +532,7 @@ const TABLE_SQL: Record<OutcomeChainTable, { name: string; cols: string }> = {
   },
   reach: {
     name: "script_chain_reach",
-    cols: "script_slug AS \"scriptSlug\", to_char(day, 'YYYY-MM-DD') AS day, brand_ids AS \"brandIds\", produced_outcomes AS \"producedOutcomes\", reached_outcomes AS \"reachedOutcomes\", runs",
+    cols: "script_slug AS \"scriptSlug\", to_char(day, 'YYYY-MM-DD') AS day, brand_ids AS \"brandIds\", produced_outcomes AS \"producedOutcomes\", reached_outcomes AS \"reachedOutcomes\", runs, cost_in_usd_cents::text AS \"costInUsdCents\", net_cost_in_usd_cents::text AS \"netCostInUsdCents\"",
   },
 };
 
@@ -528,5 +580,104 @@ export async function readOutcomeChainChanges(rawCursor: string | undefined, lim
       lastId = "0";
     }
     return { builtAt: build.builtAt, ...out, nextCursor: encode({ v: 1, a: b }), caughtUp: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// A reported Unit -> the script decision that made it, in script-reach terms
+// ---------------------------------------------------------------------------
+
+export const MAX_UNITS_PER_RESOLVE = 500;
+
+export interface UnitToResolve {
+  outcomeKey: string;
+  subjectService: string;
+  subjectId: string;
+  /** The report time: the Unit standing then is the one resolved. */
+  at: string;
+}
+
+/**
+ * For each Unit named the ledger's way, the produced occurrence standing at `at`
+ * (same key, same canonical subject incl. stated equivalences, latest declared at or
+ * before it, not reversed by then; id breaks ties), then its decision: the run that
+ * declared it must name a script (as in the build: own Units are Units of script
+ * runs), and the decision is that run's topmost ancestor naming the same script.
+ * The decision's row key + cost come from the last build (script_chain_decisions).
+ */
+export async function resolveUnitDecisions(units: UnitToResolve[]) {
+  return statsDb.transaction(async (tx) => {
+    await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`);
+    await tx.execute(sql`SET LOCAL statement_timeout = '60s'`);
+    const build = await lastBuild(tx);
+    const input = JSON.stringify(units.map((u, i) => ({ i, k: u.outcomeKey, s: u.subjectService, sid: u.subjectId, at: u.at })));
+    const rows = (await tx.execute(sql`
+      WITH RECURSIVE
+      u AS MATERIALIZED (SELECT * FROM jsonb_to_recordset(${input}::jsonb) AS x(i int, k text, s text, sid text, at timestamptz)),
+      canon AS MATERIALIZED (
+        SELECT u.i, u.k, u.at, COALESCE(e.target_service, u.s) AS cs, COALESCE(e.target_id, u.sid) AS cid
+        FROM u LEFT JOIN subject_equivalences e ON e.subject_service = u.s AND e.subject_id = u.sid
+      ),
+      mem AS (
+        SELECT i, k, at, cs AS ms, cid AS mid FROM canon
+        UNION
+        SELECT c.i, c.k, c.at, e.subject_service, e.subject_id FROM canon c JOIN subject_equivalences e ON e.target_service = c.cs AND e.target_id = c.cid
+      ),
+      pick AS MATERIALIZED (
+        SELECT DISTINCT ON (m.i) m.i, o.id, o.run_id
+        FROM mem m
+        CROSS JOIN LATERAL (
+          SELECT o.id, o.run_id, o.declared_at FROM run_outcomes o
+          WHERE o.direction = 'produced' AND o.outcome_key = m.k AND o.subject_service = m.ms AND o.subject_id = m.mid AND o.declared_at <= m.at
+            AND NOT EXISTS (SELECT 1 FROM run_outcome_reversals rv WHERE rv.occurrence_id = o.id AND rv.reversed_at <= m.at)
+          OFFSET 0
+        ) o
+        ORDER BY m.i, o.declared_at DESC, o.id DESC
+      ),
+      walk(i, cur_id, parent_id, slug, depth) AS (
+        SELECT p.i, r.id, r.parent_run_id, r.script_slug, 0
+        FROM pick p CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug FROM runs WHERE id = p.run_id OFFSET 0) r
+        WHERE r.script_slug IS NOT NULL
+        UNION ALL
+        SELECT w.i, q.id, q.parent_run_id, q.script_slug, w.depth + 1
+        FROM walk w CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug FROM runs WHERE id = w.parent_id OFFSET 0) q
+        WHERE q.script_slug = w.slug AND w.depth < 50
+      ),
+      dec AS (SELECT DISTINCT ON (i) i, cur_id FROM walk ORDER BY i, depth DESC)
+      SELECT u.i, p.id AS occurrence_id, p.run_id, d.cur_id AS decision_run_id,
+             c.script_slug, to_char(c.day, 'YYYY-MM-DD') AS day, c.brand_ids, c.produced_outcomes, c.reached_outcomes,
+             c.cost_in_usd_cents::text AS cost, c.net_cost_in_usd_cents::text AS net_cost
+      FROM u
+      LEFT JOIN pick p ON p.i = u.i
+      LEFT JOIN dec d ON d.i = u.i
+      LEFT JOIN script_chain_decisions c ON c.decision_run_id = d.cur_id
+      ORDER BY u.i
+    `)) as any[];
+    return {
+      builtAt: build.builtAt,
+      units: rows.map((r) => {
+        const u = units[r.i];
+        const status = !r.occurrence_id ? "no_unit" : !r.decision_run_id ? "no_script" : !r.script_slug ? "not_in_build" : "script_decision";
+        return {
+          ...u,
+          status,
+          occurrenceId: r.occurrence_id ?? null,
+          runId: r.run_id ?? null,
+          decisionRunId: r.decision_run_id ?? null,
+          decision:
+            status === "script_decision"
+              ? {
+                  scriptSlug: r.script_slug,
+                  day: r.day,
+                  brandIds: r.brand_ids,
+                  producedOutcomes: r.produced_outcomes,
+                  reachedOutcomes: r.reached_outcomes,
+                  costInUsdCents: r.cost,
+                  netCostInUsdCents: r.net_cost,
+                }
+              : null,
+        };
+      }),
+    };
   });
 }

@@ -809,6 +809,12 @@ serves COUNTS only (no value, no ranking, no outcome named in code). `src/servic
   `script_chain_reach` (script slug x decision start UTC day x brand set x sorted own keys x sorted reached keys -> runs; a decision =
   a run naming a script whose parent does not name the same one). Diff write: a moved row is stamped with the build instant, a row the
   build no longer produces is ZEROED (never deleted), so `GET /internal/stats/outcome-chains/changes` serves every change by cursor.
+- **Decision cost + key (migration 0113)**: `script_chain_decisions` keeps each decision's row key + its cost = the decision run's
+  `run_subtree_costs` (incurred: actual + provisioned, gross + frozen net) minus the subtrees of script decisions opened under its
+  own runs (edge not covered: a nested script under a script-less platform child is counted in both). `script_chain_reach` is
+  grouped from it in SQL, so `runs` and `costInUsdCents` / `netCostInUsdCents` move together. The build refuses to run while
+  `subtree_cost` is unstamped. `POST /internal/stats/outcome-chains/unit-decisions` resolves a reported Unit (key + subject + report
+  time) to its decision row key (status `script_decision | no_script | no_unit | not_in_build`).
 - **Reads**: `GET /internal/stats/outcome-chains/step-rates[?brandId]`, `/script-reach[?brandId&scriptSlugs&scriptDynasties&since&until&groupBy=version|dynasty]`,
   `/changes[?cursor&limit]`; 503 until the first build. Fleet = sum of rows; brand B = rows whose set holds B (each Unit / run in one row).
 - **Cost**: one read-only statement on statsDb (own tx, 900 s), prod 2026-11-13 ~1.3M occurrences / 640k consumptions / 540k edges /
