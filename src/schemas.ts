@@ -4417,6 +4417,10 @@ export const ScriptReachResponseSchema = z
   .object({
     builtAt: z.string(),
     brandId: z.string().nullable(),
+    campaignIds: z
+      .array(z.string())
+      .optional()
+      .openapi({ description: "Present only when the read was narrowed with campaignIds: the campaign ids it kept (deduped, as asked)." }),
     groupBy: z.enum(["version", "dynasty"]),
     groups: z.array(
       z.object({
@@ -4444,6 +4448,13 @@ registry.registerPath({
       brandId: z.string().optional(),
       scriptSlugs: z.string().optional().openapi({ description: "Comma-separated script slugs (<= 200)." }),
       scriptDynasties: z.string().optional().openapi({ description: "Comma-separated `<outcome>/<dynasty>` (<= 200)." }),
+      campaignIds: z
+        .string()
+        .optional()
+        .openapi({
+          description:
+            "Comma-separated campaign ids (<= 200): only the script decisions run FOR these campaigns (the campaign the decision run was opened under; a funnel campaign = pass its unit campaign ids). Same groups, same figures definitions; absent = every decision (unchanged answer). A decision opened after the last build is not counted until the next build (~15 min).",
+        }),
       since: z.string().optional().openapi({ description: "First UTC day, YYYY-MM-DD." }),
       until: z.string().optional().openapi({ description: "Last UTC day, YYYY-MM-DD." }),
       groupBy: z.enum(["version", "dynasty"]).optional().openapi({ description: "Default version (one group per script slug)." }),
