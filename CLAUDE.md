@@ -25,6 +25,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/incurred-costs.ts` — late declaration of never-charged past spend (preview + apply). See "Incurred, never-charged costs".
 - `src/routes/no-campaign-spend.ts` — `GET /internal/org-no-campaign-total` (billing hot path) + `GET /internal/stats/costs/no-campaign/monthly` (staff). See "Campaign spend vs no-campaign spend".
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
+- `src/routes/outcome-chains.ts` + `src/services/outcome-chains.ts` — the produce / consume graph summarised for the script Rating (one-step rates, chain reach per script run, changes feed). See "Outcome chains".
 - `src/routes/health.ts` — Health check endpoint
 - `src/routes/service-calls.ts` + `src/services/service-calls.ts` + `src/services/decision-units.ts` — every call of one service (fleet, history then changes) + Units per decision. See "Every call of one service".
 - `src/routes/brand-ledger.ts` + `src/services/brand-ledger.ts` — the books of one brand + its production orders: staff `GET /internal/brands/:brandId/ledger(/runs)` (brand-wide, every org, vendor figures) and the CUSTOMER twin `GET /v1/brands/:brandId/ledger(/runs)` (FACTORY-USER-LEDGER-1102: `requireApiKey`, only the x-org-id org's runs and stored rows, keyed on the RUN's org `outcome_cost_days.organization_id` / `runs.organization_id`; billed gross + net only, never `vendorCents`/`unpricedGrossCents`). A brand id is held by several orgs (29/188 in prod): never serve a customer the staff read. Per brand, the orgs' figures add up to the staff read. Guard: `tests/integration/brand-ledger-customer.test.ts`. Default `since` = the brand's OWN first spend day (in the caller's org for the customer twin; `firstBrandSpendDay`, consumption rollup 0090), never the fleet's: a brand born 2026-10-27 listed ~270 pre-birth days as missing (LEDGER-BRAND-SINCE-1106). A STALE stored day is served at its last computed figures and listed in `daysStale`; `daysMissing` = never stored (LEDGER-BRAND-SINCE-1106-B: instantly's later sends declare on runs charged days earlier and re-staled every day 10-21..11-06 within minutes of each recompute, a $315 brand read $0).
@@ -824,6 +825,27 @@ no past stats lost). Nothing here knows what an LLM or a model is: the caller na
   Reversed Units are in no list. **`GET /internal/stats/decision-units/changes?cursor`**: decisions named by outcome facts
   recorded in the window (the run's own + the producers of its consumptions); cursor absent = start now.
 - Guard: `tests/integration/service-calls.test.ts`.
+
+## Outcome chains — what a script's Units led to, any depth (migration 0112, SCRIPT-VALUE-RATING-1113-RUNS)
+
+features-service's script Rating credits a script run with the strongest outcome its chain reached (owner 2026-11-13). runs-service
+serves COUNTS only (no value, no ranking, no outcome named in code). `src/services/outcome-chains.ts` + `src/routes/outcome-chains.ts`.
+- **Edge X -> Y**: a consumption resolves to its Unit X (the ledger's rule, `resolveConsumptions`'s SQL redone set-based on a 64-bit
+  hash of the canonical subject + the texts), Y = every Unit the consuming run's anchor (self, else nearest producing ancestor; a mark
+  stops) produced for the SAME subject (a per-org-day reply judge links each reply to its own lead's send). Reversed Units: nowhere.
+- **Tables** (rebuilt whole by an in-process job ~90 s after listen, then 15 min after each build ENDS; kill switch
+  `OUTCOME_CHAINS_BUILD=off`): `outcome_chain_consumed` (X key x X run's sorted brand set -> distinct consumed X Units),
+  `outcome_chain_steps` (+ Y key -> distinct X Units leading to a Y Unit, split by Y's effective performer kind),
+  `script_chain_reach` (script slug x decision start UTC day x brand set x sorted own keys x sorted reached keys -> runs; a decision =
+  a run naming a script whose parent does not name the same one). Diff write: a moved row is stamped with the build instant, a row the
+  build no longer produces is ZEROED (never deleted), so `GET /internal/stats/outcome-chains/changes` serves every change by cursor.
+- **Reads**: `GET /internal/stats/outcome-chains/step-rates[?brandId]`, `/script-reach[?brandId&scriptSlugs&scriptDynasties&since&until&groupBy=version|dynasty]`,
+  `/changes[?cursor&limit]`; 503 until the first build. Fleet = sum of rows; brand B = rows whose set holds B (each Unit / run in one row).
+- **Cost**: one read-only statement on statsDb (own tx, 900 s), prod 2026-11-13 ~1.3M occurrences / 640k consumptions / 540k edges /
+  186k decisions. Script runs come off `idx_runs_script_slug_cover` (partial, built CONCURRENTLY out-of-band on prod: a seq scan of
+  `runs` was 24 s); run brands / workflows from `outcome_chain_run_attrs` (500k PK probes were 57 s, a seq-scan hash join 30 s): each build adds the runs
+  holding an occurrence it lacks and re-reads the oldest-checked 50k (a brand transfer is seen within ~11 builds); a run declared
+  between that fill and the read is read from `runs`. Result 2026-11-13: 233 consumed / 262 step / 1,095 reach rows. Guard: `tests/integration/outcome-chains.test.ts`.
 
 ## Dashboard v2 reads — precomputed where a scan cannot be fast (migration 0040)
 

@@ -11751,6 +11751,294 @@
           "caughtUp",
           "coveredUntil"
         ]
+      },
+      "OutcomeStepRatesResponse": {
+        "type": "object",
+        "properties": {
+          "builtAt": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string",
+            "nullable": true,
+            "description": "null = the whole fleet."
+          },
+          "consumed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcome": {
+                  "type": "string"
+                },
+                "consumedUnits": {
+                  "type": "integer",
+                  "description": "Distinct Units of this outcome some run consumed."
+                }
+              },
+              "required": [
+                "outcome",
+                "consumedUnits"
+              ]
+            },
+            "description": "Every outcome whose Units were ever consumed (the denominators)."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fromOutcome": {
+                  "type": "string"
+                },
+                "toOutcome": {
+                  "type": "string"
+                },
+                "consumedUnits": {
+                  "type": "integer",
+                  "description": "Distinct consumed Units of fromOutcome (= consumed[].consumedUnits)."
+                },
+                "ledUnits": {
+                  "type": "integer",
+                  "description": "Of those, the Units whose consuming run produced a Unit of toOutcome for the same subject."
+                },
+                "share": {
+                  "type": "number",
+                  "nullable": true,
+                  "description": "ledUnits / consumedUnits, 6 decimals."
+                },
+                "ledUnitsByPerformer": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "description": "ledUnits split by the toOutcome Unit's effective performer kind (stated, else 'script' when its run carries a workflow, else 'none'). A Unit leading to Units of two kinds counts under both."
+                }
+              },
+              "required": [
+                "fromOutcome",
+                "toOutcome",
+                "consumedUnits",
+                "ledUnits",
+                "share",
+                "ledUnitsByPerformer"
+              ]
+            },
+            "description": "Only pairs production actually chained; a pair never chained is absent."
+          }
+        },
+        "required": [
+          "builtAt",
+          "brandId",
+          "consumed",
+          "steps"
+        ]
+      },
+      "ScriptReachResponse": {
+        "type": "object",
+        "properties": {
+          "builtAt": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string",
+            "nullable": true
+          },
+          "groupBy": {
+            "type": "string",
+            "enum": [
+              "version",
+              "dynasty"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "scriptSlug": {
+                  "type": "string",
+                  "description": "groupBy=version: `<outcome>/<dynasty>/v<version>`."
+                },
+                "scriptDynasty": {
+                  "type": "string",
+                  "description": "groupBy=dynasty: `<outcome>/<dynasty>`."
+                },
+                "day": {
+                  "type": "string",
+                  "description": "UTC day the script run (decision) started."
+                },
+                "producedOutcomes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Sorted outcomes of the run's own standing Units ([] = it produced none)."
+                },
+                "reachedOutcomes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Sorted outcomes of every Unit its chain reached through the edges, any depth (its own Units excluded; [] = nothing consumed them into a Unit)."
+                },
+                "runs": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "day",
+                "producedOutcomes",
+                "reachedOutcomes",
+                "runs"
+              ]
+            }
+          }
+        },
+        "required": [
+          "builtAt",
+          "brandId",
+          "groupBy",
+          "groups"
+        ]
+      },
+      "OutcomeChainChangesResponse": {
+        "type": "object",
+        "properties": {
+          "builtAt": {
+            "type": "string"
+          },
+          "consumed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fromOutcome": {
+                  "type": "string"
+                },
+                "brandIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "consumedUnits": {
+                  "type": "integer"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fromOutcome",
+                "brandIds",
+                "consumedUnits",
+                "updatedAt"
+              ]
+            }
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fromOutcome": {
+                  "type": "string"
+                },
+                "toOutcome": {
+                  "type": "string"
+                },
+                "brandIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "ledUnits": {
+                  "type": "integer"
+                },
+                "ledUnitsByPerformer": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer"
+                  }
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fromOutcome",
+                "toOutcome",
+                "brandIds",
+                "ledUnits",
+                "ledUnitsByPerformer",
+                "updatedAt"
+              ]
+            }
+          },
+          "reach": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "scriptSlug": {
+                  "type": "string"
+                },
+                "day": {
+                  "type": "string"
+                },
+                "brandIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "producedOutcomes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reachedOutcomes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "runs": {
+                  "type": "integer"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "scriptSlug",
+                "day",
+                "brandIds",
+                "producedOutcomes",
+                "reachedOutcomes",
+                "runs",
+                "updatedAt"
+              ]
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "caughtUp": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "builtAt",
+          "consumed",
+          "steps",
+          "reach",
+          "nextCursor",
+          "caughtUp"
+        ]
       }
     },
     "parameters": {}
@@ -19046,6 +19334,238 @@
           },
           "410": {
             "description": "Cursor older than 30 days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/outcome-chains/step-rates": {
+      "get": {
+        "summary": "One-step rates: of the consumed Units of an outcome, the share whose consuming run produced another outcome (service-auth only)",
+        "description": "Edge X -> Y: a consumption resolves to the Unit X it consumed (the ledger's rule: same key, same canonical subject incl. stated equivalences, latest declared at or before it, else the earliest later one the same UTC day), and Y is every Unit the consuming run's anchor (itself, else its nearest ancestor that produced; a support mark stops the walk) produced for the SAME subject. Reversed Units are in no figure. Rebuilt from the whole fleet every ~15 min (builtAt); 503 until the first build after a deploy. Brand = the brands of the run that produced the consumed Unit: brandId keeps the Units whose run carries it (a co-branded Unit counts for each brand; the fleet counts it once). Whole history.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeStepRatesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad brandId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "503": {
+            "description": "Not built yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/outcome-chains/script-reach": {
+      "get": {
+        "summary": "Script runs per day by the outcomes their chain reached, any depth (service-auth only)",
+        "description": "A script run = a decision: the run that opened a script (its parent does not name the same script); its own Units = standing Units on it and on its descendants working for the same script. Edge X -> Y: a consumption resolves to the Unit X it consumed (the ledger's rule: same key, same canonical subject incl. stated equivalences, latest declared at or before it, else the earliest later one the same UTC day), and Y is every Unit the consuming run's anchor (itself, else its nearest ancestor that produced; a support mark stops the walk) produced for the SAME subject. Reversed Units are in no figure. Rebuilt from the whole fleet every ~15 min (builtAt); 503 until the first build after a deploy. Brand = the decision run's brands. No ranking: the strongest reached outcome is the reader's call.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated script slugs (<= 200)."
+            },
+            "required": false,
+            "description": "Comma-separated script slugs (<= 200).",
+            "name": "scriptSlugs",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated `<outcome>/<dynasty>` (<= 200)."
+            },
+            "required": false,
+            "description": "Comma-separated `<outcome>/<dynasty>` (<= 200).",
+            "name": "scriptDynasties",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "First UTC day, YYYY-MM-DD."
+            },
+            "required": false,
+            "description": "First UTC day, YYYY-MM-DD.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Last UTC day, YYYY-MM-DD."
+            },
+            "required": false,
+            "description": "Last UTC day, YYYY-MM-DD.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "version",
+                "dynasty"
+              ],
+              "description": "Default version (one group per script slug)."
+            },
+            "required": false,
+            "description": "Default version (one group per script slug).",
+            "name": "groupBy",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptReachResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "503": {
+            "description": "Not built yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/outcome-chains/changes": {
+      "get": {
+        "summary": "The raw rows behind step-rates and script-reach that a build moved since the cursor (service-auth only)",
+        "description": "Rows are keyed (consumed: fromOutcome + brandIds; steps: fromOutcome + toOutcome + brandIds; reach: scriptSlug + day + brandIds + producedOutcomes + reachedOutcomes); brandIds = the sorted brand set of the run ([] = none), so the fleet = the sum of every row and brand B = the rows whose set holds B. A row a build no longer produces is served once with 0 (replace, never add). No cursor = every row (a full copy). Follow nextCursor until caughtUp, keep it, come back after the next build (~15 min).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Rows per page, 1..20000, default 5000."
+            },
+            "required": false,
+            "description": "Rows per page, 1..20000, default 5000.",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Changed rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutcomeChainChangesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad cursor or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "503": {
+            "description": "Not built yet",
             "content": {
               "application/json": {
                 "schema": {
