@@ -5,7 +5,9 @@ import {
   CHANGES_MAX_LIMIT,
   OutcomeChainCursorError,
   OutcomeChainsNotBuiltError,
+  MAX_UNITS_PER_RESOLVE,
   readOutcomeChainChanges,
+  resolveUnitDecisions,
   readScriptReach,
   readStepRates,
 } from "../services/outcome-chains.js";
@@ -115,6 +117,30 @@ router.get("/internal/stats/outcome-chains/changes", requireInternalAuth, async 
     res.json(await readOutcomeChainChanges(cursor as string | undefined, n));
   } catch (err) {
     fail(res, "/internal/stats/outcome-chains/changes", err);
+  }
+});
+
+/** POST /internal/stats/outcome-chains/unit-decisions — the script decision that made each named Unit, in script-reach terms. */
+router.post("/internal/stats/outcome-chains/unit-decisions", requireInternalAuth, async (req, res) => {
+  try {
+    const units = (req.body as { units?: unknown })?.units;
+    if (!Array.isArray(units) || units.length === 0 || units.length > MAX_UNITS_PER_RESOLVE) {
+      res.status(400).json({ error: `units must list between 1 and ${MAX_UNITS_PER_RESOLVE} Units` });
+      return;
+    }
+    const now = new Date().toISOString();
+    const parsed = [];
+    for (const u of units as any[]) {
+      const str = (v: unknown) => typeof v === "string" && v.trim() !== "";
+      if (!u || !str(u.outcomeKey) || !str(u.subjectService) || !str(u.subjectId) || (u.at !== undefined && (typeof u.at !== "string" || Number.isNaN(Date.parse(u.at))))) {
+        res.status(400).json({ error: "each unit needs outcomeKey, subjectService, subjectId (strings) and an optional ISO `at`" });
+        return;
+      }
+      parsed.push({ outcomeKey: u.outcomeKey, subjectService: u.subjectService, subjectId: u.subjectId, at: u.at ? new Date(u.at).toISOString() : now });
+    }
+    res.json(await resolveUnitDecisions(parsed));
+  } catch (err) {
+    fail(res, "/internal/stats/outcome-chains/unit-decisions", err);
   }
 });
 

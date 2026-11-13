@@ -11884,13 +11884,23 @@
                 },
                 "runs": {
                   "type": "integer"
+                },
+                "costInUsdCents": {
+                  "type": "string",
+                  "description": "What those runs cost, billed gross USD cents (decimal string): each decision run's subtree, incurred (actual + provisioned), minus the subtrees of script decisions opened under its own runs (they are their own decisions)."
+                },
+                "netCostInUsdCents": {
+                  "type": "string",
+                  "description": "Same on the frozen net basis (after the org's usage discount)."
                 }
               },
               "required": [
                 "day",
                 "producedOutcomes",
                 "reachedOutcomes",
-                "runs"
+                "runs",
+                "costInUsdCents",
+                "netCostInUsdCents"
               ]
             }
           }
@@ -12009,6 +12019,12 @@
                 "runs": {
                   "type": "integer"
                 },
+                "costInUsdCents": {
+                  "type": "string"
+                },
+                "netCostInUsdCents": {
+                  "type": "string"
+                },
                 "updatedAt": {
                   "type": "string"
                 }
@@ -12020,6 +12036,8 @@
                 "producedOutcomes",
                 "reachedOutcomes",
                 "runs",
+                "costInUsdCents",
+                "netCostInUsdCents",
                 "updatedAt"
               ]
             }
@@ -12038,6 +12056,153 @@
           "reach",
           "nextCursor",
           "caughtUp"
+        ]
+      },
+      "UnitDecisionsResponse": {
+        "type": "object",
+        "properties": {
+          "builtAt": {
+            "type": "string"
+          },
+          "units": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcomeKey": {
+                  "type": "string"
+                },
+                "subjectService": {
+                  "type": "string"
+                },
+                "subjectId": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "script_decision",
+                    "no_script",
+                    "no_unit",
+                    "not_in_build"
+                  ],
+                  "description": "script_decision = decision below is its script-reach row key; no_script = the run that declared the Unit names no script; no_unit = no standing Unit at `at`; not_in_build = a script decision opened after the last build (ask again after the next one)."
+                },
+                "occurrenceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "runId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The run that declared the Unit."
+                },
+                "decisionRunId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "decision": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "scriptSlug": {
+                      "type": "string"
+                    },
+                    "day": {
+                      "type": "string"
+                    },
+                    "brandIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "producedOutcomes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "reachedOutcomes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "costInUsdCents": {
+                      "type": "string"
+                    },
+                    "netCostInUsdCents": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scriptSlug",
+                    "day",
+                    "brandIds",
+                    "producedOutcomes",
+                    "reachedOutcomes",
+                    "costInUsdCents",
+                    "netCostInUsdCents"
+                  ],
+                  "description": "The decision as the last build counted it: exactly one of the `runs` of the script-reach row with this key (scriptSlug, day, brandIds, producedOutcomes, reachedOutcomes), and its share of that row's cost."
+                }
+              },
+              "required": [
+                "outcomeKey",
+                "subjectService",
+                "subjectId",
+                "at",
+                "status",
+                "occurrenceId",
+                "runId",
+                "decisionRunId",
+                "decision"
+              ]
+            }
+          }
+        },
+        "required": [
+          "builtAt",
+          "units"
+        ]
+      },
+      "UnitDecisionsRequest": {
+        "type": "object",
+        "properties": {
+          "units": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "outcomeKey": {
+                  "type": "string"
+                },
+                "subjectService": {
+                  "type": "string"
+                },
+                "subjectId": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string",
+                  "description": "Report time (ISO). The Unit standing then is resolved. Default now."
+                }
+              },
+              "required": [
+                "outcomeKey",
+                "subjectService",
+                "subjectId"
+              ]
+            },
+            "description": "1..500 Units, named the ledger's way."
+          }
+        },
+        "required": [
+          "units"
         ]
       }
     },
@@ -19553,6 +19718,61 @@
           },
           "400": {
             "description": "Bad cursor or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "503": {
+            "description": "Not built yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/stats/outcome-chains/unit-decisions": {
+      "post": {
+        "summary": "The script decision that made each named Unit, in script-reach terms (service-auth only)",
+        "description": "Per Unit: the produced occurrence standing at `at` (same key, same canonical subject incl. stated equivalences, latest declared at or before it, not reversed by then), the run that declared it, and its decision: that run must name a script (own Units = Units of script runs, as in the build), the decision being its topmost ancestor naming the same script.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnitDecisionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One answer per Unit, in request order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitDecisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "units missing, empty, > 500 or malformed",
             "content": {
               "application/json": {
                 "schema": {
