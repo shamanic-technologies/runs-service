@@ -4366,3 +4366,137 @@ registry.registerPath({
     410: { description: "Cursor older than 30 days", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
+
+// ---------------------------------------------------------------------------
+// Outcome chains (SCRIPT-VALUE-RATING-1113-RUNS): the produce / consume graph, summarised
+// ---------------------------------------------------------------------------
+
+const OUTCOME_CHAINS_GRAPH_DOC =
+  "Edge X -> Y: a consumption resolves to the Unit X it consumed (the ledger's rule: same key, same canonical subject incl. stated equivalences, latest declared at or before it, else the earliest later one the same UTC day), and Y is every Unit the consuming run's anchor (itself, else its nearest ancestor that produced; a support mark stops the walk) produced for the SAME subject. Reversed Units are in no figure. Rebuilt from the whole fleet every ~15 min (builtAt); 503 until the first build after a deploy.";
+
+export const OutcomeStepRatesResponseSchema = z
+  .object({
+    builtAt: z.string(),
+    brandId: z.string().nullable().openapi({ description: "null = the whole fleet." }),
+    consumed: z
+      .array(z.object({ outcome: z.string(), consumedUnits: z.number().int().openapi({ description: "Distinct Units of this outcome some run consumed." }) }))
+      .openapi({ description: "Every outcome whose Units were ever consumed (the denominators)." }),
+    steps: z
+      .array(
+        z.object({
+          fromOutcome: z.string(),
+          toOutcome: z.string(),
+          consumedUnits: z.number().int().openapi({ description: "Distinct consumed Units of fromOutcome (= consumed[].consumedUnits)." }),
+          ledUnits: z.number().int().openapi({ description: "Of those, the Units whose consuming run produced a Unit of toOutcome for the same subject." }),
+          share: z.number().nullable().openapi({ description: "ledUnits / consumedUnits, 6 decimals." }),
+          ledUnitsByPerformer: z.record(z.string(), z.number().int()).openapi({
+            description: "ledUnits split by the toOutcome Unit's effective performer kind (stated, else 'script' when its run carries a workflow, else 'none'). A Unit leading to Units of two kinds counts under both.",
+          }),
+        }),
+      )
+      .openapi({ description: "Only pairs production actually chained; a pair never chained is absent." }),
+  })
+  .openapi("OutcomeStepRatesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-chains/step-rates",
+  summary: "One-step rates: of the consumed Units of an outcome, the share whose consuming run produced another outcome (service-auth only)",
+  description: `${OUTCOME_CHAINS_GRAPH_DOC} Brand = the brands of the run that produced the consumed Unit: brandId keeps the Units whose run carries it (a co-branded Unit counts for each brand; the fleet counts it once). Whole history.`,
+  security: [{ apiKey: [] }],
+  request: { query: z.object({ brandId: z.string().optional() }) },
+  responses: {
+    200: { description: "Rates", content: { "application/json": { schema: OutcomeStepRatesResponseSchema } } },
+    400: { description: "Bad brandId", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not built yet", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const ScriptReachResponseSchema = z
+  .object({
+    builtAt: z.string(),
+    brandId: z.string().nullable(),
+    groupBy: z.enum(["version", "dynasty"]),
+    groups: z.array(
+      z.object({
+        scriptSlug: z.string().optional().openapi({ description: "groupBy=version: `<outcome>/<dynasty>/v<version>`." }),
+        scriptDynasty: z.string().optional().openapi({ description: "groupBy=dynasty: `<outcome>/<dynasty>`." }),
+        day: z.string().openapi({ description: "UTC day the script run (decision) started." }),
+        producedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of the run's own standing Units ([] = it produced none)." }),
+        reachedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of every Unit its chain reached through the edges, any depth (its own Units excluded; [] = nothing consumed them into a Unit)." }),
+        runs: z.number().int(),
+      }),
+    ),
+  })
+  .openapi("ScriptReachResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-chains/script-reach",
+  summary: "Script runs per day by the outcomes their chain reached, any depth (service-auth only)",
+  description: `A script run = a decision: the run that opened a script (its parent does not name the same script); its own Units = standing Units on it and on its descendants working for the same script. ${OUTCOME_CHAINS_GRAPH_DOC} Brand = the decision run's brands. No ranking: the strongest reached outcome is the reader's call.`,
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      brandId: z.string().optional(),
+      scriptSlugs: z.string().optional().openapi({ description: "Comma-separated script slugs (<= 200)." }),
+      scriptDynasties: z.string().optional().openapi({ description: "Comma-separated `<outcome>/<dynasty>` (<= 200)." }),
+      since: z.string().optional().openapi({ description: "First UTC day, YYYY-MM-DD." }),
+      until: z.string().optional().openapi({ description: "Last UTC day, YYYY-MM-DD." }),
+      groupBy: z.enum(["version", "dynasty"]).optional().openapi({ description: "Default version (one group per script slug)." }),
+    }),
+  },
+  responses: {
+    200: { description: "Groups", content: { "application/json": { schema: ScriptReachResponseSchema } } },
+    400: { description: "Bad filter", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not built yet", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const OutcomeChainChangesResponseSchema = z
+  .object({
+    builtAt: z.string(),
+    consumed: z.array(z.object({ fromOutcome: z.string(), brandIds: z.array(z.string()), consumedUnits: z.number().int(), updatedAt: z.string() })),
+    steps: z.array(
+      z.object({
+        fromOutcome: z.string(),
+        toOutcome: z.string(),
+        brandIds: z.array(z.string()),
+        ledUnits: z.number().int(),
+        ledUnitsByPerformer: z.record(z.string(), z.number().int()),
+        updatedAt: z.string(),
+      }),
+    ),
+    reach: z.array(
+      z.object({
+        scriptSlug: z.string(),
+        day: z.string(),
+        brandIds: z.array(z.string()),
+        producedOutcomes: z.array(z.string()),
+        reachedOutcomes: z.array(z.string()),
+        runs: z.number().int(),
+        updatedAt: z.string(),
+      }),
+    ),
+    nextCursor: z.string(),
+    caughtUp: z.boolean(),
+  })
+  .openapi("OutcomeChainChangesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-chains/changes",
+  summary: "The raw rows behind step-rates and script-reach that a build moved since the cursor (service-auth only)",
+  description:
+    "Rows are keyed (consumed: fromOutcome + brandIds; steps: fromOutcome + toOutcome + brandIds; reach: scriptSlug + day + brandIds + producedOutcomes + reachedOutcomes); brandIds = the sorted brand set of the run ([] = none), so the fleet = the sum of every row and brand B = the rows whose set holds B. A row a build no longer produces is served once with 0 (replace, never add). No cursor = every row (a full copy). Follow nextCursor until caughtUp, keep it, come back after the next build (~15 min).",
+  security: [{ apiKey: [] }],
+  request: { query: z.object({ cursor: z.string().optional(), limit: z.string().optional().openapi({ description: "Rows per page, 1..20000, default 5000." }) }) },
+  responses: {
+    200: { description: "Changed rows", content: { "application/json": { schema: OutcomeChainChangesResponseSchema } } },
+    400: { description: "Bad cursor or limit", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not built yet", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});

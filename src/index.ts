@@ -21,11 +21,13 @@ import taskUnitsRoutes from "./routes/task-units.js";
 import outcomeOccurrenceRoutes from "./routes/outcome-occurrences.js";
 import brandLedgerRoutes from "./routes/brand-ledger.js";
 import serviceCallsRoutes from "./routes/service-calls.js";
+import outcomeChainRoutes from "./routes/outcome-chains.js";
 import { db } from "./db/index.js";
 import { startRunEventsRetention } from "./services/run-events-retention.js";
 import { startStaleMinMaxRepair } from "./services/stats-rollup-minmax-repair.js";
 import { startCostLedgerRefresh } from "./services/outcome-ledger.js";
 import { startLifecycleArchive } from "./services/lifecycle-archive.js";
+import { startOutcomeChainBuilds } from "./services/outcome-chains.js";
 import { startRunRollupDrain } from "./services/run-rollup-drain.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -66,6 +68,7 @@ app.use(taskUnitsRoutes);
 app.use(outcomeOccurrenceRoutes);
 app.use(brandLedgerRoutes);
 app.use(serviceCallsRoutes);
+app.use(outcomeChainRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
@@ -97,6 +100,9 @@ if (process.env.NODE_ENV !== "test") {
         // Queued run-count +1s folded into the rollups every ~1 s (services/run-rollup-drain.ts,
         // SEND-RUN-LATENCY-1111): first tick right away, it drains whatever the last process left.
         startRunRollupDrain();
+        // The produce / consume graph summarised for the script Rating (services/outcome-chains.ts,
+        // SCRIPT-VALUE-RATING-1113-RUNS): first build ~90 s after boot, then 15 min after each one ends.
+        startOutcomeChainBuilds();
       });
     })
     .catch((err) => {
