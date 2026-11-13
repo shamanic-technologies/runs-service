@@ -847,6 +847,10 @@ serves COUNTS only (no value, no ranking, no outcome named in code). `src/servic
   time) to its decision row key (status `script_decision | no_script | no_unit | not_in_build`).
 - **Reads**: `GET /internal/stats/outcome-chains/step-rates[?brandId]`, `/script-reach[?brandId&scriptSlugs&scriptDynasties&since&until&groupBy=version|dynasty]`,
   `/changes[?cursor&limit]`; 503 until the first build. Fleet = sum of rows; brand B = rows whose set holds B (each Unit / run in one row).
+- **One campaign (migration 0114, CAMPAIGN-SCRIPTS-1113-RUNS)**: `script-reach?campaignIds=a,b` (<= 200) groups the stored
+  `script_chain_decisions` whose `campaign_id` (the decision run's, read off `runs` once per decision by the build:
+  `campaign_read`) is listed, same groups and figures; absent = `script_chain_reach` byte for byte. Response echoes
+  `campaignIds` only when filtered. A decision run with no campaign of its own (nested under another) matches none.
 - **Cost**: one read-only statement on statsDb (own tx, 900 s), prod 2026-11-13 ~1.3M occurrences / 640k consumptions / 540k edges /
   186k decisions. Script runs come off `idx_runs_script_slug_cover` (partial, built CONCURRENTLY out-of-band on prod: a seq scan of
   `runs` was 24 s); run brands / workflows from `outcome_chain_run_attrs` (500k PK probes were 57 s, a seq-scan hash join 30 s): each build adds the runs

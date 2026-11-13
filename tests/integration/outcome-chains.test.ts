@@ -19,6 +19,8 @@ const INTERESTED = "chn1113_interested";
 const W_V1 = "chn1113_written/dy_writer/v1";
 const W_V2 = "chn1113_written/dy_writer/v2";
 const NESTED = "chn1113_other/dy_nested/v1";
+const C1 = "0c11e113-1113-4c0a-8b1e-0000000000c1";
+const C2 = "0c11e113-1113-4c0a-8b1e-0000000000c2";
 
 const stepCatalogue = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock("../../src/services/outcome-catalogue.js", async (importOriginal) => {
@@ -51,11 +53,11 @@ describe("SCRIPT-VALUE-RATING-1113: outcome chains", () => {
 
     // Two writer decisions (script v1 brand B1: leads 1 + 2; script v2 brand B2: lead 3), each with a child
     // still working for it; the v1 child declares lead 2's message (a child's Unit is the decision's).
-    const w1 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V1, brandIds: [B1], status: "completed", startedAt: at("2026-11-10T09:00:00Z") });
+    const w1 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V1, brandIds: [B1], campaignId: C1, status: "completed", startedAt: at("2026-11-10T09:00:00Z") });
     const w1child = await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", scriptSlug: W_V1, brandIds: [B1], parentRunId: w1.id, status: "completed", startedAt: at("2026-11-10T09:00:01Z") });
-    const w2 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], status: "completed", startedAt: at("2026-11-11T09:00:00Z") });
+    const w2 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], campaignId: C2, status: "completed", startedAt: at("2026-11-11T09:00:00Z") });
     // A writer decision that produced nothing still counts as a run.
-    const w3 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], status: "failed", startedAt: at("2026-11-11T10:00:00Z") });
+    const w3 = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: W_V2, brandIds: [B2], campaignId: C2, status: "failed", startedAt: at("2026-11-11T10:00:00Z") });
     // A script opened under the v1 decision's own work is its own decision: it pays its own way.
     const nested = await insertTestRun({ organizationId: ORG, serviceName: "workflow", taskName: "script", scriptSlug: NESTED, brandIds: [B1], parentRunId: w1child.id, status: "completed", startedAt: at("2026-11-10T09:00:02Z") });
     const nestedChild = await insertTestRun({ organizationId: ORG, serviceName: "chat-service", taskName: "complete", scriptSlug: NESTED, parentRunId: nested.id, status: "completed", startedAt: at("2026-11-10T09:00:03Z") });
@@ -158,6 +160,35 @@ describe("SCRIPT-VALUE-RATING-1113: outcome chains", () => {
     ]);
     const one = await get(`/internal/stats/outcome-chains/script-reach?scriptSlugs=${W_V1}`);
     expect(one.groups.map((g: any) => g.scriptSlug)).toEqual([W_V1]);
+  });
+
+  it("CAMPAIGN-SCRIPTS-1113: narrowed to campaigns, the same groups count only the decisions run for them", async () => {
+    const base = "/internal/stats/outcome-chains/script-reach?scriptDynasties=chn1113_written/dy_writer";
+    const all = await get(base);
+    expect(all.campaignIds).toBeUndefined();
+    const c1 = await get(`${base}&campaignIds=${C1}`);
+    expect(c1.campaignIds).toEqual([C1]);
+    expect(c1.groups).toEqual([
+      { scriptSlug: W_V1, day: "2026-11-10", producedOutcomes: [WRITTEN], reachedOutcomes: [INTERESTED, SENT], runs: 1, costInUsdCents: "15.0000000000", netCostInUsdCents: "14.0000000000" },
+    ]);
+    const c2 = await get(`${base}&campaignIds=${C2}&groupBy=dynasty`);
+    expect(c2.groups.map((g: any) => [g.scriptDynasty, g.runs])).toEqual([
+      ["chn1113_written/dy_writer", 1],
+      ["chn1113_written/dy_writer", 1],
+    ]);
+    // Both campaigns = every decision of the dynasty: byte-equal groups to the unfiltered read.
+    const both = await get(`${base}&campaignIds=${C2},${C1},${C1}`);
+    expect(both.campaignIds).toEqual([C2, C1]);
+    expect(both.groups).toEqual(all.groups);
+    // The nested decision (no campaign of its own) and an unknown campaign count nothing.
+    expect((await get(`/internal/stats/outcome-chains/script-reach?scriptSlugs=${NESTED}&campaignIds=${C1}`)).groups).toEqual([]);
+    expect((await get(`${base}&campaignIds=0c11e113-1113-4c0a-8b1e-0000000000ff`)).groups).toEqual([]);
+    // A decision row written before the campaign column is read again by the next build.
+    await db.execute(sql`UPDATE script_chain_decisions SET campaign_id = NULL, campaign_read = false WHERE decision_run_id = ${ids.w1}::uuid`);
+    expect((await get(`${base}&campaignIds=${C1}`)).groups).toEqual([]);
+    await buildOutcomeChains();
+    expect((await get(`${base}&campaignIds=${C1}`)).groups).toEqual(c1.groups);
+    expect((await request(app).get(`${base}&campaignIds=,`).set(H)).status).toBe(400);
   });
 
   it("a reported Unit resolves to the script decision that made it, in script-reach terms", async () => {

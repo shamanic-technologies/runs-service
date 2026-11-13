@@ -799,6 +799,13 @@
       "when": 1784362700000,
       "tag": "0113_outcome_chain_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1784362800000,
+      "tag": "0114_script_chain_decision_campaign",
+      "breakpoints": true
     }
   ]
 }

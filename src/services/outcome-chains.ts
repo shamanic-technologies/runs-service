@@ -165,12 +165,16 @@ reach AS (
          COALESCE(ARRAY(SELECT DISTINCT b FROM unnest(s.brand_ids) b WHERE b IS NOT NULL ORDER BY b), '{}') AS brands,
          COALESCE(ok.keys, '{}') AS produced, COALESCE(rc.keys, '{}') AS reached,
          COALESCE(c.gross_actual + c.gross_provisioned, 0) - COALESCE(n.gross, 0) AS cost,
-         COALESCE(c.net_actual + c.net_provisioned, 0) - COALESCE(n.net, 0) AS net_cost
+         COALESCE(c.net_actual + c.net_provisioned, 0) - COALESCE(n.net, 0) AS net_cost,
+         CASE WHEN k.decision_run_id IS NOT NULL THEN k.campaign_id ELSE p.campaign_id END AS campaign_id
   FROM roots s
   LEFT JOIN own_keys ok ON ok.decision_id = s.id
   LEFT JOIN reached rc ON rc.decision_id = s.id
   LEFT JOIN run_subtree_costs c ON c.run_id = s.id
   LEFT JOIN nested_cost n ON n.decision_id = s.id
+  -- A run's campaign is set once at creation: read off runs once per decision (PK probe), then kept.
+  LEFT JOIN script_chain_decisions k ON k.decision_run_id = s.id AND k.campaign_read
+  LEFT JOIN LATERAL (SELECT r.campaign_id FROM runs r WHERE r.id = s.id AND k.decision_run_id IS NULL OFFSET 0) p ON TRUE
 )
 SELECT 'consumed' AS t, jsonb_build_object('from_outcome', x_key, 'brand_ids', to_jsonb(brands), 'consumed_units', n) AS r FROM consumed
 UNION ALL
@@ -179,7 +183,7 @@ FROM steps_total t JOIN steps_kind k ON k.x_key = t.x_key AND k.y_key = t.y_key 
 UNION ALL
 SELECT 'decision', jsonb_build_object('decision_run_id', id, 'script_slug', script_slug, 'day', day, 'brand_ids', to_jsonb(brands),
                                       'produced_outcomes', to_jsonb(produced), 'reached_outcomes', to_jsonb(reached),
-                                      'cost', cost::text, 'net_cost', net_cost::text)
+                                      'cost', cost::text, 'net_cost', net_cost::text, 'campaign_id', campaign_id)
 FROM reach
 `);
 
@@ -264,19 +268,22 @@ async function writeDecisions(tx: any, rows: unknown[], stamp: string): Promise<
   await tx.execute(sql`
     WITH n AS MATERIALIZED (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
-        AS x(decision_run_id uuid, script_slug text, day date, brand_ids text[], produced_outcomes text[], reached_outcomes text[], cost numeric, net_cost numeric)
+        AS x(decision_run_id uuid, script_slug text, day date, brand_ids text[], produced_outcomes text[], reached_outcomes text[], cost numeric, net_cost numeric,
+             campaign_id text)
     ),
     up AS (
-      INSERT INTO script_chain_decisions (decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost_in_usd_cents, net_cost_in_usd_cents, updated_at)
-      SELECT decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost, net_cost, ${stamp}::timestamptz FROM n
+      INSERT INTO script_chain_decisions (decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost_in_usd_cents, net_cost_in_usd_cents,
+                                          campaign_id, campaign_read, updated_at)
+      SELECT decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost, net_cost, campaign_id, true, ${stamp}::timestamptz FROM n
       ON CONFLICT (decision_run_id) DO UPDATE
         SET script_slug = EXCLUDED.script_slug, day = EXCLUDED.day, brand_ids = EXCLUDED.brand_ids, produced_outcomes = EXCLUDED.produced_outcomes,
             reached_outcomes = EXCLUDED.reached_outcomes, cost_in_usd_cents = EXCLUDED.cost_in_usd_cents,
-            net_cost_in_usd_cents = EXCLUDED.net_cost_in_usd_cents, updated_at = EXCLUDED.updated_at
+            net_cost_in_usd_cents = EXCLUDED.net_cost_in_usd_cents, campaign_id = EXCLUDED.campaign_id, campaign_read = true, updated_at = EXCLUDED.updated_at
       WHERE (script_chain_decisions.script_slug, script_chain_decisions.day, script_chain_decisions.brand_ids, script_chain_decisions.produced_outcomes,
-             script_chain_decisions.reached_outcomes, script_chain_decisions.cost_in_usd_cents, script_chain_decisions.net_cost_in_usd_cents)
+             script_chain_decisions.reached_outcomes, script_chain_decisions.cost_in_usd_cents, script_chain_decisions.net_cost_in_usd_cents,
+             script_chain_decisions.campaign_id, script_chain_decisions.campaign_read)
             IS DISTINCT FROM (EXCLUDED.script_slug, EXCLUDED.day, EXCLUDED.brand_ids, EXCLUDED.produced_outcomes, EXCLUDED.reached_outcomes,
-                              EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents)
+                              EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents, EXCLUDED.campaign_id, true)
       RETURNING 1
     ),
     gone AS (DELETE FROM script_chain_decisions t WHERE NOT EXISTS (SELECT 1 FROM n WHERE n.decision_run_id = t.decision_run_id) RETURNING 1)
@@ -455,6 +462,8 @@ export interface ScriptReachFilter {
   since: string | null;
   until: string | null;
   groupBy: "version" | "dynasty";
+  /** CAMPAIGN-SCRIPTS-1113: only the decisions run FOR these campaigns (the decision run's campaign_id). null = every decision. */
+  campaignIds?: string[] | null;
 }
 
 /** `<outcome>/<dynasty>/v<version>` -> `<outcome>/<dynasty>`. */
@@ -472,15 +481,23 @@ export async function readScriptReach(f: ScriptReachFilter) {
     if (f.since) where.push(sql`day >= ${f.since}::date`);
     if (f.until) where.push(sql`day <= ${f.until}::date`);
     const key = f.groupBy === "dynasty" ? DYNASTY_SQL : sql.raw("script_slug");
+    const campaignIds = f.campaignIds ?? null;
+    // Narrowed to campaigns: grouped from the stored decisions themselves (script_chain_reach carries no campaign);
+    // the same decisions the reach rows are grouped from, so a campaign's figures add up to the unfiltered ones.
+    const from = campaignIds
+      ? sql`(SELECT script_slug, day, brand_ids, produced_outcomes, reached_outcomes, 1 AS runs, cost_in_usd_cents, net_cost_in_usd_cents
+             FROM script_chain_decisions WHERE campaign_id = ANY(${`{${campaignIds.map((c) => JSON.stringify(c)).join(",")}}`}::text[])) d`
+      : sql.raw("script_chain_reach");
     const rows = (await tx.execute(sql`
       SELECT ${key} AS script, to_char(day, 'YYYY-MM-DD') AS day, produced_outcomes, reached_outcomes, sum(runs)::int AS runs,
              sum(cost_in_usd_cents)::text AS cost, sum(net_cost_in_usd_cents)::text AS net_cost
-      FROM script_chain_reach WHERE ${sql.join(where, sql` AND `)}
+      FROM ${from} WHERE ${sql.join(where, sql` AND `)}
       GROUP BY 1, 2, 3, 4
       ORDER BY 1, 2, 3, 4`)) as Array<{ script: string; day: string; produced_outcomes: string[]; reached_outcomes: string[]; runs: number; cost: string; net_cost: string }>;
     return {
       builtAt: build.builtAt,
       brandId: f.brandId,
+      ...(campaignIds ? { campaignIds } : {}),
       groupBy: f.groupBy,
       groups: rows.map((r) => ({
         ...(f.groupBy === "dynasty" ? { scriptDynasty: r.script } : { scriptSlug: r.script }),

@@ -66,7 +66,8 @@ router.get("/internal/stats/outcome-chains/script-reach", requireInternalAuth, a
     const brandId = brandOf(q.brandId);
     const scriptSlugs = list(q.scriptSlugs, "scriptSlugs");
     const scriptDynasties = list(q.scriptDynasties, "scriptDynasties");
-    for (const v of [brandId, scriptSlugs, scriptDynasties]) {
+    const campaignIds = list(q.campaignIds, "campaignIds");
+    for (const v of [brandId, scriptSlugs, scriptDynasties, campaignIds]) {
       if (v instanceof Error) {
         res.status(400).json({ error: v.message });
         return;
@@ -91,6 +92,7 @@ router.get("/internal/stats/outcome-chains/script-reach", requireInternalAuth, a
         since: (q.since as string | undefined) ?? null,
         until: (q.until as string | undefined) ?? null,
         groupBy,
+        campaignIds: campaignIds as string[] | null,
       }),
     );
   } catch (err) {

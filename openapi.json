@@ -11844,6 +11844,13 @@
             "type": "string",
             "nullable": true
           },
+          "campaignIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Present only when the read was narrowed with campaignIds: the campaign ids it kept (deduped, as asked)."
+          },
           "groupBy": {
             "type": "string",
             "enum": [
@@ -19602,6 +19609,16 @@
             "required": false,
             "description": "Comma-separated `<outcome>/<dynasty>` (<= 200).",
             "name": "scriptDynasties",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids (<= 200): only the script decisions run FOR these campaigns (the campaign the decision run was opened under; a funnel campaign = pass its unit campaign ids). Same groups, same figures definitions; absent = every decision (unchanged answer). A decision opened after the last build is not counted until the next build (~15 min)."
+            },
+            "required": false,
+            "description": "Comma-separated campaign ids (<= 200): only the script decisions run FOR these campaigns (the campaign the decision run was opened under; a funnel campaign = pass its unit campaign ids). Same groups, same figures definitions; absent = every decision (unchanged answer). A decision opened after the last build is not counted until the next build (~15 min).",
+            "name": "campaignIds",
             "in": "query"
           },
           {
