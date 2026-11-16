@@ -79,7 +79,7 @@ async function ownUnits(tx: Exec, decisionIds: string[]): Promise<{ found: Set<s
     WITH RECURSIVE d AS MATERIALIZED (
       SELECT r.id, r.script_slug, r.workflow_slug
       FROM unnest(${uuidArray(decisionIds)}::uuid[]) AS i(id)
-      CROSS JOIN LATERAL (SELECT id, script_slug, workflow_slug FROM runs WHERE id = i.id OFFSET 0) r
+      CROSS JOIN LATERAL (SELECT id, COALESCE(decision_script_slug, script_slug) AS script_slug, workflow_slug FROM runs WHERE id = i.id OFFSET 0) r
     ),
     sub(decision_id, run_id, ds, dw, depth) AS (
       SELECT id, id, script_slug, workflow_slug, 0 FROM d
@@ -89,7 +89,8 @@ async function ownUnits(tx: Exec, decisionIds: string[]): Promise<{ found: Set<s
       CROSS JOIN LATERAL (
         SELECT c.id FROM runs c
         WHERE c.parent_run_id = sub.run_id
-          AND CASE WHEN sub.ds IS NOT NULL THEN c.script_slug IS NULL OR c.script_slug = sub.ds
+          -- a decision's script = the innermost stated (0116): a script asked by another one is its own decision
+          AND CASE WHEN sub.ds IS NOT NULL THEN COALESCE(c.decision_script_slug, c.script_slug) IS NULL OR COALESCE(c.decision_script_slug, c.script_slug) = sub.ds
                    WHEN sub.dw IS NOT NULL THEN c.script_slug IS NULL AND (c.workflow_slug IS NULL OR c.workflow_slug = sub.dw)
                    ELSE c.script_slug IS NULL AND c.workflow_slug IS NULL END
         OFFSET 0

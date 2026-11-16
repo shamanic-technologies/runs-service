@@ -27,7 +27,7 @@ REST API for tracking service execution runs and their associated costs, with hi
 - `src/routes/internal.ts` — `/internal/*` service routes, incl. `GET /internal/org-actual-total` (O(1), see "Org actualized total").
 - `src/routes/outcome-chains.ts` + `src/services/outcome-chains.ts` — the produce / consume graph summarised for the script Rating (one-step rates, chain reach per script run, changes feed). See "Outcome chains".
 - `src/routes/health.ts` — Health check endpoint
-- `src/routes/service-calls.ts` + `src/services/service-calls.ts` + `src/services/decision-units.ts` — every call of one service (fleet, history then changes) + Units per decision. See "Every call of one service".
+- `src/routes/service-calls.ts` + `src/services/service-calls.ts` + `src/services/decision-units.ts` — every call of one service (fleet, history then changes) + Units per decision. See "Every call of one service"; a nested asked script's decision: "A script asked by another script is its own decision".
 - `src/routes/brand-ledger.ts` + `src/services/brand-ledger.ts` — the books of one brand + its production orders: staff `GET /internal/brands/:brandId/ledger(/runs)` (brand-wide, every org, vendor figures) and the CUSTOMER twin `GET /v1/brands/:brandId/ledger(/runs)` (FACTORY-USER-LEDGER-1102: `requireApiKey`, only the x-org-id org's runs and stored rows, keyed on the RUN's org `outcome_cost_days.organization_id` / `runs.organization_id`; billed gross + net only, never `vendorCents`/`unpricedGrossCents`). A brand id is held by several orgs (29/188 in prod): never serve a customer the staff read. Per brand, the orgs' figures add up to the staff read. Guard: `tests/integration/brand-ledger-customer.test.ts`. Default `since` = the brand's OWN first spend day (in the caller's org for the customer twin; `firstBrandSpendDay`, consumption rollup 0090), never the fleet's: a brand born 2026-10-27 listed ~270 pre-birth days as missing (LEDGER-BRAND-SINCE-1106). A STALE stored day is served at its last computed figures and listed in `daysStale`; `daysMissing` = never stored (LEDGER-BRAND-SINCE-1106-B: instantly's later sends declare on runs charged days earlier and re-staled every day 10-21..11-06 within minutes of each recompute, a $315 brand read $0).
 - `src/services/brand-transfer.ts` — `POST /internal/transfer-brand` + `GET /internal/brand-transfers/moved-usage`. See "Brand transfer".
 - `src/routes/task-units.ts` + `src/services/stats-rollup-task-units.ts` — `GET /internal/stats/costs/task-units` (fleet charged runs/orgs/units per task × asking service, migration 0049). See "Task units".
@@ -805,6 +805,26 @@ consumer's and the producer's) and `/internal/stats/outcome-costs` groups by `sc
   the feature-slug-correction doctrine (bronze `run.script_stated` per run, fills NULL only, walk stops under a run
   stating another script; a root already named keeps it, `alreadyNamed`: state roots in run-start order and the
   outermost script wins), then flags every stored day from the earliest stated run's start for recompute.
+
+## A script asked by another script is its own decision (migration 0116, SERVED-MODEL-1116-NESTED-RUNS)
+
+A stored script can ASK another Engine for a Unit: workflow-service opens the asked script's run under the asker's,
+stating its own slug. 0111's rule keeps the OUTERMOST script on `runs.script_slug` (the ledger's whole-chain dimension:
+`outcome_cost_days.script_slug` / `source_script_slug`, outcome-costs `scriptSlug`, byte-identical), so the asked
+script (`message_sent/dy_answer_lead*` under `meeting_booked/dy_book_meeting`) had zero decisions.
+- **`runs.decision_script_slug`** = the innermost script stated (the run's own, else its parent's), written at
+  `POST /v1/runs` (payload `decisionScriptSlug`). Set only where `script_slug` is. NULL = recorded before 0116.
+- **Every decision reader reads `COALESCE(decision_script_slug, script_slug)`**: the outcome-chains build (decisions,
+  script reach, nested-decision cost subtraction, cost names), `unit-decisions`, `decision-units`, service-calls
+  (`scriptSlug` = decision script, `outermostScriptSlug` = the ledger's). The ledger never reads it.
+- **History**: `POST /internal/runs/script-statements` also states each root's script as DECISION script of the root
+  and the descendants sharing its decision (bronze `run.decision_script_stated`, projection overwrites; the nearest
+  stated root wins, any call order; idempotent; `decisionStatedRuns`). runs-service cannot derive the version
+  (task `script:<outcome>/<dynasty>` has none; the bronze payload held the resolved outer slug): workflow-service
+  (`result.script` per run) re-states its nested script runs. No ledger day re-staled.
+- `idx_runs_decision_script_cover` (script_slug INCLUDE ..., decision_script_slug) serves the build's script-run read;
+  built CONCURRENTLY out-of-band on prod. The 0116 ALTER / index retry on `lock_not_available` inside the migration.
+- Guard: `tests/integration/nested-script-decisions.test.ts`.
 
 ## Every call of one service + the Units of each decision (LLM-RATING-PER-ENGINE-1112-RUNS)
 

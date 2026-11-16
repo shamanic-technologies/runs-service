@@ -112,7 +112,10 @@ export interface ServiceCall {
   campaignId: string | null;
   featureSlug: string | null;
   workflowSlug: string | null;
+  /** The script whose decision this call belongs to: the innermost stated (0116). */
   scriptSlug: string | null;
+  /** The outermost script of the chain (the ledger's `scriptSlug` dimension). */
+  outermostScriptSlug: string | null;
   rootRunId: string | null;
   decisionRunId: string | null;
   decisionBasis: "script" | "workflow" | "root" | null;
@@ -176,11 +179,11 @@ export async function readChains(tx: Exec, runIds: string[]): Promise<Map<string
     WITH RECURSIVE up(start_id, id, parent_run_id, script_slug, workflow_slug, depth) AS (
       SELECT r.id, r.id, r.parent_run_id, r.script_slug, r.workflow_slug, 0
       FROM unnest(${`{${[...new Set(runIds)].join(",")}}`}::uuid[]) AS i(id)
-      CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug, workflow_slug FROM runs WHERE id = i.id OFFSET 0) r
+      CROSS JOIN LATERAL (SELECT id, parent_run_id, COALESCE(decision_script_slug, script_slug) AS script_slug, workflow_slug FROM runs WHERE id = i.id OFFSET 0) r
       UNION ALL
       SELECT up.start_id, p.id, p.parent_run_id, p.script_slug, p.workflow_slug, up.depth + 1
       FROM up
-      CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug, workflow_slug FROM runs WHERE id = up.parent_run_id OFFSET 0) p
+      CROSS JOIN LATERAL (SELECT id, parent_run_id, COALESCE(decision_script_slug, script_slug) AS script_slug, workflow_slug FROM runs WHERE id = up.parent_run_id OFFSET 0) p
       WHERE up.parent_run_id IS NOT NULL AND up.depth < ${MAX_ANCESTOR_DEPTH}
     )
     SELECT up.start_id, up.id, up.parent_run_id, up.script_slug, up.workflow_slug, up.depth, m.kind
@@ -261,7 +264,8 @@ async function enrich(tx: Exec, runs: any[], versions: VendorCostVersion[]): Pro
       campaignId: r.campaign_id ?? null,
       featureSlug: r.feature_slug ?? null,
       workflowSlug: r.workflow_slug ?? null,
-      scriptSlug: r.script_slug ?? null,
+      scriptSlug: r.decision_script_slug ?? r.script_slug ?? null,
+      outermostScriptSlug: r.script_slug ?? null,
       rootRunId: decision.rootRunId,
       decisionRunId: decision.id,
       decisionBasis: decision.basis,
@@ -272,7 +276,7 @@ async function enrich(tx: Exec, runs: any[], versions: VendorCostVersion[]): Pro
 }
 
 const RUN_COLUMNS = sql`r.id, r.parent_run_id, r.service_name, r.task_name, r.status, r.started_at, r.completed_at,
-  r.organization_id, r.brand_ids, r.campaign_id, r.feature_slug, r.workflow_slug, r.script_slug`;
+  r.organization_id, r.brand_ids, r.campaign_id, r.feature_slug, r.workflow_slug, r.script_slug, r.decision_script_slug`;
 
 function filterSql(f: ServiceCallsFilter): SQL {
   const parts = [sql`r.service_name = ${f.serviceName}`];
