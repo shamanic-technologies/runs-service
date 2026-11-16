@@ -196,7 +196,8 @@ reach AS (
          COALESCE(ok.keys, '{}') AS produced, COALESCE(rc.keys, '{}') AS reached,
          COALESCE(c.gross_actual + c.gross_provisioned, 0) - COALESCE(n.gross, 0) AS cost,
          COALESCE(c.net_actual + c.net_provisioned, 0) - COALESCE(n.net, 0) AS net_cost,
-         CASE WHEN k.decision_run_id IS NOT NULL THEN k.campaign_id ELSE p.campaign_id END AS campaign_id
+         CASE WHEN k.decision_run_id IS NOT NULL THEN k.campaign_id ELSE p.campaign_id END AS campaign_id,
+         pa.script_slug AS asked_by
   FROM roots s
   LEFT JOIN own_keys ok ON ok.decision_id = s.id
   LEFT JOIN reached rc ON rc.decision_id = s.id
@@ -204,6 +205,10 @@ reach AS (
   LEFT JOIN nested_cost n ON n.decision_id = s.id
   LEFT JOIN own_names onm ON onm.decision_id = s.id
   LEFT JOIN src_names snm ON snm.decision_id = s.id
+  -- ONE-WRITER-N-MODELS-1116: the script that ASKED this decision = the script of the decision holding its root's parent
+  -- run (a writer asked by a sender, a model asked by a writer). NULL = no script's run opened it (a campaign's own).
+  LEFT JOIN dec pd ON pd.run_id = s.parent_run_id
+  LEFT JOIN sr pa ON pa.id = pd.decision_id
   -- A run's campaign is set once at creation: read off runs once per decision (PK probe), then kept.
   LEFT JOIN script_chain_decisions k ON k.decision_run_id = s.id AND k.campaign_read
   LEFT JOIN LATERAL (SELECT r.campaign_id FROM runs r WHERE r.id = s.id AND k.decision_run_id IS NULL OFFSET 0) p ON TRUE
@@ -216,7 +221,8 @@ UNION ALL
 SELECT 'decision', jsonb_build_object('decision_run_id', id, 'script_slug', script_slug, 'day', day, 'brand_ids', to_jsonb(brands),
                                       'produced_outcomes', to_jsonb(produced), 'reached_outcomes', to_jsonb(reached),
                                       'cost', cost::text, 'net_cost', net_cost::text, 'campaign_id', campaign_id,
-                                      'cost_names', to_jsonb(cost_names), 'source_cost_names', to_jsonb(source_cost_names))
+                                      'cost_names', to_jsonb(cost_names), 'source_cost_names', to_jsonb(source_cost_names),
+                                      'asked_by_script_slug', asked_by)
 FROM reach
 `);
 
@@ -302,23 +308,26 @@ async function writeDecisions(tx: any, rows: unknown[], stamp: string): Promise<
     WITH n AS MATERIALIZED (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
         AS x(decision_run_id uuid, script_slug text, day date, brand_ids text[], produced_outcomes text[], reached_outcomes text[], cost numeric, net_cost numeric,
-             campaign_id text, cost_names text[], source_cost_names text[])
+             campaign_id text, cost_names text[], source_cost_names text[], asked_by_script_slug text)
     ),
     up AS (
       INSERT INTO script_chain_decisions (decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost_in_usd_cents, net_cost_in_usd_cents,
-                                          campaign_id, campaign_read, cost_names, source_cost_names, updated_at)
+                                          campaign_id, campaign_read, cost_names, source_cost_names, asked_by_script_slug, updated_at)
       SELECT decision_run_id, script_slug, day, brand_ids, produced_outcomes, reached_outcomes, cost, net_cost, campaign_id, true, cost_names, source_cost_names,
-             ${stamp}::timestamptz FROM n
+             asked_by_script_slug, ${stamp}::timestamptz FROM n
       ON CONFLICT (decision_run_id) DO UPDATE
         SET script_slug = EXCLUDED.script_slug, day = EXCLUDED.day, brand_ids = EXCLUDED.brand_ids, produced_outcomes = EXCLUDED.produced_outcomes,
             reached_outcomes = EXCLUDED.reached_outcomes, cost_in_usd_cents = EXCLUDED.cost_in_usd_cents,
             net_cost_in_usd_cents = EXCLUDED.net_cost_in_usd_cents, campaign_id = EXCLUDED.campaign_id, campaign_read = true,
-            cost_names = EXCLUDED.cost_names, source_cost_names = EXCLUDED.source_cost_names, updated_at = EXCLUDED.updated_at
+            cost_names = EXCLUDED.cost_names, source_cost_names = EXCLUDED.source_cost_names, asked_by_script_slug = EXCLUDED.asked_by_script_slug,
+            updated_at = EXCLUDED.updated_at
       WHERE (script_chain_decisions.script_slug, script_chain_decisions.day, script_chain_decisions.brand_ids, script_chain_decisions.produced_outcomes,
              script_chain_decisions.reached_outcomes, script_chain_decisions.cost_in_usd_cents, script_chain_decisions.net_cost_in_usd_cents,
-             script_chain_decisions.campaign_id, script_chain_decisions.campaign_read, script_chain_decisions.cost_names, script_chain_decisions.source_cost_names)
+             script_chain_decisions.campaign_id, script_chain_decisions.campaign_read, script_chain_decisions.cost_names, script_chain_decisions.source_cost_names,
+             script_chain_decisions.asked_by_script_slug)
             IS DISTINCT FROM (EXCLUDED.script_slug, EXCLUDED.day, EXCLUDED.brand_ids, EXCLUDED.produced_outcomes, EXCLUDED.reached_outcomes,
-                              EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents, EXCLUDED.campaign_id, true, EXCLUDED.cost_names, EXCLUDED.source_cost_names)
+                              EXCLUDED.cost_in_usd_cents, EXCLUDED.net_cost_in_usd_cents, EXCLUDED.campaign_id, true, EXCLUDED.cost_names, EXCLUDED.source_cost_names,
+                              EXCLUDED.asked_by_script_slug)
       RETURNING 1
     ),
     gone AS (DELETE FROM script_chain_decisions t WHERE NOT EXISTS (SELECT 1 FROM n WHERE n.decision_run_id = t.decision_run_id) RETURNING 1)
@@ -395,8 +404,8 @@ export async function buildOutcomeChains(): Promise<OutcomeChainBuild | null> {
         reachRows: rc.n,
       };
       await tx.execute(sql`
-        INSERT INTO outcome_chain_builds (built_at, duration_ms, changed_rows, consumed_rows, step_rows, reach_rows, cost_names)
-        VALUES (${build.builtAt}::timestamptz, ${build.durationMs}, ${build.changedRows}, ${build.consumedRows}, ${build.stepRows}, ${build.reachRows}, true)`);
+        INSERT INTO outcome_chain_builds (built_at, duration_ms, changed_rows, consumed_rows, step_rows, reach_rows, cost_names, asked_by)
+        VALUES (${build.builtAt}::timestamptz, ${build.durationMs}, ${build.changedRows}, ${build.consumedRows}, ${build.stepRows}, ${build.reachRows}, true, true)`);
       await tx.execute(sql`DELETE FROM outcome_chain_builds WHERE built_at < now() - interval '7 days'`);
       return build;
     });
@@ -526,9 +535,16 @@ export async function readScriptReach(f: ScriptReachFilter) {
     await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`);
     const build = await lastBuild(tx);
     const withNames = f.includeCostNames === true;
+    // ONE-WRITER-N-MODELS-1116: the include=costNames read also names (and splits by) the script that ASKED each
+    // decision, once a build wrote it; before that build (<= 15 min after the deploy) the field is absent, never null.
+    let withAsker = false;
     if (withNames) {
-      const [b] = (await tx.execute(sql`SELECT cost_names FROM outcome_chain_builds ORDER BY built_at DESC LIMIT 1`)) as Array<{ cost_names: boolean }>;
+      const [b] = (await tx.execute(sql`SELECT cost_names, asked_by FROM outcome_chain_builds ORDER BY built_at DESC LIMIT 1`)) as Array<{
+        cost_names: boolean;
+        asked_by: boolean;
+      }>;
       if (!b.cost_names) throw new OutcomeChainCostNamesNotBuiltError();
+      withAsker = b.asked_by;
     }
     const where: SQL[] = [sql`runs > 0`];
     if (f.brandId !== null) where.push(sql`brand_ids @> ARRAY[${f.brandId}]::text[]`);
@@ -544,19 +560,21 @@ export async function readScriptReach(f: ScriptReachFilter) {
     const from =
       campaignIds || withNames
         ? sql`(SELECT script_slug, day, brand_ids, produced_outcomes, reached_outcomes, 1 AS runs, cost_in_usd_cents, net_cost_in_usd_cents,
-                      cost_names, source_cost_names
+                      cost_names, source_cost_names, asked_by_script_slug
                FROM script_chain_decisions
                WHERE ${campaignIds ? sql`campaign_id = ANY(${`{${campaignIds.map((c) => JSON.stringify(c)).join(",")}}`}::text[])` : sql`TRUE`}) d`
         : sql.raw("script_chain_reach");
-    const names = withNames ? sql`, cost_names, source_cost_names` : sql``;
+    const askerKey = f.groupBy === "dynasty" ? sql.raw(`regexp_replace(asked_by_script_slug, '/v[0-9]+$', '')`) : sql.raw("asked_by_script_slug");
+    const names = withNames ? (withAsker ? sql`, cost_names, source_cost_names, ${askerKey} AS asked_by` : sql`, cost_names, source_cost_names`) : sql``;
+    const groupCols = withAsker ? sql`1, 2, 3, 4, 5, 6, 7` : withNames ? sql`1, 2, 3, 4, 5, 6` : sql`1, 2, 3, 4`;
     const rows = (await tx.execute(sql`
       SELECT ${key} AS script, to_char(day, 'YYYY-MM-DD') AS day, produced_outcomes, reached_outcomes${names}, sum(runs)::int AS runs,
              sum(cost_in_usd_cents)::text AS cost, sum(net_cost_in_usd_cents)::text AS net_cost
       FROM ${from} WHERE ${sql.join(where, sql` AND `)}
-      GROUP BY ${withNames ? sql`1, 2, 3, 4, 5, 6` : sql`1, 2, 3, 4`}
-      ORDER BY ${withNames ? sql`1, 2, 3, 4, 5, 6` : sql`1, 2, 3, 4`}`)) as Array<{
+      GROUP BY ${groupCols}
+      ORDER BY ${groupCols}`)) as Array<{
       script: string; day: string; produced_outcomes: string[]; reached_outcomes: string[]; cost_names?: string[]; source_cost_names?: string[];
-      runs: number; cost: string; net_cost: string;
+      asked_by?: string | null; runs: number; cost: string; net_cost: string;
     }>;
     return {
       builtAt: build.builtAt,
@@ -570,6 +588,7 @@ export async function readScriptReach(f: ScriptReachFilter) {
         producedOutcomes: r.produced_outcomes,
         reachedOutcomes: r.reached_outcomes,
         ...(withNames ? { costNames: r.cost_names, sourceCostNames: r.source_cost_names } : {}),
+        ...(withAsker ? (f.groupBy === "dynasty" ? { askedByScriptDynasty: r.asked_by ?? null } : { askedByScriptSlug: r.asked_by ?? null }) : {}),
         runs: r.runs,
         costInUsdCents: r.cost,
         netCostInUsdCents: r.net_cost,

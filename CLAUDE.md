@@ -851,6 +851,12 @@ serves COUNTS only (no value, no ranking, no outcome named in code). `src/servic
   both arrays too (a fallback model splits its decisions off; sums equal the plain read); absent = byte-identical. 503 until a
   build stamped `outcome_chain_builds.cost_names`. The build refuses while `subtree_cost_items` is unstamped. No model is
   named here: features-service maps names to LLMs. Guard: the SERVED-MODEL-1116 test in `outcome-chains.test.ts`.
+- **Who asked (migration 0117, ONE-WRITER-N-MODELS-1116-RUNS)**: `script_chain_decisions.asked_by_script_slug` = the script of the
+  decision holding the PARENT run of the decision's root (sender -> writer -> LLM completion: the completion names the writer, the
+  writer the sender), NULL = no script's run opened it (a campaign's own). `include=costNames` also splits by it and serves
+  `askedByScriptDynasty` (groupBy=dynasty) / `askedByScriptSlug` (version); absent (never null) until a build stamped
+  `outcome_chain_builds.asked_by`. Plain read byte-identical. Every build recomputes it for the whole history. Guard: the
+  ONE-WRITER-N-MODELS-1116 test in `nested-script-decisions.test.ts`.
 - **Cost**: one read-only statement on statsDb (own tx, 900 s), prod 2026-11-13 ~1.3M occurrences / 640k consumptions / 540k edges /
   186k decisions. Script runs come off `idx_runs_script_slug_cover` (partial, built CONCURRENTLY out-of-band on prod: a seq scan of
   `runs` was 24 s); run brands / workflows from `outcome_chain_run_attrs` (500k PK probes were 57 s, a seq-scan hash join 30 s): each build adds the runs
