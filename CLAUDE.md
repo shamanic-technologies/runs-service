@@ -821,6 +821,13 @@ serves COUNTS only (no value, no ranking, no outcome named in code). `src/servic
   `script_chain_decisions` whose `campaign_id` (the decision run's, read off `runs` once per decision by the build:
   `campaign_read`) is listed, same groups and figures; absent = `script_chain_reach` byte for byte. Response echoes
   `campaignIds` only when filtered. A decision run with no campaign of its own (nested under another) matches none.
+- **Who served (migration 0115, SERVED-MODEL-1116-RUNS)**: `script_chain_decisions.cost_names` = sorted cost names of the
+  decision's ACTUAL rows (run_subtree_cost_items 0092 of its run minus nested decisions' subtrees, name kept while its row
+  count > 0); `source_cost_names` = union of the cost_names of the OTHER script decisions (any script) whose standing Units
+  its runs consumed, one hop (the writing behind a send). `script-reach?include=costNames` groups the stored decisions by
+  both arrays too (a fallback model splits its decisions off; sums equal the plain read); absent = byte-identical. 503 until a
+  build stamped `outcome_chain_builds.cost_names`. The build refuses while `subtree_cost_items` is unstamped. No model is
+  named here: features-service maps names to LLMs. Guard: the SERVED-MODEL-1116 test in `outcome-chains.test.ts`.
 - **Cost**: one read-only statement on statsDb (own tx, 900 s), prod 2026-11-13 ~1.3M occurrences / 640k consumptions / 540k edges /
   186k decisions. Script runs come off `idx_runs_script_slug_cover` (partial, built CONCURRENTLY out-of-band on prod: a seq scan of
   `runs` was 24 s); run brands / workflows from `outcome_chain_run_attrs` (500k PK probes were 57 s, a seq-scan hash join 30 s): each build adds the runs

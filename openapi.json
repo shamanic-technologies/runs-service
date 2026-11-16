@@ -11858,6 +11858,16 @@
               "dynasty"
             ]
           },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "costNames"
+              ]
+            },
+            "description": "Present only when asked (include=costNames): the groups are also split by costNames + sourceCostNames."
+          },
           "groups": {
             "type": "array",
             "items": {
@@ -11888,6 +11898,20 @@
                     "type": "string"
                   },
                   "description": "Sorted outcomes of every Unit its chain reached through the edges, any depth (its own Units excluded; [] = nothing consumed them into a Unit)."
+                },
+                "costNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "include=costNames only. Sorted cost names (costs-service priced items) these decisions billed on their own work: charged (actual) rows of the decision run's subtree, minus the script decisions opened under it. A model that served instead of the script's stated one (a fallback) is the one named here. Decisions billing different names never share a group. [] = billed nothing charged."
+                },
+                "sourceCostNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "include=costNames only. Sorted union of the costNames of the OTHER script decisions (any script) whose standing Units these decisions' runs consumed, one hop: a send decision that billed no model carries the names of the decision that wrote the message it sent. [] = it consumed no Unit made by another script decision."
                 },
                 "runs": {
                   "type": "integer"
@@ -19653,6 +19677,19 @@
             "required": false,
             "description": "Default version (one group per script slug).",
             "name": "groupBy",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "costNames"
+              ],
+              "description": "costNames: also split each group by the cost names its decisions billed (costNames) and those of the script decisions whose Units they consumed (sourceCostNames). Same figures summed over the split groups; absent = unchanged answer. 503 until a build wrote them."
+            },
+            "required": false,
+            "description": "costNames: also split each group by the cost names its decisions billed (costNames) and those of the script decisions whose Units they consumed (sourceCostNames). Same figures summed over the split groups; absent = unchanged answer. 503 until a build wrote them.",
+            "name": "include",
             "in": "query"
           }
         ],
