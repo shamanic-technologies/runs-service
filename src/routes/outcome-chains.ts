@@ -79,6 +79,10 @@ router.get("/internal/stats/outcome-chains/script-reach", requireInternalAuth, a
         return;
       }
     }
+    if (q.include !== undefined && q.include !== "costNames") {
+      res.status(400).json({ error: "include must be costNames" });
+      return;
+    }
     const groupBy = q.groupBy ?? "version";
     if (groupBy !== "version" && groupBy !== "dynasty") {
       res.status(400).json({ error: "groupBy must be version or dynasty" });
@@ -93,6 +97,7 @@ router.get("/internal/stats/outcome-chains/script-reach", requireInternalAuth, a
         until: (q.until as string | undefined) ?? null,
         groupBy,
         campaignIds: campaignIds as string[] | null,
+        includeCostNames: q.include === "costNames",
       }),
     );
   } catch (err) {

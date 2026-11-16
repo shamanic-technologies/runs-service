@@ -287,6 +287,82 @@ describe("SCRIPT-VALUE-RATING-1113: outcome chains", () => {
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 
+  it("SERVED-MODEL-1116: each decision names the cost names it billed and those of the writing behind what it sent", async () => {
+    const SEND = "chn1116_sent/dy_sender__kimi/v1";
+    const run = async (key: string, o: Record<string, unknown>) => {
+      const r = await insertTestRun({ organizationId: ORG, brandIds: [B1], status: "completed", ...o } as any);
+      ids[key] = r.id;
+      return r.id;
+    };
+    const cost = (runId: string, costName: string, extra: Record<string, string> = {}) =>
+      insertTestRunCost({ runId, costName, quantity: "1", unitCostInUsdCents: "1", totalCostInUsdCents: "1", ...extra });
+    // Two write decisions of the SAME script: one written by the stated model, one by its fallback; each also bills a helper.
+    const wk = await run("wk", { serviceName: "workflow", taskName: "script", scriptSlug: SEND, startedAt: at("2026-11-14T09:00:00Z") });
+    const wkLlm = await run("wkLlm", { serviceName: "chat-service", taskName: "complete", scriptSlug: SEND, parentRunId: wk, startedAt: at("2026-11-14T09:00:01Z") });
+    const wt = await run("wt", { serviceName: "workflow", taskName: "script", scriptSlug: SEND, startedAt: at("2026-11-14T16:00:00Z") });
+    const wtLlm = await run("wtLlm", { serviceName: "chat-service", taskName: "complete", scriptSlug: SEND, parentRunId: wt, startedAt: at("2026-11-14T16:00:01Z") });
+    await cost(wkLlm, "chn1116-kimi-tokens-output");
+    await cost(wkLlm, "chn1116-kimi-tokens-input");
+    await cost(wtLlm, "chn1116-terra-tokens-output");
+    await cost(wk, "chn1116-helper-tokens");
+    await cost(wt, "chn1116-helper-tokens");
+    // A cancelled call never served: not named. A nested script decision's names are its own.
+    await cost(wtLlm, "chn1116-kimi-tokens-output", { status: "cancelled" });
+    const nested = await run("wtNested", { serviceName: "workflow", taskName: "script", scriptSlug: "chn1116_other/dy_nested/v1", parentRunId: wt, startedAt: at("2026-11-14T16:00:02Z") });
+    await cost(nested, "chn1116-nested-tokens");
+    // Two send decisions of the same script, later: they bill no model, they consume the messages written above.
+    const sk = await run("sk", { serviceName: "workflow", taskName: "script", scriptSlug: SEND, startedAt: at("2026-11-15T09:00:00Z") });
+    const skSend = await run("skSend", { serviceName: "instantly-service", taskName: "send", scriptSlug: SEND, parentRunId: sk, startedAt: at("2026-11-15T09:00:01Z") });
+    const st = await run("st", { serviceName: "workflow", taskName: "script", scriptSlug: SEND, startedAt: at("2026-11-15T10:00:00Z") });
+    const stSend = await run("stSend", { serviceName: "instantly-service", taskName: "send", scriptSlug: SEND, parentRunId: st, startedAt: at("2026-11-15T10:00:01Z") });
+    await cost(skSend, "chn1116-send");
+    await cost(stSend, "chn1116-send");
+    expect((await declare("workflow", [
+      { runId: wk, produced: [{ outcomeKey: WRITTEN, ...lead("k") }] },
+      { runId: wt, produced: [{ outcomeKey: WRITTEN, ...lead("t") }] },
+    ])).status).toBe(201);
+    expect((await declare("instantly-service", [
+      { runId: skSend, consumed: [{ outcomeKey: WRITTEN, ...lead("k") }], produced: [{ outcomeKey: SENT, ...lead("k") }] },
+      { runId: stSend, consumed: [{ outcomeKey: WRITTEN, ...lead("t") }], produced: [{ outcomeKey: SENT, ...lead("t") }] },
+    ])).status).toBe(201);
+
+    // A build from before the names existed: the opt-in read refuses, the plain read answers.
+    await db.execute(sql`UPDATE outcome_chain_builds SET cost_names = false`);
+    const path = `/internal/stats/outcome-chains/script-reach?scriptSlugs=${SEND}`;
+    expect((await request(app).get(`${path}&include=costNames`).set(H)).status).toBe(503);
+    await buildOutcomeChains();
+
+    const plain = await get(path);
+    expect(plain.include).toBeUndefined();
+    expect(plain.groups.every((g: any) => g.costNames === undefined && g.sourceCostNames === undefined)).toBe(true);
+    // Unsplit: the two writes share one row, the two sends another.
+    expect(plain.groups.map((g: any) => [g.day, g.producedOutcomes, g.runs])).toEqual([
+      ["2026-11-14", [WRITTEN], 2],
+      ["2026-11-15", [SENT], 2],
+    ]);
+
+    const split = await get(`${path}&include=costNames`);
+    expect(split.include).toEqual(["costNames"]);
+    expect(split.groups.map((g: any) => [g.day, g.producedOutcomes, g.costNames, g.sourceCostNames, g.runs])).toEqual([
+      ["2026-11-14", [WRITTEN], ["chn1116-helper-tokens", "chn1116-kimi-tokens-input", "chn1116-kimi-tokens-output"], [], 1],
+      ["2026-11-14", [WRITTEN], ["chn1116-helper-tokens", "chn1116-terra-tokens-output"], [], 1],
+      // The sends billed no model: each carries the names of the decision that wrote what it sent.
+      ["2026-11-15", [SENT], ["chn1116-send"], ["chn1116-helper-tokens", "chn1116-kimi-tokens-input", "chn1116-kimi-tokens-output"], 1],
+      ["2026-11-15", [SENT], ["chn1116-send"], ["chn1116-helper-tokens", "chn1116-terra-tokens-output"], 1],
+    ]);
+    // The split adds up to the plain read, figure for figure.
+    const sum = (gs: any[], day: string, f: string) =>
+      gs.filter((g) => g.day === day).reduce((a, g) => a + Number(g[f]), 0);
+    for (const day of ["2026-11-14", "2026-11-15"]) {
+      for (const f of ["runs", "costInUsdCents", "netCostInUsdCents"]) expect(sum(split.groups, day, f)).toBe(sum(plain.groups, day, f));
+    }
+    // Narrowed to campaigns and by dynasty: still split.
+    const dyn = await get(`/internal/stats/outcome-chains/script-reach?scriptDynasties=chn1116_sent/dy_sender__kimi&groupBy=dynasty&include=costNames&brandId=${B1}`);
+    expect(dyn.groups).toHaveLength(4);
+    expect((await get(`${path}&include=costNames&campaignIds=${C1}`)).groups).toEqual([]);
+    expect((await request(app).get(`${path}&include=models`).set(H)).status).toBe(400);
+  });
+
   it("refuses bad filters and cursors", async () => {
     expect((await request(app).get("/internal/stats/outcome-chains/script-reach?groupBy=brand").set(H)).status).toBe(400);
     expect((await request(app).get("/internal/stats/outcome-chains/script-reach?since=2026-1-1").set(H)).status).toBe(400);
