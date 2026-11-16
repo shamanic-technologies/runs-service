@@ -31,6 +31,7 @@ import {
   AddCostsRequestSchema,
 } from "../schemas.js";
 import { pgErrorCode } from "../db/pg-error.js";
+import { sameEngineScript } from "./runs.js";
 
 const router = Router();
 
@@ -52,6 +53,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       brandProfileId,
       audienceId,
       workflowContext,
+      scriptSlug,
       serviceName,
       taskName,
       idempotencyKey,
@@ -76,9 +78,14 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
 
     // A named parent must exist (never silently a root) and must not sit in
     // another org than the one this request states. Nothing is inherited.
+    // SERVED-MODEL-1116-NESTED-RUNS: a platform run states its own script (fleet script runs: inbound decisions,
+    // send selection). Nothing is inherited: unstated = no script. A stated script under a named parent naming
+    // another Engine's script keeps the parent's on script_slug (the outermost wins, as POST /v1/runs); its
+    // decision script is always its own.
+    let resolvedScriptSlug = scriptSlug ?? null;
     if (parentRunId) {
       const [parent] = await db
-        .select({ organizationId: runs.organizationId })
+        .select({ organizationId: runs.organizationId, scriptSlug: runs.scriptSlug })
         .from(runs)
         .where(eq(runs.id, parentRunId))
         .limit(1);
@@ -93,6 +100,7 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
         });
         return;
       }
+      if (resolvedScriptSlug && parent.scriptSlug && !sameEngineScript(resolvedScriptSlug, parent.scriptSlug)) resolvedScriptSlug = parent.scriptSlug;
     }
 
     const id = newRunId();
@@ -121,6 +129,8 @@ router.post("/v1/platform-runs", requirePlatformAuth, async (req, res) => {
       workflowSlug: req.headerWorkflowSlug ?? workflowSlug ?? null,
       featureSlug: req.headerFeatureSlug ?? featureSlug ?? null,
       ...attribution,
+      scriptSlug: resolvedScriptSlug,
+      decisionScriptSlug: scriptSlug ?? null,
       serviceName,
       taskName,
       idempotencyKey: idempotencyKey ?? null,

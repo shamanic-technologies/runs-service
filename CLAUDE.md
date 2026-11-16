@@ -822,6 +822,9 @@ script (`message_sent/dy_answer_lead*` under `meeting_booked/dy_book_meeting`) h
   stated root wins, any call order; idempotent; `decisionStatedRuns`). runs-service cannot derive the version
   (task `script:<outcome>/<dynasty>` has none; the bronze payload held the resolved outer slug): workflow-service
   (`result.script` per run) re-states its nested script runs. No ledger day re-staled.
+- **`POST /v1/platform-runs` stores a STATED `scriptSlug`** (fleet script runs: inbound decisions, send selection; it was
+  parsed and dropped until this follow-up, 13,550 runs since 2026-11-05 with no script): decision = stated, script_slug
+  = stated unless a named parent names another Engine's script (outermost wins). Unstated = none (nothing inherited).
 - `idx_runs_decision_script_cover` (script_slug INCLUDE ..., decision_script_slug) serves the build's script-run read;
   built CONCURRENTLY out-of-band on prod. The 0116 ALTER / index retry on `lock_not_available` inside the migration.
 - Guard: `tests/integration/nested-script-decisions.test.ts`.
