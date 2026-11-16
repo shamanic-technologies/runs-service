@@ -72,7 +72,8 @@ describe("SERVED-MODEL-1116-NESTED-RUNS: a script asked by another script is its
     delete process.env.SERVICE_CALLS_LAG_MS;
     const mine = `{${Object.values(ids).join(",")}}`;
     await db.execute(sql`DELETE FROM outcome_declaration_events WHERE run_id = ANY(${mine}::uuid[])`);
-    await db.execute(sql`DELETE FROM run_lifecycle_events WHERE identity->>'orgId' = ${ORG}`);
+    await db.execute(sql`DELETE FROM run_lifecycle_events WHERE identity->>'orgId' = ${ORG} OR run_id = ANY(${mine}::uuid[])`);
+    await db.execute(sql`DELETE FROM runs WHERE id = ANY(${mine}::uuid[])`);
     await cleanTestData([ORG]);
     await closeDb();
   });
@@ -132,6 +133,19 @@ describe("SERVED-MODEL-1116-NESTED-RUNS: a script asked by another script is its
       [SENT, BOOK, 1, "7.0000000000"],
     ]);
     expect(res.body.produced.some((g: any) => g.dimensions.scriptSlug === GLM)).toBe(false);
+  });
+
+  it("POST /v1/platform-runs stores the stated script (fleet script runs); nothing inherited when unstated", async () => {
+    const p = getPlatformAuthHeaders({ serviceName: "workflow" });
+    const fleet = await request(app).post("/v1/platform-runs").set(p).send({ serviceName: "workflow", taskName: "script:nst1116_message_sent/dy_answer_lead__glm", scriptSlug: GLM });
+    expect(fleet.status).toBe(201);
+    expect([fleet.body.scriptSlug, fleet.body.decisionScriptSlug]).toEqual([GLM, GLM]);
+    const call = await request(app).post("/v1/platform-runs").set(p).send({ serviceName: CHAT, taskName: "complete", parentRunId: fleet.body.id });
+    expect([call.body.scriptSlug, call.body.decisionScriptSlug]).toEqual([null, null]);
+    // under a named parent of another Engine: the ledger keeps the outermost, the decision is its own
+    const nested = await request(app).post("/v1/platform-runs").set(p).send({ serviceName: "workflow", taskName: "script:y", scriptSlug: BOOK, parentRunId: fleet.body.id });
+    expect([nested.body.scriptSlug, nested.body.decisionScriptSlug]).toEqual([GLM, BOOK]);
+    Object.assign(ids, { fleet: fleet.body.id, fleetCall: call.body.id, fleetNested: nested.body.id });
   });
 
   it("history: script-statements re-states a recorded nested run as its own decision, whatever the order, idempotently", async () => {
