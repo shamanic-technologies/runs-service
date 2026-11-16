@@ -148,6 +148,57 @@ describe("SERVED-MODEL-1116-NESTED-RUNS: a script asked by another script is its
     Object.assign(ids, { fleet: fleet.body.id, fleetCall: call.body.id, fleetNested: nested.body.id });
   });
 
+  it("ONE-WRITER-N-MODELS-1116: each decision names the script that asked it; the split adds up to the plain read", async () => {
+    const SENDER = "nst1116a_email_sent/dy_send/v1";
+    const WRITER = "nst1116a_message_written/dy_write/v2";
+    const MODEL = "nst1116a_llm_completion/dy_kimi/v1";
+    const h = getAuthHeaders({ orgId: ORG });
+    const open = async (parent: string | null, body: Record<string, unknown>) => {
+      const r = await request(app).post("/v1/runs").set(parent ? { ...h, "x-run-id": parent } : h).send({ brandIds: [BRAND], ...body });
+      expect(r.status).toBe(201);
+      return r.body.id as string;
+    };
+    // sender -> writer -> completion, each its own script decision; the completion's chat call pays the model.
+    const sender = await open(null, { serviceName: "workflow", taskName: "script:nst1116a_email_sent/dy_send", scriptSlug: SENDER });
+    const writer = await open(sender, { serviceName: "workflow", taskName: "script:nst1116a_message_written/dy_write", scriptSlug: WRITER });
+    const writerStep = await open(writer, { serviceName: "workflow", taskName: "step" });
+    const model = await open(writerStep, { serviceName: "workflow", taskName: "script:nst1116a_llm_completion/dy_kimi", scriptSlug: MODEL });
+    const modelChat = await open(model, { serviceName: CHAT, taskName: "complete" });
+    Object.assign(ids, { aSender: sender, aWriter: writer, aWriterStep: writerStep, aModel: model, aModelChat: modelChat });
+    await cost(modelChat, "3");
+    await cost(writerStep, "2");
+    await cost(sender, "1");
+
+    await buildOutcomeChains();
+    const base = `/internal/stats/outcome-chains/script-reach?groupBy=dynasty&scriptDynasties=${[SENDER, WRITER, MODEL].map((x) => x.replace(/\/v[0-9]+$/, "")).join(",")}`;
+    const split = await get(`${base}&include=costNames`);
+    expect(split.groups.map((g: any) => [g.scriptDynasty, g.askedByScriptDynasty, g.runs, Number(g.costInUsdCents)])).toEqual([
+      ["nst1116a_email_sent/dy_send", null, 1, 1],
+      ["nst1116a_llm_completion/dy_kimi", "nst1116a_message_written/dy_write", 1, 3],
+      ["nst1116a_message_written/dy_write", "nst1116a_email_sent/dy_send", 1, 2],
+    ]);
+    // By version: the full slug of the asker.
+    const v = await get(`/internal/stats/outcome-chains/script-reach?scriptSlugs=${MODEL},${GLM}&include=costNames`);
+    // (the fleet GLM run opened at the platform door, earlier in this file, has no asker)
+    const key = (x: unknown[]) => JSON.stringify(x);
+    expect(v.groups.map((g: any) => [g.scriptSlug, g.askedByScriptSlug]).sort((x: unknown[], y: unknown[]) => key(x).localeCompare(key(y)))).toEqual(
+      [[MODEL, WRITER], [GLM, BOOK], [GLM, null]].sort((x, y) => key(x).localeCompare(key(y))),
+    );
+    // Without include: no asker, figures unchanged; the split adds up to them.
+    const plain = await get(base);
+    expect(plain.groups.every((g: any) => g.askedByScriptDynasty === undefined)).toBe(true);
+    for (const f of ["runs", "costInUsdCents", "netCostInUsdCents"]) {
+      const total = (gs: any[]) => gs.reduce((a, g) => a + Number(g[f]), 0);
+      expect(total(split.groups)).toBe(total(plain.groups));
+    }
+    // A build from before the asker existed: the costNames read answers without naming it (never a null it does not know).
+    await db.execute(sql`UPDATE outcome_chain_builds SET asked_by = false`);
+    const old = await get(`${base}&include=costNames`);
+    expect(old.groups.every((g: any) => !("askedByScriptDynasty" in g))).toBe(true);
+    expect(old.groups.map((g: any) => g.scriptDynasty)).toHaveLength(3);
+    await buildOutcomeChains();
+  });
+
   it("history: script-statements re-states a recorded nested run as its own decision, whatever the order, idempotently", async () => {
     // Recorded before 0116: the asked script's run and its child carry the OUTER slug, no decision script.
     const at = new Date(`${TODAY}T00:00:00Z`);

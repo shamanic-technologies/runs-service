@@ -4450,6 +4450,19 @@ export const ScriptReachResponseSchema = z
             description:
               "include=costNames only. Sorted union of the costNames of the OTHER script decisions (any script) whose standing Units these decisions' runs consumed, one hop: a send decision that billed no model carries the names of the decision that wrote the message it sent. [] = it consumed no Unit made by another script decision.",
           }),
+        askedByScriptDynasty: z
+          .string()
+          .nullable()
+          .optional()
+          .openapi({
+            description:
+              "include=costNames with groupBy=dynasty. `<outcome>/<dynasty>` of the script decision that ASKED these decisions (the decision holding the parent run of each decision's root run: a writer asked by a sender, a model asked by a writer); null = no script asked them (a campaign's own decision). Decisions with different askers never share a group. Absent until a build wrote it (<= 15 min after the deploy).",
+          }),
+        askedByScriptSlug: z
+          .string()
+          .nullable()
+          .optional()
+          .openapi({ description: "include=costNames with groupBy=version: same as askedByScriptDynasty, the asking script's full slug `<outcome>/<dynasty>/v<version>`." }),
         runs: z.number().int(),
         costInUsdCents: z.string().openapi({ description: "What those runs cost, billed gross USD cents (decimal string): each decision run's subtree, incurred (actual + provisioned), minus the subtrees of script decisions opened under its own runs (they are their own decisions)." }),
         netCostInUsdCents: z.string().openapi({ description: "Same on the frozen net basis (after the org's usage discount)." }),
@@ -4484,7 +4497,7 @@ registry.registerPath({
         .optional()
         .openapi({
           description:
-            "costNames: also split each group by the cost names its decisions billed (costNames) and those of the script decisions whose Units they consumed (sourceCostNames). Same figures summed over the split groups; absent = unchanged answer. 503 until a build wrote them.",
+            "costNames: also split each group by the cost names its decisions billed (costNames), those of the script decisions whose Units they consumed (sourceCostNames) and the script that asked them (askedByScriptDynasty / askedByScriptSlug). Same figures summed over the split groups; absent = unchanged answer. 503 until a build wrote them.",
         }),
     }),
   },
