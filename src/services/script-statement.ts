@@ -9,7 +9,14 @@
 // reason, statedBy: the audit trail), projected by `project_run_lifecycle_to_silver`, which fills a NULL
 // `runs.script_slug` only. The walk descends from each root through runs carrying no script or the root's own (a
 // subtree already stating another script keeps it: the OUTERMOST script wins at write, and a recorded one is never
-// overwritten). Cost amounts never move. The stored ledger days the named runs touched are recomputed: every day
+// overwritten). Cost amounts never move.
+//
+// DECISION script (SERVED-MODEL-1116-NESTED-RUNS, 0116): in the same call every root (named or not) also states its
+// script as the DECISION script of itself and of the descendants that shared its decision (same COALESCE(decision,
+// script) as the root before the call; the walk stops at another root of the call and at a run already deciding for
+// another script). The nearest root wins, so a script asked by another one (its run opened under the asker's, recorded
+// under the asker's slug before 0116) becomes its own decision whatever order the roots are stated in. Bronze
+// `run.decision_script_stated` per moved run; feeds the decision reads only, never the ledger (no day re-staled). The stored ledger days the named runs touched are recomputed: every day
 // from the earliest corrected run's start is flagged `script_slugs = false` (a consumed row on a later day reads the
 // producing run's script), so a script read lists them missing until the refresher stores them again. Idempotent.
 
@@ -24,7 +31,7 @@ export type ScriptStatementInput = {
 };
 
 export type ScriptStatementResult =
-  | { kind: "ok"; statedRuns: number; daysToRecompute: number; alreadyNamed: { runId: string; scriptSlug: string }[] }
+  | { kind: "ok"; statedRuns: number; daysToRecompute: number; alreadyNamed: { runId: string; scriptSlug: string }[]; decisionStatedRuns: number }
   | { kind: "missing"; missingRunIds: string[] }
   | { kind: "ambiguous"; rootRunIds: string[] };
 
@@ -90,6 +97,43 @@ export async function stateScripts(input: ScriptStatementInput): Promise<ScriptS
       );
     }
 
+    // The decision script, read AFTER the outer statement above projected (same transaction).
+    const decisionTargets = (await tx.execute(sql`
+      WITH RECURSIVE roots AS MATERIALIZED (
+        SELECT r.id, x.s, COALESCE(r.decision_script_slug, r.script_slug) AS old
+          FROM jsonb_to_recordset(${pairs}::jsonb) AS x(id text, s text)
+          JOIN runs r ON r.id = (x.id)::uuid
+      ),
+      walk AS (
+        SELECT id, s, old, 0 AS depth FROM roots
+        UNION ALL
+        SELECT c.id, w.s, w.old, w.depth + 1
+          FROM walk w
+          JOIN runs c ON c.parent_run_id = w.id
+         WHERE c.id NOT IN (SELECT id FROM roots)
+           AND COALESCE(c.decision_script_slug, c.script_slug) IS NOT DISTINCT FROM w.old
+           AND w.depth < 64
+      ),
+      nearest AS (
+        SELECT DISTINCT ON (w.id) w.id, w.s FROM walk w ORDER BY w.id, w.depth
+      )
+      SELECT r.id, n.s AS script, r.organization_id
+        FROM nearest n JOIN runs r ON r.id = n.id
+       WHERE r.script_slug IS NOT NULL
+         AND COALESCE(r.decision_script_slug, r.script_slug) IS DISTINCT FROM n.s
+    `)) as unknown as Array<{ id: string; script: string; organization_id: string | null }>;
+    for (let i = 0; i < decisionTargets.length; i += CHUNK) {
+      await tx.insert(runLifecycleEvents).values(
+        decisionTargets.slice(i, i + CHUNK).map((t) => ({
+          runId: t.id,
+          eventType: "run.decision_script_stated",
+          payload: { decisionScriptSlug: t.script, reason: input.reason, statedBy: input.statedBy },
+          identity: { orgId: t.organization_id },
+          sourceService: input.statedBy,
+        })),
+      );
+    }
+
     let daysToRecompute = 0;
     if (targets.length > 0) {
       const first = targets.reduce((m, t) => (t.started_day < m ? t.started_day : m), targets[0]!.started_day);
@@ -98,6 +142,6 @@ export async function stateScripts(input: ScriptStatementInput): Promise<ScriptS
       `)) as unknown as unknown[];
       daysToRecompute = flagged.length;
     }
-    return { kind: "ok" as const, statedRuns: targets.length, daysToRecompute, alreadyNamed };
+    return { kind: "ok" as const, statedRuns: targets.length, daysToRecompute, alreadyNamed, decisionStatedRuns: decisionTargets.length };
   });
 }
