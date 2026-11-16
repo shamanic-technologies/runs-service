@@ -152,6 +152,9 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
     let resolvedWorkflowSlug = req.headerWorkflowSlug || workflowSlug || null;
     let resolvedFeatureSlug = req.headerFeatureSlug || featureSlug || null;
     let resolvedScriptSlug = scriptSlug ?? null;
+    // SERVED-MODEL-1116-NESTED-RUNS: the script whose DECISION this run belongs to = the innermost one stated (its
+    // own, else its parent's). A script asked by another script is its own decision; script_slug keeps the outermost.
+    let resolvedDecisionScriptSlug = scriptSlug ?? null;
     let resolvedOrgId = req.orgId;
     let resolvedUserId = req.userId || null;
     let resolvedAttribution = requestAttribution(req, {
@@ -173,6 +176,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
           audienceId: runs.audienceId,
           workflowContext: runs.workflowContext,
           scriptSlug: runs.scriptSlug,
+          decisionScriptSlug: runs.decisionScriptSlug,
           organizationId: runs.organizationId,
           userId: runs.userId,
         })
@@ -233,6 +237,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       // except a script of the SAME Engine (outcome): a competing candidate tried under it (the Rating's fallthrough)
       // names itself.
       if (parentRun.scriptSlug && !sameEngineScript(resolvedScriptSlug, parentRun.scriptSlug)) resolvedScriptSlug = parentRun.scriptSlug;
+      if (!resolvedDecisionScriptSlug) resolvedDecisionScriptSlug = parentRun.decisionScriptSlug ?? parentRun.scriptSlug;
       if (!resolvedUserId) resolvedUserId = parentRun.userId;
       resolvedAttribution = inheritAttribution(resolvedAttribution, parentRun);
     }
@@ -259,6 +264,7 @@ router.post("/v1/runs", requireApiKey, async (req, res) => {
       featureSlug: resolvedFeatureSlug,
       ...resolvedAttribution,
       scriptSlug: resolvedScriptSlug,
+      decisionScriptSlug: resolvedDecisionScriptSlug,
       serviceName,
       taskName,
       idempotencyKey: idempotencyKey ?? null,

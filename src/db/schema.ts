@@ -19,6 +19,10 @@ export const runs = pgTable(
     // The stored script this run works for (`<outcome>/<dynasty>/v<version>`, migration 0111): stated by the
     // writer opening a script run, inherited by its children, the outermost script of a chain wins.
     scriptSlug: text("script_slug"),
+    // SERVED-MODEL-1116-NESTED-RUNS (migration 0116): the script whose DECISION this run belongs to = the innermost
+    // script stated (its own, else its parent's). NULL = recorded before 0116 or never re-stated: readers take
+    // COALESCE(decision_script_slug, script_slug). Ledger dimensions keep script_slug (the outermost).
+    decisionScriptSlug: text("decision_script_slug"),
     serviceName: text("service_name").notNull(),
     taskName: text("task_name").notNull(),
     status: text("status").notNull().default("running"),

@@ -35,7 +35,8 @@ export type RunLifecycleEventType =
   | "run.failed"
   | "run.org_deleted"
   | "run.feature_slug_corrected"
-  | "run.script_stated";
+  | "run.script_stated"
+  | "run.decision_script_stated";
 export type CostLifecycleEventType = "cost.added" | "cost.materialized" | "cost.cancelled" | "cost.refunded" | "cost.repriced";
 
 export type Identity = {

@@ -125,7 +125,9 @@ steps_kind AS MATERIALIZED (
   FROM (SELECT x_key, y_key, brands, kind, count(DISTINCT x_id)::int AS n FROM edge_kind GROUP BY 1, 2, 3, 4) k
   GROUP BY 1, 2, 3
 ),
-sr AS MATERIALIZED (SELECT id, parent_run_id, script_slug, started_at, brand_ids FROM runs WHERE script_slug IS NOT NULL),
+-- A decision's script = the innermost one stated (SERVED-MODEL-1116-NESTED-RUNS, 0116): a script asked by another one is
+-- its own decision. decision_script_slug is set only where script_slug is (idx_runs_decision_script_cover).
+sr AS MATERIALIZED (SELECT id, parent_run_id, COALESCE(decision_script_slug, script_slug) AS script_slug, started_at, brand_ids FROM runs WHERE script_slug IS NOT NULL),
 link AS MATERIALIZED (SELECT c.id, p.id AS pid FROM sr c JOIN sr p ON p.id = c.parent_run_id AND p.script_slug = c.script_slug),
 roots AS MATERIALIZED (SELECT s.* FROM sr s LEFT JOIN link l ON l.id = s.id WHERE l.id IS NULL),
 dec(run_id, decision_id, depth) AS (
@@ -717,11 +719,11 @@ export async function resolveUnitDecisions(units: UnitToResolve[]) {
       ),
       walk(i, cur_id, parent_id, slug, depth) AS (
         SELECT p.i, r.id, r.parent_run_id, r.script_slug, 0
-        FROM pick p CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug FROM runs WHERE id = p.run_id OFFSET 0) r
+        FROM pick p CROSS JOIN LATERAL (SELECT id, parent_run_id, COALESCE(decision_script_slug, script_slug) AS script_slug FROM runs WHERE id = p.run_id OFFSET 0) r
         WHERE r.script_slug IS NOT NULL
         UNION ALL
         SELECT w.i, q.id, q.parent_run_id, q.script_slug, w.depth + 1
-        FROM walk w CROSS JOIN LATERAL (SELECT id, parent_run_id, script_slug FROM runs WHERE id = w.parent_id OFFSET 0) q
+        FROM walk w CROSS JOIN LATERAL (SELECT id, parent_run_id, COALESCE(decision_script_slug, script_slug) AS script_slug FROM runs WHERE id = w.parent_id OFFSET 0) q
         WHERE q.script_slug = w.slug AND w.depth < 50
       ),
       dec AS (SELECT DISTINCT ON (i) i, cur_id FROM walk ORDER BY i, depth DESC)

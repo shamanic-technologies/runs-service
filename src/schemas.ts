@@ -49,6 +49,7 @@ export const RunSchema = z
     audienceId: z.string().uuid().nullable(),
     workflowContext: z.string().nullable(),
     scriptSlug: z.string().nullable().optional().openapi({ description: "The stored script this run works for (`<outcome>/<dynasty>/v<version>`): its own, else its outermost script ancestor's. Null = no script." }),
+    decisionScriptSlug: z.string().nullable().optional().openapi({ description: "SERVED-MODEL-1116-NESTED-RUNS: the script whose DECISION this run belongs to = the innermost script stated (its own, else its parent's): a script asked by another script is its own decision. Null = recorded before migration 0116 and never re-stated (read scriptSlug)." }),
     serviceName: z.string(),
     taskName: z.string(),
     status: z.string(),
@@ -108,7 +109,7 @@ export const CreateRunRequestSchema = z
     workflowContext: z.string().min(1).optional().openapi({ description: "Optional stable workflow-context attribution key. Header x-workflow-context takes precedence when present. Do not send guessed labels." }),
     scriptSlug: z.string().regex(SCRIPT_SLUG_RE).optional().openapi({
       description:
-        "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict), except a script of the SAME Engine (same outcome): a competing candidate tried under it names itself. The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
+        "MON-SCRIPT-PRICES-2-1111: the stored SCRIPT this run executes, `<outcome>/<dynasty>/v<version>` (workflow-service names a script run so). Inherited by every child run; when the parent already carries a script, the PARENT's wins (a script nested in another is part of the outer one's production, never a conflict), except a script of the SAME Engine (same outcome): a competing candidate tried under it names itself. The run's DECISION script (`decisionScriptSlug`) is always the innermost stated: this one, else the parent's (SERVED-MODEL-1116-NESTED-RUNS). The outcome ledger groups by it (GET /internal/stats/outcome-costs `scriptSlug` / `sourceScriptSlug`), so each script is measured apart.",
       example: "email_sent/dy_cold_email/v5",
     }),
     serviceName: z.string().min(1),
@@ -880,6 +881,7 @@ export const ScriptStatementResponseSchema = z
     statedRuns: z.number().int(),
     daysToRecompute: z.number().int().openapi({ description: "Stored ledger days flagged for recompute (a script read lists them in daysMissing until the refresher stores them again)." }),
     alreadyNamed: z.array(z.object({ runId: z.string().uuid(), scriptSlug: z.string() })).openapi({ description: "Roots that already name ANOTHER script (an outer script's statement or their writer named it): kept, the outermost script wins." }),
+    decisionStatedRuns: z.number().int().openapi({ description: "SERVED-MODEL-1116-NESTED-RUNS: runs whose DECISION script was (re)stated: each root and its descendants take the root's script as decision script, the NEAREST stated root wins (a script asked by another one is its own decision, even when an outer script already named it). Never moves the ledger." }),
   })
   .openapi("ScriptStatementResponse");
 
@@ -888,7 +890,7 @@ registry.registerPath({
   path: "/internal/runs/script-statements",
   summary: "Name the stored script recorded run subtrees worked for (MON-SCRIPT-PRICES-2-1111)",
   description:
-    "The writer of script runs (workflow-service) states, on history recorded before runs carried a script (migration 0111), which script each root run executed: `<outcome>/<dynasty>/v<version>`. For each root and its descendants, every run whose script_slug is NULL gets the root's: one bronze run.script_stated event per run (payload: scriptSlug, reason, statedBy: the audit trail), projected onto runs.script_slug. The walk does not descend below a run stating another script; a root already naming another script keeps it (`alreadyNamed`), and a run reached from two roots takes the outer one's: the OUTERMOST script wins, as at write (state roots in run-start order). Cost amounts never move; the stored ledger days from the earliest stated run's start are recomputed (a script read lists them in daysMissing until then). Idempotent: a re-run states nothing. 404 when a root does not exist, 400 when one root is named with two scripts (nothing written).",
+    "The writer of script runs (workflow-service) states, on history recorded before runs carried a script (migration 0111), which script each root run executed: `<outcome>/<dynasty>/v<version>`. For each root and its descendants, every run whose script_slug is NULL gets the root's: one bronze run.script_stated event per run (payload: scriptSlug, reason, statedBy: the audit trail), projected onto runs.script_slug. The walk does not descend below a run stating another script; a root already naming another script keeps it (`alreadyNamed`), and a run reached from two roots takes the outer one's: the OUTERMOST script wins, as at write (state roots in run-start order). Cost amounts never move; the stored ledger days from the earliest stated run's start are recomputed (a script read lists them in daysMissing until then). In the same call, each root also states its DECISION script (SERVED-MODEL-1116-NESTED-RUNS): the root and the descendants that shared its decision take the root's script as runs.decision_script_slug (bronze run.decision_script_stated), the nearest stated root wins, so a nested asked script stated after its asker is its own decision (`decisionStatedRuns`); this feeds the decision reads (script reach, decision units, service calls), never the ledger. Idempotent: a re-run states nothing. 404 when a root does not exist, 400 when one root is named with two scripts (nothing written).",
   security: [{ apiKey: [] }],
   request: { body: { content: { "application/json": { schema: ScriptStatementRequestSchema } } } },
   responses: {
@@ -4256,7 +4258,8 @@ const ServiceCallSchema = z
     campaignId: z.string().nullable(),
     featureSlug: z.string().nullable(),
     workflowSlug: z.string().nullable().openapi({ description: "The workflow the run works for (workflow era), as stated or inherited." }),
-    scriptSlug: z.string().nullable().openapi({ description: "The stored script the run works for (`<outcome>/<dynasty>/v<version>`), as stated or inherited; null = no script (workflow era, or a platform call made for a caller's run: read the decision's)." }),
+    scriptSlug: z.string().nullable().openapi({ description: "The stored script whose decision the run belongs to (`<outcome>/<dynasty>/v<version>`): the innermost stated (its own, else its parent's; a script asked by another script is its own decision, SERVED-MODEL-1116-NESTED-RUNS); null = no script (workflow era, or a platform call made for a caller's run: read the decision's)." }),
+    outermostScriptSlug: z.string().nullable().openapi({ description: "The outermost script of the run's chain (the outcome ledger's `scriptSlug` dimension)." }),
     rootRunId: z.string().nullable().openapi({ description: "The top-level run of its tree (often a campaign tick holding many decisions). null when the tree is deeper than 64 levels." }),
     decisionRunId: z.string().nullable().openapi({ description: "The decision this call was part of: the run that opened its script (nearest run naming a script, then up while the parent names the same script), else the run that opened its workflow, else the top-level run. Units: POST /internal/stats/decision-units. null when the tree is too deep to tell." }),
     decisionBasis: z.enum(["script", "workflow", "root"]).nullable(),

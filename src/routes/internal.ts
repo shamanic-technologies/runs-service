@@ -135,9 +135,9 @@ router.post("/internal/runs/script-statements", requireInternalAuth, async (req,
     }
     console.log(
       `[runs-service] script-statements: ${r.statedRuns} runs under ${parsed.data.items.length} roots by ${parsed.data.statedBy} ` +
-        `(${parsed.data.reason}); ${r.alreadyNamed.length} roots already named; ${r.daysToRecompute} ledger days to recompute`,
+        `(${parsed.data.reason}); ${r.alreadyNamed.length} roots already named; ${r.daysToRecompute} ledger days to recompute; ${r.decisionStatedRuns} runs' decision script stated`,
     );
-    res.json({ statedRuns: r.statedRuns, daysToRecompute: r.daysToRecompute, alreadyNamed: r.alreadyNamed });
+    res.json({ statedRuns: r.statedRuns, daysToRecompute: r.daysToRecompute, alreadyNamed: r.alreadyNamed, decisionStatedRuns: r.decisionStatedRuns });
   } catch (err) {
     console.error("[runs-service] Error in POST /internal/runs/script-statements:", err);
     res.status(500).json({ error: "Internal server error" });
