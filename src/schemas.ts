@@ -4422,6 +4422,10 @@ export const ScriptReachResponseSchema = z
       .optional()
       .openapi({ description: "Present only when the read was narrowed with campaignIds: the campaign ids it kept (deduped, as asked)." }),
     groupBy: z.enum(["version", "dynasty"]),
+    include: z
+      .array(z.enum(["costNames"]))
+      .optional()
+      .openapi({ description: "Present only when asked (include=costNames): the groups are also split by costNames + sourceCostNames." }),
     groups: z.array(
       z.object({
         scriptSlug: z.string().optional().openapi({ description: "groupBy=version: `<outcome>/<dynasty>/v<version>`." }),
@@ -4429,6 +4433,20 @@ export const ScriptReachResponseSchema = z
         day: z.string().openapi({ description: "UTC day the script run (decision) started." }),
         producedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of the run's own standing Units ([] = it produced none)." }),
         reachedOutcomes: z.array(z.string()).openapi({ description: "Sorted outcomes of every Unit its chain reached through the edges, any depth (its own Units excluded; [] = nothing consumed them into a Unit)." }),
+        costNames: z
+          .array(z.string())
+          .optional()
+          .openapi({
+            description:
+              "include=costNames only. Sorted cost names (costs-service priced items) these decisions billed on their own work: charged (actual) rows of the decision run's subtree, minus the script decisions opened under it. A model that served instead of the script's stated one (a fallback) is the one named here. Decisions billing different names never share a group. [] = billed nothing charged.",
+          }),
+        sourceCostNames: z
+          .array(z.string())
+          .optional()
+          .openapi({
+            description:
+              "include=costNames only. Sorted union of the costNames of the OTHER script decisions (any script) whose standing Units these decisions' runs consumed, one hop: a send decision that billed no model carries the names of the decision that wrote the message it sent. [] = it consumed no Unit made by another script decision.",
+          }),
         runs: z.number().int(),
         costInUsdCents: z.string().openapi({ description: "What those runs cost, billed gross USD cents (decimal string): each decision run's subtree, incurred (actual + provisioned), minus the subtrees of script decisions opened under its own runs (they are their own decisions)." }),
         netCostInUsdCents: z.string().openapi({ description: "Same on the frozen net basis (after the org's usage discount)." }),
@@ -4458,6 +4476,13 @@ registry.registerPath({
       since: z.string().optional().openapi({ description: "First UTC day, YYYY-MM-DD." }),
       until: z.string().optional().openapi({ description: "Last UTC day, YYYY-MM-DD." }),
       groupBy: z.enum(["version", "dynasty"]).optional().openapi({ description: "Default version (one group per script slug)." }),
+      include: z
+        .enum(["costNames"])
+        .optional()
+        .openapi({
+          description:
+            "costNames: also split each group by the cost names its decisions billed (costNames) and those of the script decisions whose Units they consumed (sourceCostNames). Same figures summed over the split groups; absent = unchanged answer. 503 until a build wrote them.",
+        }),
     }),
   },
   responses: {
