@@ -1073,6 +1073,21 @@ cheaper on the incurred basis).
   UPDATE of total/net; stored outcome-ledger days from the row's run start onward re-stale (`staleComputedDays`).
 - No billing notify (billing re-derives from `org-usage-total`). Never a hand UPDATE: this IS the audited path.
   Guard: `tests/integration/cost-reprices.test.ts`.
+- **Stored links between Units + the campaign(s) a Unit carries (migration 0118, UNIT-LINK-BRONZE-1117)**: every edge X -> Y of
+  the build is STORED in `unit_links` (PK from_unit_id + to_unit_id; both outcomes, dates, runs, brand sets, the canonical subject,
+  each Unit's own-run campaign + `*_campaign_ids` = that one, else the campaigns of the nearest Units it came from that name one,
+  any depth through campaign-less Units). Same rule for every outcome, none named in code. The build statement only hands its
+  edges to a temp table (`ul_ins` -> `unit_link_edges`); `storeUnitLinks` then runs in the SAME transaction + snapshot, one
+  statement per step over ANALYZEd temp tables. Never fold those joins back into the build statement: the planner estimates
+  `edges` at 1 row (prod ~540k) and the nested loops never end (a 100k-edge local build hung > 10 min and filled the disk). So
+  the build transaction is no longer READ ONLY (advisory lock `unit_links_write`). Diff write: a new / moved link takes the next
+  `change_id` (sequence), a link no build produces is stamped `removed_at`, never deleted. A run's campaign is read once into
+  `outcome_chain_run_campaigns` (50k PK probes per statement). Reads (503 until the stamp `stats_rollups.unit_links`):
+  `GET /internal/stats/outcome-chains/unit-links[?cursor&limit&fromOutcome&toOutcome]` (write order, `delaySeconds`, removed
+  ones served once) and `/unit-campaigns?outcomeKey[&cursor&limit]` (standing Units of one outcome: `campaignIds`,
+  `campaignSource` own_run | source_units, else `reason` no_source_unit | source_units_name_no_campaign | not_in_build).
+  A Unit declared consuming nothing (another factory's: lead-service's crm / client_team recordings) has no link and no campaign,
+  by the doctrine, never a subject match. Guard: `tests/integration/unit-links.test.ts`.
 
 ## Outcome occurrences — the production-cost ledger (migration 0057, COST-ACCOUNTING-1023)
 

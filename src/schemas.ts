@@ -4557,6 +4557,108 @@ registry.registerPath({
   },
 });
 
+const LinkedUnitSchema = z.object({
+  id: z.string().openapi({ description: "The Unit = the produced occurrence id (GET /internal/outcome-occurrences `id`)." }),
+  outcomeKey: z.string(),
+  at: z.string().openapi({ description: "The Unit's effective time (its declaration's `declared_at`), ISO UTC." }),
+  runId: z.string().openapi({ description: "The run that declared the Unit." }),
+  brandIds: z.array(z.string()).openapi({ description: "Sorted brand set of that run ([] = none)." }),
+  campaignId: z.string().nullable().openapi({ description: "The campaign of the run that declared the Unit; null = that run names none." }),
+  campaignIds: z.array(z.string()).openapi({
+    description:
+      "The campaign(s) the Unit CARRIES, sorted: [campaignId] when its own run names one; else the campaigns of the nearest Units it came from that name one, through any number of campaign-less Units; [] = no Unit it came from names a campaign.",
+  }),
+});
+
+export const UnitLinksResponseSchema = z
+  .object({
+    builtAt: z.string().openapi({ description: "The last build that wrote the links (every ~15 min)." }),
+    links: z.array(
+      z.object({
+        fromUnit: LinkedUnitSchema.openapi({ description: "The Unit that was consumed." }),
+        toUnit: LinkedUnitSchema.openapi({ description: "A Unit the consuming run's production order made for the same subject." }),
+        subjectService: z.string().openapi({ description: "The CANONICAL subject both Units share (a stated subject equivalence is followed)." }),
+        subjectId: z.string(),
+        delaySeconds: z.number().openapi({ description: "toUnit.at - fromUnit.at in seconds (3 decimals). Negative when the consumed Unit is dated after the produced one (a backfilled past fact)." }),
+        linkedAt: z.string().openapi({ description: "When the ledger first stored this link." }),
+        removedAt: z.string().nullable().openapi({ description: "Set = the link no longer stands (a Unit reversed or voided, or the consumption now resolves to another Unit): drop it from your copy." }),
+      }),
+    ),
+    nextCursor: z.string().openapi({ description: "Pass as cursor for the rows written after this page." }),
+    caughtUp: z.boolean().openapi({ description: "true = no stored link is left after this page; keep nextCursor and come back after the next build." }),
+  })
+  .openapi("UnitLinksResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-chains/unit-links",
+  summary: "The stored links between two Units: which Unit a Unit came from, both ids, both dates, the campaign(s) each carries (service-auth only)",
+  description: `${OUTCOME_CHAINS_GRAPH_DOC} Each edge is STORED by the build as one link keyed (fromUnit.id, toUnit.id): read the delay between two outcomes off it instead of matching Units by subject. Rows come in write order; a link whose dates, runs, brands or campaigns moved is served again (replace by key), a link that no longer stands once with removedAt. No cursor = every link ever stored (a full copy). fromOutcome / toOutcome keep one transition. History: every link the declarations on record imply, back to the first declaration; a Unit declared consuming nothing has no link.`,
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      cursor: z.string().optional(),
+      limit: z.string().optional().openapi({ description: "Links per page, 1..20000, default 5000." }),
+      fromOutcome: z.string().optional(),
+      toOutcome: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Links", content: { "application/json": { schema: UnitLinksResponseSchema } } },
+    400: { description: "Bad cursor, limit or outcome", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not stored yet (first build after the deploy)", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const UnitCampaignsResponseSchema = z
+  .object({
+    builtAt: z.string(),
+    outcomeKey: z.string(),
+    units: z.array(
+      z.object({
+        unitId: z.string(),
+        subjectService: z.string().openapi({ description: "The subject as declared." }),
+        subjectId: z.string(),
+        at: z.string(),
+        runId: z.string(),
+        performerKind: z.string().nullable().openapi({ description: "Who made the Unit, as its declaration stated it (null = not stated). A Unit another factory made (the client's CRM or team) is declared consuming nothing: it has no source Unit, so it carries no campaign." }),
+        campaignId: z.string().nullable().openapi({ description: "The campaign of the run that declared the Unit; null = none." }),
+        campaignIds: z.array(z.string()).openapi({ description: "The campaign(s) the Unit carries (see unit-links `campaignIds`); [] = none, `reason` says why." }),
+        campaignSource: z.enum(["own_run", "source_units"]).nullable().openapi({ description: "own_run = its declaring run names the campaign; source_units = carried from the Units it came from; null = none." }),
+        reason: z.enum(["no_source_unit", "source_units_name_no_campaign", "not_in_build"]).nullable().openapi({
+          description:
+            "Why campaignIds is empty. no_source_unit = its run names no campaign and no stored link leads to it (its declaration consumed nothing, or nothing that resolves to a standing Unit of the same subject); source_units_name_no_campaign = it came from Units, none of which carries a campaign; not_in_build = recorded after the last build started (ask again after the next one).",
+        }),
+        sourceUnits: z.number().int().openapi({ description: "Standing links leading to this Unit." }),
+      }),
+    ),
+    nextCursor: z.string().nullable().openapi({ description: "Pass as cursor for the next page; null = last page." }),
+  })
+  .openapi("UnitCampaignsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/stats/outcome-chains/unit-campaigns",
+  summary: "The standing Units of one outcome, each with the campaign(s) it carries or a named reason (service-auth only)",
+  description:
+    "Every standing (never reversed) produced Unit of outcomeKey, by Unit id. A Unit declared on a run that names no campaign (a late outcome recorded on a spend-free run) carries the campaigns of the Units it came from, read off the stored links (unit-links), any depth. Same rule for every outcome.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      outcomeKey: z.string(),
+      cursor: z.string().optional(),
+      limit: z.string().optional().openapi({ description: "Units per page, 1..5000, default 1000." }),
+    }),
+  },
+  responses: {
+    200: { description: "Units", content: { "application/json": { schema: UnitCampaignsResponseSchema } } },
+    400: { description: "Missing outcomeKey, bad cursor or limit", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    503: { description: "Not stored yet (first build after the deploy)", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 export const UnitDecisionsRequestSchema = z
   .object({
     units: z
