@@ -10,6 +10,12 @@ import {
   resolveUnitDecisions,
   readScriptReach,
   readStepRates,
+  readUnitCampaigns,
+  readUnitLinks,
+  UNIT_CAMPAIGNS_DEFAULT_LIMIT,
+  UNIT_CAMPAIGNS_MAX_LIMIT,
+  UNIT_LINKS_DEFAULT_LIMIT,
+  UNIT_LINKS_MAX_LIMIT,
 } from "../services/outcome-chains.js";
 
 // SCRIPT-VALUE-RATING-1113-RUNS: the produce / consume graph, summarised (services/outcome-chains.ts).
@@ -148,6 +154,65 @@ router.post("/internal/stats/outcome-chains/unit-decisions", requireInternalAuth
     res.json(await resolveUnitDecisions(parsed));
   } catch (err) {
     fail(res, "/internal/stats/outcome-chains/unit-decisions", err);
+  }
+});
+
+function limitOf(v: unknown, def: number, max: number): number | Error {
+  if (v === undefined) return def;
+  const n = Number(v);
+  if (typeof v !== "string" || !Number.isInteger(n) || n < 1 || n > max) return new Error(`limit must be an integer between 1 and ${max}`);
+  return n;
+}
+
+function keyOf(v: unknown, name: string, required: boolean): string | null | Error {
+  if (v === undefined) return required ? new Error(`${name} is required`) : null;
+  if (typeof v !== "string" || v.trim() === "") return new Error(`${name} must be a non-empty string`);
+  return v.trim();
+}
+
+/** GET /internal/stats/outcome-chains/unit-links — UNIT-LINK-BRONZE-1117: the stored links between two Units, by write order. */
+router.get("/internal/stats/outcome-chains/unit-links", requireInternalAuth, async (req, res) => {
+  try {
+    const q = req.query as Record<string, unknown>;
+    const limit = limitOf(q.limit, UNIT_LINKS_DEFAULT_LIMIT, UNIT_LINKS_MAX_LIMIT);
+    const fromOutcome = keyOf(q.fromOutcome, "fromOutcome", false);
+    const toOutcome = keyOf(q.toOutcome, "toOutcome", false);
+    const cursor = q.cursor === undefined ? null : keyOf(q.cursor, "cursor", true);
+    for (const v of [limit, fromOutcome, toOutcome, cursor]) {
+      if (v instanceof Error) {
+        res.status(400).json({ error: v.message });
+        return;
+      }
+    }
+    res.json(
+      await readUnitLinks({
+        cursor: (cursor as string | null) ?? undefined,
+        limit: limit as number,
+        fromOutcome: fromOutcome as string | null,
+        toOutcome: toOutcome as string | null,
+      }),
+    );
+  } catch (err) {
+    fail(res, "/internal/stats/outcome-chains/unit-links", err);
+  }
+});
+
+/** GET /internal/stats/outcome-chains/unit-campaigns — the standing Units of one outcome with the campaign(s) each carries, or why none. */
+router.get("/internal/stats/outcome-chains/unit-campaigns", requireInternalAuth, async (req, res) => {
+  try {
+    const q = req.query as Record<string, unknown>;
+    const limit = limitOf(q.limit, UNIT_CAMPAIGNS_DEFAULT_LIMIT, UNIT_CAMPAIGNS_MAX_LIMIT);
+    const outcomeKey = keyOf(q.outcomeKey, "outcomeKey", true);
+    const cursor = q.cursor === undefined ? null : keyOf(q.cursor, "cursor", true);
+    for (const v of [limit, outcomeKey, cursor]) {
+      if (v instanceof Error) {
+        res.status(400).json({ error: v.message });
+        return;
+      }
+    }
+    res.json(await readUnitCampaigns(outcomeKey as string, (cursor as string | null) ?? undefined, limit as number));
+  } catch (err) {
+    fail(res, "/internal/stats/outcome-chains/unit-campaigns", err);
   }
 });
 
