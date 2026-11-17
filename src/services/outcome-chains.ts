@@ -214,71 +214,13 @@ reach AS (
   LEFT JOIN script_chain_decisions k ON k.decision_run_id = s.id AND k.campaign_read
   LEFT JOIN LATERAL (SELECT r.campaign_id FROM runs r WHERE r.id = s.id AND k.decision_run_id IS NULL OFFSET 0) p ON TRUE
 ),
--- UNIT-LINK-BRONZE-1117: every edge is STORED (unit_links, 0118) with both Units' dates and the campaign(s) each
--- Unit carries. A run's campaign is set at creation: kept (outcome_chain_run_campaigns), else read off the run.
-urun AS MATERIALIZED (
-  SELECT i.id, CASE WHEN k.run_id IS NOT NULL THEN k.campaign_id ELSE p.campaign_id END AS campaign_id
-  FROM (SELECT x_run_id AS id FROM edges UNION SELECT y_run_id FROM edges) i
-  LEFT JOIN outcome_chain_run_campaigns k ON k.run_id = i.id
-  LEFT JOIN LATERAL (SELECT r.campaign_id::text AS campaign_id FROM runs r WHERE r.id = i.id AND k.run_id IS NULL OFFSET 0) p ON TRUE
-),
-ucamp AS MATERIALIZED (
-  SELECT e.x_id AS id, u.campaign_id FROM edges e JOIN urun u ON u.id = e.x_run_id
-  UNION
-  SELECT e.y_id, u.campaign_id FROM edges e JOIN urun u ON u.id = e.y_run_id
-),
--- A Unit whose own run names a campaign carries that one. A Unit whose run names none carries the campaigns of
--- the nearest Units it came from that name one, through any number of campaign-less Units (UNION: a cycle ends).
-nedges AS MATERIALIZED (SELECT e.x_id, e.y_id FROM edges e JOIN ucamp c ON c.id = e.y_id WHERE c.campaign_id IS NULL),
-carry(unit_id, campaign_id) AS (
-  SELECT n.y_id, c.campaign_id FROM nedges n JOIN ucamp c ON c.id = n.x_id WHERE c.campaign_id IS NOT NULL
-  UNION
-  SELECT n.y_id, k.campaign_id FROM carry k JOIN nedges n ON n.x_id = k.unit_id
-),
-carried AS MATERIALIZED (SELECT unit_id, array_agg(campaign_id ORDER BY campaign_id) AS ids FROM carry GROUP BY 1),
-ucarry AS MATERIALIZED (
-  SELECT c.id, c.campaign_id, CASE WHEN c.campaign_id IS NOT NULL THEN ARRAY[c.campaign_id] ELSE COALESCE(k.ids, '{}') END AS ids
-  FROM ucamp c LEFT JOIN carried k ON k.unit_id = c.id
-),
-link_rows AS MATERIALIZED (
-  SELECT e.x_id, e.y_id, e.x_key, e.y_key, e.x_at, e.y_at, e.x_run_id, e.y_run_id, e.cs, e.cid,
-         cx.campaign_id AS x_camp, cy.campaign_id AS y_camp, cx.ids AS x_camps, cy.ids AS y_camps,
-         COALESCE(xr.brands, '{}') AS x_brands, COALESCE(yr.brands, '{}') AS y_brands
-  FROM edges e
-  JOIN ucarry cx ON cx.id = e.x_id JOIN ucarry cy ON cy.id = e.y_id
-  LEFT JOIN xruns xr ON xr.id = e.x_run_id LEFT JOIN xruns yr ON yr.id = e.y_run_id
-),
--- Diff write: only a new or moved link is written (next change_id), a link the build no longer produces is
--- stamped removed (never deleted); a removed link that stands again is written anew.
-link_moved AS MATERIALIZED (
-  SELECT l.* FROM link_rows l LEFT JOIN unit_links t ON t.from_unit_id = l.x_id AND t.to_unit_id = l.y_id
-  WHERE t.from_unit_id IS NULL OR t.removed_at IS NOT NULL
-     OR (t.from_outcome, t.to_outcome, t.from_at, t.to_at, t.from_run_id, t.to_run_id, t.subject_service, t.subject_id,
-         t.from_campaign_id, t.to_campaign_id, t.from_campaign_ids, t.to_campaign_ids, t.from_brand_ids, t.to_brand_ids)
-        IS DISTINCT FROM
-        (l.x_key, l.y_key, l.x_at, l.y_at, l.x_run_id, l.y_run_id, l.cs, l.cid, l.x_camp, l.y_camp, l.x_camps, l.y_camps, l.x_brands, l.y_brands)
-),
-link_up AS (
-  INSERT INTO unit_links (from_unit_id, to_unit_id, from_outcome, to_outcome, from_at, to_at, from_run_id, to_run_id, subject_service, subject_id,
-                          from_campaign_id, to_campaign_id, from_campaign_ids, to_campaign_ids, from_brand_ids, to_brand_ids, change_id)
-  SELECT x_id, y_id, x_key, y_key, x_at, y_at, x_run_id, y_run_id, cs, cid, x_camp, y_camp, x_camps, y_camps, x_brands, y_brands,
-         nextval('unit_links_change_seq')
-  FROM link_moved
-  ON CONFLICT (from_unit_id, to_unit_id) DO UPDATE
-    SET from_outcome = EXCLUDED.from_outcome, to_outcome = EXCLUDED.to_outcome, from_at = EXCLUDED.from_at, to_at = EXCLUDED.to_at,
-        from_run_id = EXCLUDED.from_run_id, to_run_id = EXCLUDED.to_run_id, subject_service = EXCLUDED.subject_service, subject_id = EXCLUDED.subject_id,
-        from_campaign_id = EXCLUDED.from_campaign_id, to_campaign_id = EXCLUDED.to_campaign_id,
-        from_campaign_ids = EXCLUDED.from_campaign_ids, to_campaign_ids = EXCLUDED.to_campaign_ids,
-        from_brand_ids = EXCLUDED.from_brand_ids, to_brand_ids = EXCLUDED.to_brand_ids, removed_at = NULL, change_id = EXCLUDED.change_id
-  RETURNING 1
-),
-link_gone AS (
-  UPDATE unit_links t SET removed_at = clock_timestamp(), change_id = nextval('unit_links_change_seq')
-  WHERE t.removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM link_rows l WHERE l.x_id = t.from_unit_id AND l.y_id = t.to_unit_id)
-  RETURNING 1
+-- UNIT-LINK-BRONZE-1117: every edge is handed to the caller's transaction (temp table unit_link_edges, created by
+-- buildOutcomeChains before this statement), which stores it as a link (storeUnitLinks). Kept out of this statement
+-- on purpose: the planner estimates the edges at 1 row (prod: ~540k), and joins planned on that never end.
+ul_ins AS (
+  INSERT INTO unit_link_edges (x_id, y_id, x_key, y_key, x_at, y_at, x_run_id, y_run_id, cs, cid)
+  SELECT x_id, y_id, x_key, y_key, x_at, y_at, x_run_id, y_run_id, cs, cid FROM edges
 )
-SELECT 'links' AS t, jsonb_build_object('standing', (SELECT count(*) FROM link_rows), 'written', (SELECT count(*) FROM link_up), 'removed', (SELECT count(*) FROM link_gone)) AS r
-UNION ALL
 SELECT 'consumed' AS t, jsonb_build_object('from_outcome', x_key, 'brand_ids', to_jsonb(brands), 'consumed_units', n) AS r FROM consumed
 UNION ALL
 SELECT 'steps', jsonb_build_object('from_outcome', t.x_key, 'to_outcome', t.y_key, 'brand_ids', to_jsonb(t.brands), 'led_units', t.n, 'led_units_by_performer', k.by_kind)
@@ -460,6 +402,102 @@ async function refreshRunCampaigns(): Promise<void> {
 export const UNIT_LINKS_STAMP = "unit_links";
 const UNIT_LINKS_LOCK = "unit_links_write";
 
+/** The edges of one build, handed by the build statement to storeUnitLinks inside the same transaction. */
+const UNIT_LINK_EDGES_DDL = `
+  CREATE TEMP TABLE unit_link_edges (
+    x_id uuid NOT NULL, y_id uuid NOT NULL, x_key text NOT NULL, y_key text NOT NULL, x_at timestamptz NOT NULL, y_at timestamptz NOT NULL,
+    x_run_id uuid NOT NULL, y_run_id uuid NOT NULL, cs text NOT NULL, cid text NOT NULL
+  ) ON COMMIT DROP`;
+
+/**
+ * UNIT-LINK-BRONZE-1117: stores the build's edges as links (unit_links, 0118), in the build's own transaction and
+ * snapshot. Each step is its own statement over an ANALYZEd temp table, so every join is planned on real row counts.
+ *   1. each run's brand set + campaign (kept attributes, else the run itself);
+ *   2. each Unit's own campaign; a Unit whose run names none carries the campaigns of the nearest Units it came
+ *      from that name one, through any number of campaign-less Units (UNION: a cycle ends);
+ *   3. diff write: a new or moved link takes the next change_id, a link the build no longer produces is stamped
+ *      removed (never deleted), a removed link that stands again is written anew.
+ */
+async function storeUnitLinks(tx: any): Promise<{ standing: number; written: number; removed: number }> {
+  await tx.execute(sql`ANALYZE unit_link_edges`);
+  await tx.execute(sql`
+    CREATE TEMP TABLE unit_link_runs ON COMMIT DROP AS
+    SELECT i.id,
+           COALESCE(a.brands, p.brands, '{}') AS brands,
+           CASE WHEN k.run_id IS NOT NULL THEN k.campaign_id ELSE p.campaign_id END AS campaign_id
+    FROM (SELECT x_run_id AS id FROM unit_link_edges UNION SELECT y_run_id FROM unit_link_edges) i
+    LEFT JOIN outcome_chain_run_attrs a ON a.run_id = i.id
+    LEFT JOIN outcome_chain_run_campaigns k ON k.run_id = i.id
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(ARRAY(SELECT DISTINCT b FROM unnest(r.brand_ids) b WHERE b IS NOT NULL ORDER BY b), '{}') AS brands, r.campaign_id::text AS campaign_id
+      FROM runs r WHERE r.id = i.id AND (a.run_id IS NULL OR k.run_id IS NULL) OFFSET 0
+    ) p ON TRUE`);
+  await tx.execute(sql`ANALYZE unit_link_runs`);
+  await tx.execute(sql`
+    CREATE TEMP TABLE unit_link_units ON COMMIT DROP AS
+    SELECT e.x_id AS id, r.campaign_id FROM unit_link_edges e JOIN unit_link_runs r ON r.id = e.x_run_id
+    UNION
+    SELECT e.y_id, r.campaign_id FROM unit_link_edges e JOIN unit_link_runs r ON r.id = e.y_run_id`);
+  await tx.execute(sql`ANALYZE unit_link_units`);
+  await tx.execute(sql`
+    CREATE TEMP TABLE unit_link_bare ON COMMIT DROP AS
+    SELECT e.x_id, e.y_id FROM unit_link_edges e JOIN unit_link_units c ON c.id = e.y_id WHERE c.campaign_id IS NULL`);
+  await tx.execute(sql`ANALYZE unit_link_bare`);
+  await tx.execute(sql`
+    CREATE TEMP TABLE unit_link_carried ON COMMIT DROP AS
+    WITH RECURSIVE carry(unit_id, campaign_id) AS (
+      SELECT n.y_id, c.campaign_id FROM unit_link_bare n JOIN unit_link_units c ON c.id = n.x_id WHERE c.campaign_id IS NOT NULL
+      UNION
+      SELECT n.y_id, k.campaign_id FROM carry k JOIN unit_link_bare n ON n.x_id = k.unit_id
+    )
+    SELECT unit_id, array_agg(campaign_id ORDER BY campaign_id) AS ids FROM carry GROUP BY 1`);
+  await tx.execute(sql`ANALYZE unit_link_carried`);
+  await tx.execute(sql`
+    CREATE TEMP TABLE unit_link_rows ON COMMIT DROP AS
+    SELECT e.x_id, e.y_id, e.x_key, e.y_key, e.x_at, e.y_at, e.x_run_id, e.y_run_id, e.cs, e.cid,
+           ux.campaign_id AS x_camp, uy.campaign_id AS y_camp,
+           CASE WHEN ux.campaign_id IS NOT NULL THEN ARRAY[ux.campaign_id] ELSE COALESCE(kx.ids, '{}') END AS x_camps,
+           CASE WHEN uy.campaign_id IS NOT NULL THEN ARRAY[uy.campaign_id] ELSE COALESCE(ky.ids, '{}') END AS y_camps,
+           rx.brands AS x_brands, ry.brands AS y_brands
+    FROM unit_link_edges e
+    JOIN unit_link_runs rx ON rx.id = e.x_run_id JOIN unit_link_runs ry ON ry.id = e.y_run_id
+    JOIN unit_link_units ux ON ux.id = e.x_id JOIN unit_link_units uy ON uy.id = e.y_id
+    LEFT JOIN unit_link_carried kx ON kx.unit_id = e.x_id LEFT JOIN unit_link_carried ky ON ky.unit_id = e.y_id`);
+  await tx.execute(sql`ANALYZE unit_link_rows`);
+  const [r] = (await tx.execute(sql`
+    WITH moved AS MATERIALIZED (
+      SELECT l.* FROM unit_link_rows l LEFT JOIN unit_links t ON t.from_unit_id = l.x_id AND t.to_unit_id = l.y_id
+      WHERE t.from_unit_id IS NULL OR t.removed_at IS NOT NULL
+         OR (t.from_outcome, t.to_outcome, t.from_at, t.to_at, t.from_run_id, t.to_run_id, t.subject_service, t.subject_id,
+             t.from_campaign_id, t.to_campaign_id, t.from_campaign_ids, t.to_campaign_ids, t.from_brand_ids, t.to_brand_ids)
+            IS DISTINCT FROM
+            (l.x_key, l.y_key, l.x_at, l.y_at, l.x_run_id, l.y_run_id, l.cs, l.cid, l.x_camp, l.y_camp, l.x_camps, l.y_camps, l.x_brands, l.y_brands)
+    ),
+    up AS (
+      INSERT INTO unit_links (from_unit_id, to_unit_id, from_outcome, to_outcome, from_at, to_at, from_run_id, to_run_id, subject_service, subject_id,
+                              from_campaign_id, to_campaign_id, from_campaign_ids, to_campaign_ids, from_brand_ids, to_brand_ids, change_id)
+      SELECT x_id, y_id, x_key, y_key, x_at, y_at, x_run_id, y_run_id, cs, cid, x_camp, y_camp, x_camps, y_camps, x_brands, y_brands,
+             nextval('unit_links_change_seq')
+      FROM moved
+      ON CONFLICT (from_unit_id, to_unit_id) DO UPDATE
+        SET from_outcome = EXCLUDED.from_outcome, to_outcome = EXCLUDED.to_outcome, from_at = EXCLUDED.from_at, to_at = EXCLUDED.to_at,
+            from_run_id = EXCLUDED.from_run_id, to_run_id = EXCLUDED.to_run_id, subject_service = EXCLUDED.subject_service, subject_id = EXCLUDED.subject_id,
+            from_campaign_id = EXCLUDED.from_campaign_id, to_campaign_id = EXCLUDED.to_campaign_id,
+            from_campaign_ids = EXCLUDED.from_campaign_ids, to_campaign_ids = EXCLUDED.to_campaign_ids,
+            from_brand_ids = EXCLUDED.from_brand_ids, to_brand_ids = EXCLUDED.to_brand_ids, removed_at = NULL, change_id = EXCLUDED.change_id
+      RETURNING 1
+    ),
+    gone AS (
+      UPDATE unit_links t SET removed_at = clock_timestamp(), change_id = nextval('unit_links_change_seq')
+      WHERE t.removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM unit_link_rows l WHERE l.x_id = t.from_unit_id AND l.y_id = t.to_unit_id)
+      RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM unit_link_rows)::int AS standing, (SELECT count(*) FROM up)::int AS written, (SELECT count(*) FROM gone)::int AS removed`)) as Array<{
+    standing: number; written: number; removed: number;
+  }>;
+  return { standing: Number(r.standing), written: Number(r.written), removed: Number(r.removed) };
+}
+
 let building = false;
 
 /** Rebuilds the three tables from the whole fleet. Single flight per process + an advisory lock across processes. */
@@ -477,19 +515,21 @@ export async function buildOutcomeChains(): Promise<OutcomeChainBuild | null> {
     if (!stamped.items) throw new Error("run_subtree_cost_items is not stamped (subtree_cost_items): rebuild it before building outcome chains");
     await refreshRunAttrs();
     await refreshRunCampaigns();
-    // One snapshot for the whole graph. The statement also WRITES the links it found (unit_links, 0118), so the
-    // transaction is not read-only; one writer at a time (the change_id order is the changes feed's order).
-    const rows = (await statsDb.transaction(async (tx) => {
+    // One snapshot for the whole graph. The same transaction also WRITES the links it found (unit_links, 0118), so it
+    // is not read-only; one writer at a time (the change_id order is the changes feed's order).
+    const out = await statsDb.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
       const [lock] = (await tx.execute(sql`SELECT pg_try_advisory_xact_lock(hashtext(${UNIT_LINKS_LOCK})) AS ok`)) as Array<{ ok: boolean }>;
       if (!lock.ok) return null;
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${BUILD_TIMEOUT}'`));
-      return tx.execute(OUTCOME_CHAIN_BUILD_SQL);
-    })) as Array<{ t: OutcomeChainTable | "decision" | "links"; r: unknown }> | null;
-    if (rows === null) return null;
-    const by: Record<OutcomeChainTable | "decision" | "links", unknown[]> = { consumed: [], steps: [], reach: [], decision: [], links: [] };
+      await tx.execute(sql.raw(UNIT_LINK_EDGES_DDL));
+      const built = (await tx.execute(OUTCOME_CHAIN_BUILD_SQL)) as unknown as Array<{ t: OutcomeChainTable | "decision"; r: unknown }>;
+      return { rows: [...built], links: await storeUnitLinks(tx) };
+    });
+    if (out === null) return null;
+    const { rows, links } = out;
+    const by: Record<OutcomeChainTable | "decision", unknown[]> = { consumed: [], steps: [], reach: [], decision: [] };
     for (const row of rows) by[row.t].push(row.r);
-    const links = (by.links[0] ?? { standing: 0, written: 0, removed: 0 }) as { standing: number; written: number; removed: number };
 
     return await db.transaction(async (tx) => {
       const [lock] = (await tx.execute(sql`SELECT pg_try_advisory_xact_lock(hashtext('outcome_chains_build')) AS ok`)) as Array<{ ok: boolean }>;
@@ -998,14 +1038,14 @@ export async function readUnitCampaigns(outcomeKey: string, cursor: string | und
     const build = await unitLinksBuild(tx);
     const rows = (await tx.execute(sql`
       WITH u AS MATERIALIZED (
-        SELECT o.id, o.run_id, o.subject_service, o.subject_id, o.declared_at, COALESCE(o.recorded_at, o.declared_at) AS recorded_at
+        SELECT o.id, o.run_id, o.subject_service, o.subject_id, o.declared_at, COALESCE(o.recorded_at, o.declared_at) AS recorded_at, o.performer_kind
         FROM run_outcomes o
         WHERE o.outcome_key = ${outcomeKey} AND o.direction = 'produced' AND ${cursor ? sql`o.id > ${cursor}::uuid` : sql`TRUE`}
           AND NOT EXISTS (SELECT 1 FROM run_outcome_reversals rv WHERE rv.occurrence_id = o.id)
         ORDER BY o.id LIMIT ${limit + 1}
       )
       SELECT u.id, u.run_id, u.subject_service, u.subject_id, ${sql.raw(ISO("u.declared_at"))} AS at,
-             (u.recorded_at > ${build.startedAt}::timestamptz) AS after_build,
+             (u.recorded_at > ${build.startedAt}::timestamptz) AS after_build, u.performer_kind,
              r.campaign_id, COALESCE(l.n, 0) AS n, l.ids
       FROM u
       LEFT JOIN LATERAL (SELECT campaign_id::text AS campaign_id FROM runs WHERE id = u.run_id OFFSET 0) r ON TRUE
@@ -1030,6 +1070,7 @@ export async function readUnitCampaigns(outcomeKey: string, cursor: string | und
           subjectId: r.subject_id,
           at: r.at,
           runId: r.run_id,
+          performerKind: r.performer_kind ?? null,
           campaignId: own,
           campaignIds,
           campaignSource: campaignIds.length === 0 ? null : own !== null ? ("own_run" as const) : ("source_units" as const),

@@ -4622,6 +4622,7 @@ export const UnitCampaignsResponseSchema = z
         subjectId: z.string(),
         at: z.string(),
         runId: z.string(),
+        performerKind: z.string().nullable().openapi({ description: "Who made the Unit, as its declaration stated it (null = not stated). A Unit another factory made (the client's CRM or team) is declared consuming nothing: it has no source Unit, so it carries no campaign." }),
         campaignId: z.string().nullable().openapi({ description: "The campaign of the run that declared the Unit; null = none." }),
         campaignIds: z.array(z.string()).openapi({ description: "The campaign(s) the Unit carries (see unit-links `campaignIds`); [] = none, `reason` says why." }),
         campaignSource: z.enum(["own_run", "source_units"]).nullable().openapi({ description: "own_run = its declaring run names the campaign; source_units = carried from the Units it came from; null = none." }),

@@ -193,7 +193,7 @@ describe("UNIT-LINK-BRONZE-1117: stored links between Units + the campaign(s) a 
     const booked = bySubject(await get(`/internal/stats/outcome-chains/unit-campaigns?outcomeKey=${BOOKED}`));
     expect(booked["ul1117-1"]).toMatchObject({ runId: ids.rec, at: "2026-11-05T10:00:00.000Z", campaignId: null, campaignIds: [C1], campaignSource: "source_units", reason: null, sourceUnits: 1 });
     // Declared consuming nothing, on a run naming no campaign.
-    expect(booked["ul1117-9"]).toMatchObject({ campaignId: null, campaignIds: [], campaignSource: null, reason: "no_source_unit", sourceUnits: 0 });
+    expect(booked["ul1117-9"]).toMatchObject({ performerKind: null, campaignId: null, campaignIds: [], campaignSource: null, reason: "no_source_unit", sourceUnits: 0 });
 
     // Paged by Unit id: two pages of one hold the same Units.
     const p1 = await get(`/internal/stats/outcome-chains/unit-campaigns?outcomeKey=${BOOKED}&limit=1`);

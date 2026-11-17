@@ -12303,6 +12303,11 @@
                 "runId": {
                   "type": "string"
                 },
+                "performerKind": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Who made the Unit, as its declaration stated it (null = not stated). A Unit another factory made (the client's CRM or team) is declared consuming nothing: it has no source Unit, so it carries no campaign."
+                },
                 "campaignId": {
                   "type": "string",
                   "nullable": true,
@@ -12347,6 +12352,7 @@
                 "subjectId",
                 "at",
                 "runId",
+                "performerKind",
                 "campaignId",
                 "campaignIds",
                 "campaignSource",
