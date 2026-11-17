@@ -1062,6 +1062,7 @@ const stateKeysOf = (inputs: AllocationInputs) => [...new Set(inputs.stepStates.
  * must be OURS (OUR-FACTORY-OUTCOMES-1027): another factory's lower state enters free, at $0.
  */
 async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) {
+  const first = await firstLedgerDay(utcDay(new Date()));
   return (await tx.execute(sql`
     WITH ${allocationInputsCtes(inputs)}
     SELECT r.state, lo.state AS lower, r.organization_id::text AS org, r.brand_id,
@@ -1074,8 +1075,8 @@ async function stateLadderRows(tx: Exec, day: string, inputs: AllocationInputs) 
       -- OUR-FACTORY-OUTCOMES-1027: only a unit of ours takes an input, and only a lower state of ours is
       -- priced; another factory's lower state is free-issue material ($0, no row).
       AND r.caused_by_outreach IS TRUE AND l.caused_by_outreach IS TRUE
-      AND r.reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND r.reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      -- TODAY-MEETINGS-1117: the input rides its unit's day (reachUnitAtSql).
+      AND ${reachUnitOnDaySql("r", day, first)}
       -- A pipe aiming at this state (or higher) that took this lead's lower state in is where that state was
       -- transferred (stateInputRoutes, counted on its own day): never counted twice.
       AND NOT EXISTS (
@@ -1996,6 +1997,7 @@ const blank = (kind: OutcomeCostRow["kind"], r: any): OutcomeCostRow => ({
  */
 async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs): Promise<OutcomeCostRow[]> {
   const out: OutcomeCostRow[] = [];
+  const first = await firstLedgerDay(utcDay(new Date()));
   // v5: lead states first reached that day (lead-service's real instant), one unit per lead x brand x state,
   // only the reaches our outreach produced (OUR-FACTORY-OUTCOMES-1027).
   const reached = (await tx.execute(sql`
@@ -2004,8 +2006,7 @@ async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs
     WHERE removed_at IS NULL
       -- OUR-FACTORY-OUTCOMES-1027: another factory's reach (or one with no proof) is no unit of ours.
       AND caused_by_outreach IS TRUE
-      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      AND ${reachUnitOnDaySql("lead_state_reaches", day, first)}
     GROUP BY 1, 2, 3
   `)) as any[];
   for (const r of reached) {
@@ -2020,8 +2021,7 @@ async function ledgerDayUnitRows(tx: Exec, day: string, inputs: AllocationInputs
     FROM lead_state_reaches
     WHERE removed_at IS NULL
       AND caused_by_outreach IS NOT TRUE
-      AND reached_at >= (${day}::date)::timestamp AT TIME ZONE 'UTC'
-      AND reached_at < (${day}::date + 1)::timestamp AT TIME ZONE 'UTC'
+      AND ${reachUnitOnDaySql("lead_state_reaches", day, first)}
     GROUP BY 1, 2, 3, 4
   `)) as any[];
   for (const r of elsewhere) {
@@ -2433,6 +2433,7 @@ export async function refreshLedgerDayUnits(day: string, inputs: AllocationInput
  */
 export async function daysWithMovedUnits(days: string[]): Promise<string[]> {
   if (days.length === 0) return [];
+  const first = await firstLedgerDay(utcDay(new Date()));
   const rows = (await db.execute(sql`
     WITH d AS MATERIALIZED (
       SELECT day, GREATEST(computed_at, COALESCE(units_at, computed_at)) AS mark FROM cost_ledger_computed_days
@@ -2446,8 +2447,11 @@ export async function daysWithMovedUnits(days: string[]): Promise<string[]> {
       SELECT (reversed_at AT TIME ZONE 'UTC')::date, MAX(recorded_at)
       FROM run_outcome_reversals WHERE recorded_at > (SELECT at FROM since) GROUP BY 1
       UNION ALL
-      SELECT (reached_at AT TIME ZONE 'UTC')::date, MAX(changed_at)
-      FROM lead_state_reaches WHERE changed_at > (SELECT at FROM since) AND reached_at IS NOT NULL GROUP BY 1
+      -- TODAY-MEETINGS-1117: a reach moves its own date's day and the day its Unit counts on (reachUnitAtSql).
+      SELECT (u.at AT TIME ZONE 'UTC')::date, MAX(l.changed_at)
+      FROM lead_state_reaches l
+      CROSS JOIN LATERAL (VALUES (l.reached_at), (${reachUnitAtSql("l", first)})) u(at)
+      WHERE l.changed_at > (SELECT at FROM since) AND u.at IS NOT NULL GROUP BY 1
       UNION ALL
       -- a void deletes the occurrences: its items carry their declaration instant
       SELECT (it.declared_at AT TIME ZONE 'UTC')::date, MAX(e.occurred_at)
@@ -2540,6 +2544,31 @@ export async function firstLedgerDay(today: string): Promise<string> {
   `)) as any[];
   const floor = addDays(today, -(LEDGER_BACKFILL_DAYS - 1));
   return row?.day && row.day < floor ? row.day : floor;
+}
+
+/**
+ * TODAY-MEETINGS-1117 (owner 2026-11-07: every conversion counts, the same figure on the client's dashboard and on
+ * our homepage): the instant a lead-state reach counts its Unit on. Its own date (lead-service's real instant), except:
+ * - dated before the ledger's first stored day (`first`, the first day of spend): counted on that first day, as an
+ *   OPENING BALANCE (Doc Dinners: 110 of 173 booked meetings were dated 2024-08..2026-01 and counted nowhere);
+ * - served with NO date (a sale recorded without one): counted on the day this ledger first received it
+ *   (`received_at`, migration 0119), never before `first`.
+ * A day before `first` is never stored in prod (firstLedgerDay); computed anyway (tests), it keeps its own dated reaches.
+ */
+export function reachUnitAtSql(alias: string, first: string) {
+  const a = sql.raw(alias);
+  const f = sql`((${first}::date)::timestamp AT TIME ZONE 'UTC')`;
+  return sql`(CASE WHEN ${a}.reached_at IS NULL THEN GREATEST(${a}.received_at, ${f})
+                   WHEN ${a}.reached_at < ${f} THEN ${f} ELSE ${a}.reached_at END)`;
+}
+
+/** The reach `alias` counts its Unit on UTC day `day` (see reachUnitAtSql). */
+function reachUnitOnDaySql(alias: string, day: string, first: string) {
+  const a = sql.raw(alias);
+  const lo = sql`(${day}::date)::timestamp AT TIME ZONE 'UTC'`;
+  const hi = sql`(${day}::date + 1)::timestamp AT TIME ZONE 'UTC'`;
+  const at = reachUnitAtSql(alias, first);
+  return sql`((${a}.reached_at >= ${lo} AND ${a}.reached_at < ${hi}) OR (${at} >= ${lo} AND ${at} < ${hi}))`;
 }
 
 /** The columns a day must be stored with under the current version (else it is recomputed). */
@@ -2828,9 +2857,12 @@ export async function staleComputedDays(computed: Map<string, Date>, after?: Dat
   }
   // A reach's own day holds its unit (and its ladder input): a reach of a lead nobody declared on (another
   // factory's, OUR-FACTORY-OUTCOMES-1027) moves that day too when it changes.
+  const reachFirst = await firstLedgerDay(utcDay(new Date()));
   const reachDays = (await db.execute(sql`
-    SELECT to_char(reached_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(changed_at) AS last_recorded
-    FROM lead_state_reaches WHERE changed_at > ${oldest}::timestamptz AND reached_at IS NOT NULL GROUP BY 1
+    SELECT to_char(u.at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, MAX(l.changed_at) AS last_recorded
+    FROM lead_state_reaches l
+    CROSS JOIN LATERAL (VALUES (l.reached_at), (${reachUnitAtSql("l", reachFirst)})) u(at)
+    WHERE l.changed_at > ${oldest}::timestamptz AND u.at IS NOT NULL GROUP BY 1
   `)) as any[];
   for (const [day, at] of computed) {
     if (reachDays.some((l) => l.day === day && new Date(l.last_recorded) > at)) out.add(day);
