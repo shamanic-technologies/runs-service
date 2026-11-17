@@ -28,8 +28,18 @@ export interface VendorCostVersion {
    * served" rule on `GET /internal/vendor-costs/:name?at=`).
    */
   servedFrom: string;
-  /** The billed (platform) unit price of this version — what a cost row froze. Null for a delisted version. */
+  /**
+   * The GRANDFATHERED (x2) billed unit price of this version — what a cost row of an org on the
+   * grandfathered list froze. Null for a delisted version.
+   */
   billedUnitCostInUsdCents: string | null;
+  /**
+   * The STANDARD (x1) unit price of this version (costs-service PRICE-X1-1029): what a cost row of an
+   * org on the standard list froze (every org created from 2026-10-29, and our own org since
+   * 2026-11-07). Null/absent = the version has no x1 price. Same vendor cost as the x2 price: the
+   * vendor charged us the same whichever list the customer paid (VENDOR-UNPRICED-1117).
+   */
+  standardUnitCostInUsdCents?: string | null;
   /** The vendor unit cost of this version. Null when costs-service cannot state it. */
   vendorUnitCostInUsdCents: string | null;
 }
@@ -98,6 +108,11 @@ export async function fetchVendorCostCatalog(): Promise<VendorCostVersion[]> {
     if (v.vendorCostKnown === true && v.vendorCostPerUnitInUsdCents === null) {
       throw new VendorCostCatalogError(`costs-service vendor catalogue: version ${i} is known but carries no vendor cost`);
     }
+    // Absent is not "no x1 price": a catalogue that does not state it would read every x1 row as
+    // unpriced again. Null = the version states it has none.
+    if (v.standardPricePerUnitInUsdCents === undefined) {
+      throw new VendorCostCatalogError(`costs-service vendor catalogue: version ${i} does not state its standard (x1) price`);
+    }
     if (v.provider !== undefined && v.provider !== null && typeof v.provider !== "string") {
       throw new VendorCostCatalogError(`costs-service vendor catalogue: version ${i} provider is not a string or null`);
     }
@@ -106,6 +121,7 @@ export async function fetchVendorCostCatalog(): Promise<VendorCostVersion[]> {
       provider: (v.provider as string | null | undefined) ?? null,
       servedFrom: new Date(Math.max(effectiveFrom, createdAt)).toISOString(),
       billedUnitCostInUsdCents: decimalOrNull(v.billedPricePerUnitInUsdCents, `version ${i} billedPricePerUnitInUsdCents`),
+      standardUnitCostInUsdCents: decimalOrNull(v.standardPricePerUnitInUsdCents, `version ${i} standardPricePerUnitInUsdCents`),
       vendorUnitCostInUsdCents: decimalOrNull(v.vendorCostPerUnitInUsdCents, `version ${i} vendorCostPerUnitInUsdCents`),
     };
   });

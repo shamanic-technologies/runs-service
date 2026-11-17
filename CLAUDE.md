@@ -588,6 +588,12 @@ the markup moved (1x → 2x → 4x → 5x → 6x → 5x), so nothing here may di
   of 2026-08-24..10-14, recorded 10-18 at 2.8403: $2,907 read unpriced, 11.8% of fleet spend);
   a live write never does, so no other row moved (prod check 2026-10-31). Stored ledger days
   follow on their next recompute, like any catalogue correction.
+- **Two list prices per version (VENDOR-UNPRICED-1117)**: since costs-service PRICE-X1-1029 a version states its
+  grandfathered (x2) billed price AND its standard (x1) price (`standardUnitCostInUsdCents`, catalogue field
+  `standardPricePerUnitInUsdCents`, absent = 502, never read as "no x1 price"). A row froze whichever list its org pays,
+  so `versionWindowsSql` makes each price its own (name, price) candidate with the version's vendor cost. Matching
+  only x2 left every x1 row unpriced: 7-30 % of fleet billed spend per week 2026-10-26..11-16 (our own org moved to
+  x1 on 11-07); prod replay after: 0 %. Guard `tests/integration/vendor-cost-standard-price.test.ts`.
 - **Unknown is stated, never folded in**: vendor `null`, or no version matching at write time
   → the row's BILLED amount goes to `unpriced*`, its name to `unpricedCostNames`. Catalogue
   unreadable → 502, never an all-unpriced 200.
