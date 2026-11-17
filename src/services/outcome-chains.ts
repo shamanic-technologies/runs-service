@@ -818,7 +818,9 @@ export async function readOutcomeChainChanges(rawCursor: string | undefined, lim
         SELECT id::text AS id, ${sql.raw(spec.cols)}, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
         FROM ${sql.raw(spec.name)}
         WHERE ${after} AND updated_at <= ${b}::timestamptz AND id > ${lastId}::bigint
-        ORDER BY id LIMIT ${left + 1}`)) as any[];
+        -- PAGE-ORDER-1117: ordered on the bigint COLUMN. A bare id names the text output column above (ORDER BY takes
+        -- an output name first): pages came in text order (1, 10, 100) and the numeric cursor skipped the rows between.
+        ORDER BY ${sql.raw(spec.name)}.id LIMIT ${left + 1}`)) as any[];
       const page = rows.slice(0, left);
       for (const r of page) {
         const { id: _id, ...rest } = r;
@@ -1001,7 +1003,9 @@ export async function readUnitLinks(f: UnitLinksFilter) {
              ${sql.raw(ISO("first_linked_at"))} AS linked_at, ${sql.raw(ISO("removed_at"))} AS removed_at
       FROM unit_links
       WHERE ${sql.join(where, sql` AND `)}
-      ORDER BY change_id LIMIT ${f.limit + 1}`)) as any[];
+      -- PAGE-ORDER-1117: ordered on the bigint COLUMN, never the text output column of the same name (text order
+      -- 1, 10, 100 with a numeric cursor skipped rows: prod 2026-11-17, 451,692 of 551,516 links served).
+      ORDER BY unit_links.change_id LIMIT ${f.limit + 1}`)) as any[];
     const page = rows.slice(0, f.limit);
     const last = page.length > 0 ? page[page.length - 1].change_id : after;
     return {
