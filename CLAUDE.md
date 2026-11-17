@@ -1073,7 +1073,7 @@ cheaper on the incurred basis).
   UPDATE of total/net; stored outcome-ledger days from the row's run start onward re-stale (`staleComputedDays`).
 - No billing notify (billing re-derives from `org-usage-total`). Never a hand UPDATE: this IS the audited path.
   Guard: `tests/integration/cost-reprices.test.ts`.
-- **Stored links between Units + the campaign(s) a Unit carries (migration 0118, UNIT-LINK-BRONZE-1117)**: every edge X -> Y of
+- **Stored links between Units + the campaign(s) a Unit carries (migration 0118, UNIT-LINK-BRONZE-1117)**: every edge X -> Y of **A paged feed orders on the table COLUMN, qualified (`ORDER BY unit_links.change_id`), never a bare name that the SELECT also outputs as `::text`: ORDER BY takes the output column first, pages came in text order (1, 10, 100) and the numeric cursor skipped the rows between (PAGE-ORDER-1117, prod 2026-11-17: 451,692 of 551,516 links served; the `changes` feed had the same order on `id`). Guard `tests/integration/unit-links.test.ts`.**
   the build is STORED in `unit_links` (PK from_unit_id + to_unit_id; both outcomes, dates, runs, brand sets, the canonical subject,
   each Unit's own-run campaign + `*_campaign_ids` = that one, else the campaigns of the nearest Units it came from that name one,
   any depth through campaign-less Units). Same rule for every outcome, none named in code. The build statement only hands its

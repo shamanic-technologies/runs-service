@@ -250,6 +250,29 @@ describe("UNIT-LINK-BRONZE-1117: stored links between Units + the campaign(s) a 
     ]);
   });
 
+  // PAGE-ORDER-1117 (prod 2026-11-17): the page was ordered on the TEXT output column `change_id` ("1", "10", "100"),
+  // so a numeric cursor skipped the rows between: 451,692 of 551,516 links were ever served to a reader.
+  it("serves EVERY link once, in numeric write order, when the change ids cross a power of ten", async () => {
+    // This file's links rewritten around 100 (98, 99, 100, 101, ...): text order would put 100 before 98.
+    await db.execute(sql`SELECT setval('unit_links_change_seq', GREATEST(97, (SELECT max(change_id) FROM unit_links)))`);
+    await db.execute(sql`UPDATE unit_links SET change_id = nextval('unit_links_change_seq') WHERE from_outcome LIKE 'ul1117_%'`);
+    const [{ held, digits }] = (await db.execute(sql`SELECT count(*)::int AS held, count(DISTINCT length(change_id::text))::int AS digits FROM unit_links`)) as unknown as [{ held: number; digits: number }];
+    expect(held).toBeGreaterThan(3);
+    expect(digits).toBeGreaterThan(1); // ids of several lengths: the case text order breaks
+    const served: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 5000; i++) {
+      const page = await get(`/internal/stats/outcome-chains/unit-links?limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      served.push(...page.links.map((l: any) => `${l.fromUnit.id}>${l.toUnit.id}`));
+      cursor = page.nextCursor;
+      if (page.caughtUp) break;
+    }
+    expect(served.length).toBe(held);
+    expect(new Set(served).size).toBe(held);
+    const order = (await db.execute(sql`SELECT from_unit_id || '>' || to_unit_id AS k FROM unit_links ORDER BY unit_links.change_id`)) as unknown as Array<{ k: string }>;
+    expect(served).toEqual(order.map((r) => r.k));
+  });
+
   it("refuses bad cursors, limits and a missing outcome", async () => {
     for (const path of [
       "/internal/stats/outcome-chains/unit-links?cursor=nope",
