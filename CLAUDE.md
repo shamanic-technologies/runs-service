@@ -1325,6 +1325,13 @@ is ABNORMAL loss, in no unit cost (IAS 2 section 16). `src/services/lead-states.
   no unit cost; outcome-costs serves it as `producedElsewhere[]` (TOTAL = produced + these, $ each on produced only). Days stored
   before it (`cost_ledger_computed_days.other_factories`) recompute with the ladder ones; only outcome-costs lists them missing.
   Guard: `tests/integration/ledger-other-factory-units.test.ts`.
+- **Every reach counts, whatever its date (migration 0119, TODAY-MEETINGS-1117; owner 2026-11-07: every conversion counts, the
+  same figure on the client's dashboard and on our homepage)**: a reach's Unit counts on its own UTC day, except a reach dated
+  BEFORE the ledger's first stored day (`firstLedgerDay`, 2026-02-02 in prod) = counted on that first day (opening balance), and a
+  reach lead-service serves with NO date = counted on the day this ledger first received it (`lead_state_reaches.received_at`,
+  never moved by a sync), never before the first day (`reachUnitAtSql`, units + ladder + both staleness reads). Doc Dinners' Today
+  read 63 booked meetings of 173 (110 dated 2024-08..2026-01). Attribution kept (ours in produced, others in producedElsewhere).
+  Guard: `tests/integration/ledger-reach-opening-balance.test.ts`.
 - Tests default to the served step map and NO pipe target (`tests/setup.ts`), so every other test reads v4. Guard:
   `tests/integration/lead-states.test.ts` (Marie: send before the yes -> unit, after -> abnormal, non-answers ride the yes,
   visit priced apart, a moved reach stales the day).
