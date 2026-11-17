@@ -42,17 +42,29 @@ const INTERVALS = new Set(["day", "week", "month"]);
  * served at its own instant, so it never lands before its version: the opening
  * changes nothing for it. Exact when the version that priced the row is the
  * first one carrying that price (true for every late row in prod, 2026-10-31).
+ *
+ * A version offers TWO prices since costs-service PRICE-X1-1029: the grandfathered
+ * (x2) billed price and the standard (x1) one. A row froze whichever list its org
+ * pays, so each price is its own candidate with the version's vendor cost, in its own
+ * (name, price) window. Matching only the x2 price left every x1 row unpriced: 28 %
+ * of fleet billed spend the week of 2026-11-09, after our own org moved to x1
+ * (VENDOR-UNPRICED-1117).
  */
 export function versionWindowsSql(versions: VendorCostVersion[]) {
-  const rows = versions
-    .filter((v) => v.billedUnitCostInUsdCents !== null)
-    .map((v) => ({
+  const rows = versions.flatMap((v) => {
+    const prices = [v.billedUnitCostInUsdCents, v.standardUnitCostInUsdCents ?? null].filter(
+      (p): p is string => p !== null,
+    );
+    // A version that states the same figure on both lists (pass-through) is ONE candidate.
+    const distinct = prices.filter((p, i) => prices.findIndex((q) => new Decimal(q).eq(p)) === i);
+    return distinct.map((billed) => ({
       cost_name: v.costName,
-      billed: v.billedUnitCostInUsdCents,
+      billed,
       vendor: v.vendorUnitCostInUsdCents,
       served_from: v.servedFrom,
       provider: v.provider,
     }));
+  });
   return sql`
     -- Ties on served_from: the earlier tied rows keep their empty window, so
     -- only the LAST of the first instant's ties opens at -infinity.

@@ -16,6 +16,7 @@ const VERSION = {
   pricingBasis: "marked-up",
   pricingRegime: null,
   billedPricePerUnitInUsdCents: "0.0005000000",
+  standardPricePerUnitInUsdCents: "0.0002500000",
   vendorCostPerUnitInUsdCents: "0.0001000000",
   vendorCostKnown: true,
   vendorCostUnknownReason: null,
@@ -47,7 +48,7 @@ describe("fetchVendorCostCatalog", () => {
       versions: [
         VERSION,
         { ...VERSION, name: "x", vendorCostPerUnitInUsdCents: null, vendorCostKnown: false, vendorCostUnknownReason: "no-evidence" },
-        { ...VERSION, name: "delisted", billedPricePerUnitInUsdCents: null, vendorCostPerUnitInUsdCents: null, vendorCostKnown: false },
+        { ...VERSION, name: "delisted", billedPricePerUnitInUsdCents: null, standardPricePerUnitInUsdCents: null, vendorCostPerUnitInUsdCents: null, vendorCostKnown: false },
       ],
     });
     globalThis.fetch = f as any;
@@ -57,14 +58,20 @@ describe("fetchVendorCostCatalog", () => {
       headers: { "x-api-key": "test-costs-key" },
     }));
     expect(versions).toEqual([
-      { costName: VERSION.name, provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: "0.0001000000" },
-      { costName: "x", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", vendorUnitCostInUsdCents: null },
-      { costName: "delisted", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: null, vendorUnitCostInUsdCents: null },
+      { costName: VERSION.name, provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", standardUnitCostInUsdCents: "0.0002500000", vendorUnitCostInUsdCents: "0.0001000000" },
+      { costName: "x", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: "0.0005000000", standardUnitCostInUsdCents: "0.0002500000", vendorUnitCostInUsdCents: null },
+      { costName: "delisted", provider: "anthropic", servedFrom: "2026-09-15T09:02:11.000Z", billedUnitCostInUsdCents: null, standardUnitCostInUsdCents: null, vendorUnitCostInUsdCents: null },
     ]);
 
     // cached: a second read does not refetch
     await fetchVendorCostCatalog();
     expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails loud when a version does not state its standard (x1) price (VENDOR-UNPRICED-1117)", async () => {
+    const { standardPricePerUnitInUsdCents: _omit, ...withoutStandard } = VERSION;
+    globalThis.fetch = mockFetch(200, { versions: [withoutStandard] }) as any;
+    await expect(fetchVendorCostCatalog()).rejects.toThrow(/standard \(x1\) price/);
   });
 
   it("fails loud on a non-OK answer", async () => {
