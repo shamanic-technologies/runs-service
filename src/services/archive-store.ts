@@ -51,6 +51,10 @@ export interface R2Credentials {
 export class R2ArchiveStore implements ArchiveStore {
   private readonly s3: S3Client;
 
+  get bucketName(): string {
+    return this.creds.bucketName;
+  }
+
   constructor(private readonly creds: R2Credentials) {
     this.s3 = new S3Client({
       region: "auto",
@@ -93,15 +97,23 @@ export class R2ArchiveStore implements ArchiveStore {
   }
 }
 
-/** Thrown when key-service has no R2 platform key: the job is a logged no-op, never a crash. */
+/** Thrown when key-service has no R2 credentials at all: the job is a logged no-op, never a crash. */
 export class R2NotConfiguredError extends Error {}
 
 /**
- * R2 credentials from key-service PLATFORM keys, the same ones cloudflare-service's
- * pg-backup job reads (`cloudflare-r2-*`). No env var of our own: runs-service
- * already holds KEY_SERVICE_URL + KEY_SERVICE_API_KEY.
+ * The PRIVATE bucket the archive lives in (SECRETS-ROTATE-1127). The platform key
+ * `cloudflare-r2-bucket-name` names the PUBLIC bucket (its r2.dev domain serves every
+ * object to anyone): the archive holds runs, costs and orgs, so it never goes there.
  */
-export async function loadR2CredentialsFromKeyService(callerPath: string): Promise<R2Credentials> {
+export const ARCHIVE_BUCKET_KEY = "cloudflare-r2-private-bucket-name";
+
+/**
+ * R2 credentials from key-service PLATFORM keys (`cloudflare-r2-*`, shared with
+ * cloudflare-service) + the PRIVATE bucket name. No env var of our own: runs-service
+ * already holds KEY_SERVICE_URL + KEY_SERVICE_API_KEY. The private bucket name has no
+ * fallback: missing = a loud error on every tick, never a write to the public bucket.
+ */
+export async function loadArchiveR2Credentials(callerPath: string): Promise<R2Credentials> {
   const url = process.env.KEY_SERVICE_URL;
   const apiKey = process.env.KEY_SERVICE_API_KEY;
   if (!url || !apiKey) {
@@ -116,7 +128,14 @@ export async function loadR2CredentialsFromKeyService(callerPath: string): Promi
         "x-caller-path": callerPath,
       },
     });
-    if (res.status === 404) throw new R2NotConfiguredError(`key-service has no platform key ${provider}`);
+    if (res.status === 404) {
+      if (provider === ARCHIVE_BUCKET_KEY) {
+        throw new Error(
+          `key-service has no platform key ${ARCHIVE_BUCKET_KEY}: the lifecycle archive refuses to run (it never falls back to the public bucket)`,
+        );
+      }
+      throw new R2NotConfiguredError(`key-service has no platform key ${provider}`);
+    }
     if (!res.ok) throw new Error(`key-service ${provider} decrypt failed: ${res.status} ${await res.text()}`);
     const body = (await res.json()) as { key?: string };
     if (!body.key) throw new Error(`key-service ${provider} decrypt returned no key`);
@@ -126,7 +145,12 @@ export async function loadR2CredentialsFromKeyService(callerPath: string): Promi
     read("cloudflare-r2-account-id"),
     read("cloudflare-r2-access-key-id"),
     read("cloudflare-r2-secret-access-key"),
-    read("cloudflare-r2-bucket-name"),
+    read(ARCHIVE_BUCKET_KEY),
   ]);
   return { accountId, accessKeyId, secretAccessKey, bucketName };
+}
+
+/** The archive store every path uses (job write + read-back + finish-delete, restore). */
+export async function loadArchiveStore(callerPath: string): Promise<R2ArchiveStore> {
+  return new R2ArchiveStore(await loadArchiveR2Credentials(callerPath));
 }
