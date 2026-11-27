@@ -4,9 +4,8 @@ import { promisify } from "node:util";
 import { sql as defaultSql } from "../db/index.js";
 import {
   type ArchiveStore,
-  R2ArchiveStore,
   R2NotConfiguredError,
-  loadR2CredentialsFromKeyService,
+  loadArchiveStore,
 } from "./archive-store.js";
 
 const gzip = promisify(gzipCb);
@@ -389,7 +388,7 @@ export async function runLifecycleArchiveTick(storeFactory?: () => Promise<Archi
     try {
       store = storeFactory
         ? await storeFactory()
-        : new R2ArchiveStore(await loadR2CredentialsFromKeyService("/jobs/lifecycle-archive"));
+        : await loadArchiveStore("/jobs/lifecycle-archive");
     } catch (err) {
       if (err instanceof R2NotConfiguredError) {
         if (!loggedNotConfigured) console.warn(`[Runs Service] lifecycle archive is a no-op until R2 is configured: ${err.message}`);
