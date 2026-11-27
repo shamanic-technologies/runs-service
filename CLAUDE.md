@@ -1900,8 +1900,16 @@ Owner decision 2026-11-02: bronze lifecycle events (`run_lifecycle_events`,
 `cost_lifecycle_events`) older than the boundary (UTC midnight of the current
 month's 1st minus 90 days, so it moves monthly) move to Cloudflare R2, then are
 deleted. Nothing is lost: history is `runs-archive/<table>/<yyyy>/<mm>/<dd>[-partN].ndjson.gz`
-in bucket `cloudflare-r2-bucket-name` (key-service platform keys `cloudflare-r2-*`,
-the ones cloudflare-service's pg-backup reads; no env var of ours).
+in the PRIVATE bucket named by key-service platform key `cloudflare-r2-private-bucket-name`
+(`distribute-private`, no public domain; credentials = the other `cloudflare-r2-*` platform keys,
+no env var of ours). `loadArchiveStore` is the ONLY way any archive path (write, read-back,
+finish-delete, restore) gets a store; a missing private bucket key is a loud error every tick,
+never a fallback.
+- **Private data never goes to the public bucket (SECRETS-ROTATE-1127)**: `cloudflare-r2-bucket-name`
+  is the PUBLIC bucket (its r2.dev domain serves every object to anyone). Until 2026-11-27 the
+  archive (runs, costs, orgs) sat there; it was moved to `distribute-private` under the same keys.
+  Anything this service stores in R2 that is not meant for the public uses the private bucket.
+  Guard: `tests/unit/archive-store-private-bucket.test.ts`.
 `src/services/lifecycle-archive.ts`, started after `listen()`: first tick ~60 s, then 6 h.
 - **Chunk = one UTC day, ≤50k rows, ordered by id**; every column `::text` (µs kept).
   PUT, GET back, sha256 + row count + ordered ids must match, record in

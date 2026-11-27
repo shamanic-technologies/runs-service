@@ -13,7 +13,7 @@
 // events out of order onto silver (see src/services/lifecycle-archive-restore.ts).
 // `--allow-live` with `--target <table>` writes into the live bronze table anyway.
 
-import { R2ArchiveStore, loadR2CredentialsFromKeyService } from "../src/services/archive-store.js";
+import { loadArchiveStore } from "../src/services/archive-store.js";
 import { restoreLifecycleArchive } from "../src/services/lifecycle-archive-restore.js";
 import { sql } from "../src/db/index.js";
 
@@ -34,7 +34,7 @@ async function main() {
     console.error("usage: restore-lifecycle-archive.ts <table> <key-or-prefix> [--target <table>] [--allow-live]");
     process.exit(2);
   }
-  const store = new R2ArchiveStore(await loadR2CredentialsFromKeyService("/scripts/restore-lifecycle-archive"));
+  const store = await loadArchiveStore("/scripts/restore-lifecycle-archive");
   const res = await restoreLifecycleArchive(store, table, { keyOrPrefix, target, allowLive });
   console.log(`done: objects=${res.objects} rows=${res.rows} inserted=${res.inserted} into ${res.target}`);
 }
